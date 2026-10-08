@@ -1,0 +1,60 @@
+import { createRouter, createWebHashHistory } from "vue-router";
+
+export const routes = [
+  {
+    path: "/",
+    redirect: "/stocks",
+  },
+  {
+    path: "/stocks",
+    name: "stocks",
+    component: () => import("@/views/StockListView.vue"),
+    meta: { title: "股票列表", subtitle: "按市场与行业浏览全部 A 股 / 基金" },
+  },
+  {
+    path: "/boards",
+    name: "boards",
+    component: () => import("@/views/BoardsView.vue"),
+    meta: { title: "板块行情", subtitle: "申万行业与概念板块的涨跌、热度与成分股" },
+  },
+  {
+    path: "/kline",
+    name: "kline",
+    component: () => import("@/views/KlineView.vue"),
+    meta: { title: "K 线图表", subtitle: "日 / 周 / 月 / 年 K 线、均线与指标" },
+  },
+  {
+    path: "/finance",
+    name: "finance",
+    component: () => import("@/views/FinanceView.vue"),
+    meta: { title: "财务数据", subtitle: "财报科目、股本结构、股东户数与十大股东" },
+  },
+  {
+    path: "/indicators",
+    name: "indicators",
+    component: () => import("@/views/ComingSoonView.vue"),
+    meta: { title: "指标计算", subtitle: "MA / MACD / KDJ 等 39 种指标" },
+  },
+  {
+    path: "/screener",
+    name: "screener",
+    component: () => import("@/views/ScreenerView.vue"),
+    meta: { title: "条件选股", subtitle: "基础面 + 行业/概念板块 + 技术形态组合筛选" },
+  },
+  {
+    path: "/settings",
+    name: "settings",
+    component: () => import("@/views/DataSourceView.vue"),
+    meta: { title: "数据源设置", subtitle: "切换本地 / 远程 free-stockdb 服务" },
+  },
+  {
+    path: "/:pathMatch(.*)*",
+    name: "not-found",
+    redirect: "/stocks",
+  },
+];
+
+export const router = createRouter({
+  history: createWebHashHistory(),
+  routes,
+});

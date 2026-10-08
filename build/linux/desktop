@@ -1,0 +1,13 @@
+[Desktop Entry]
+Version=1.0
+Name=FreeStock
+Comment=A股本地量化数据工具
+# The Exec line includes %u to pass the URL to the application
+Exec=/usr/local/bin/freestock.exe %u
+Terminal=false
+Type=Application
+Icon=freestock.exe
+Categories=Utility;
+StartupWMClass=freestock.exe
+
+ 

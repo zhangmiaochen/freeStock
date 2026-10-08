@@ -1,0 +1,14 @@
+# pnpm 11 起，依赖的构建脚本默认被忽略，并以 ERR_PNPM_IGNORED_BUILDS 报错退出。
+# 这里显式放行前端依赖里确实需要执行安装脚本的两个包。
+#
+# 注意：pnpm 11 有时会自动生成这个文件，但值写成占位文本
+# "set this to true or false"；那样 install 会直接失败，必须改成真正的布尔值。
+#
+#   esbuild   —— vite 的打包内核，需要执行安装脚本准备原生二进制
+#   vue-demi  —— vue 2/3 兼容层，需要执行安装脚本切换对应版本
+#
+# 以后新增的依赖若也带安装脚本，pnpm 会再次报同样的错误，
+# 按提示把包名加到这里（或运行 pnpm approve-builds）即可。
+allowBuilds:
+  esbuild: true
+  vue-demi: true
