@@ -513,6 +513,17 @@ func daysToDate(days int32) int64 {
 	return int64(t.Year()*10000 + int(t.Month())*100 + t.Day())
 }
 
+// dateToDays 是 daysToDate 的逆运算：YYYYMMDD -> 1970 起的天数。
+// 用来把 DATE 列的值和调用方给的日期做等值比较。
+func dateToDays(date int64) int32 {
+	if date <= 0 {
+		return 0
+	}
+	year, month, day := int(date/10000), int(date/100%100), int(date%100)
+	t := time.Date(year, time.Month(month), day, 0, 0, 0, 0, time.UTC)
+	return int32(t.Sub(time.Unix(0, 0).UTC()).Hours() / 24)
+}
+
 func asString(value any) string {
 	switch typed := value.(type) {
 	case nil:

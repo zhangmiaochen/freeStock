@@ -95,6 +95,12 @@ type StockProfile struct {
 	MainNet5D    float64 `json:"mainNet5D"`    // 近 5 日主力净流入合计
 	MainNet20D   float64 `json:"mainNet20D"`   // 近 20 日主力净流入合计
 	MoneyFlowDay int64   `json:"moneyFlowDay"` // 资金流最新日期
+
+	// Boards 是所属板块名，按分类优先级排序（申万一级在最前）。
+	//
+	// 板块成分名单只有"当前"这一份（数据源没有历史版本），
+	// 所以这是**当前**的板块归属，与 K 线显示的日期无关。
+	Boards []string `json:"boards"`
 }
 
 // MoneyFlowPoint 是给图表用的资金流点（日期 + 各口径净流入）。
@@ -109,14 +115,14 @@ type MoneyFlowPoint struct {
 
 // KlineBundle 是 K 线页面一次加载所需的全部数据。
 type KlineBundle struct {
-	Code       string            `json:"code"`
-	Name       string            `json:"name"`
-	Adjust     string            `json:"adjust"`
-	Profile    StockProfile      `json:"profile"`
-	Candles    []KlineCandle     `json:"candles"`
-	Dividends  []stockdb.Factor  `json:"dividends"`
-	MoneyFlows []MoneyFlowPoint  `json:"moneyFlows"`
-	Notes      []string          `json:"notes"`
+	Code       string           `json:"code"`
+	Name       string           `json:"name"`
+	Adjust     string           `json:"adjust"`
+	Profile    StockProfile     `json:"profile"`
+	Candles    []KlineCandle    `json:"candles"`
+	Dividends  []stockdb.Factor `json:"dividends"`
+	MoneyFlows []MoneyFlowPoint `json:"moneyFlows"`
+	Notes      []string         `json:"notes"`
 }
 
 // ---------------------------------------------------------------------------
@@ -378,6 +384,13 @@ func (s *StockService) GetKline(code, adjust string, startYear int) (*KlineBundl
 
 	latest := quotes[len(quotes)-1]
 	profile := buildProfile(code, latest, factors, tradeDate)
+
+	// 所属板块（申万行业 + 概念）。板块是展示信息，取不到不影响 K 线本身。
+	if names, err := s.boardsForCodes([]string{code}); err != nil {
+		slog.Warn("读取板块名失败", "code", code, "err", err)
+	} else {
+		profile.Boards = names[code]
+	}
 
 	notes := []string{
 		"ROE / EPS / BPS / 净利润 / 净资产 由日K的 PE_TTM 与 PB 推导（ROE = PB ÷ PE），TTM 口径、逐日更新，非财报口径。",

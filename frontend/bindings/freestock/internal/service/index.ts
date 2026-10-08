@@ -22,6 +22,7 @@ export {
     KlineBundle,
     KlineCandle,
     KlinePrefsInfo,
+    LakeScreenCondition,
     MACondition,
     MAValue,
     MarketInfo,

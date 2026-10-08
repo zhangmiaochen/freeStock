@@ -16,7 +16,16 @@ import { cn } from "@/lib/utils";
 const props = defineProps<{ items: ScreenItem[] }>();
 const emit = defineEmits<{ select: [ScreenItem] }>();
 
-type SortKey = "code" | "pctChg" | "totalMV" | "peTTM" | "pb" | "roe" | "turnover" | "drawdownPct";
+type SortKey = "code" | "pctChg" | "totalMV" | "peTTM" | "pb" | "roe" | "turnover" | "drawdownPct" | "ps" | "institution" | "quarterGrowth" | "relativeStrength";
+
+/**
+ * 数据湖指标的列按需出现：数据集没入库时这些字段全是 0，
+ * 显示一整列 0 只会让人困惑。
+ */
+const hasPS = computed(() => props.items.some((item) => item.ps !== 0));
+const hasInstitution = computed(() => props.items.some((item) => item.institution !== 0));
+const hasGrowth = computed(() => props.items.some((item) => item.quarterGrowth !== 0));
+const hasRS = computed(() => props.items.some((item) => item.relativeStrength !== 0));
 
 const sortKey = ref<SortKey>("code");
 const sortAsc = ref(true);
@@ -53,6 +62,16 @@ const columns: { key: SortKey; label: string; align: "left" | "right" }[] = [
   { key: "turnover", label: "换手率", align: "right" },
 ];
 
+/** 数据湖指标的可排序列（按需追加到表头后面） */
+const lakeColumns = computed(() => {
+  const out: { key: SortKey; label: string }[] = [];
+  if (hasPS.value) out.push({ key: "ps", label: "市销率" });
+  if (hasInstitution.value) out.push({ key: "institution", label: "机构%" });
+  if (hasGrowth.value) out.push({ key: "quarterGrowth", label: "季报增长" });
+  if (hasRS.value) out.push({ key: "relativeStrength", label: "RS" });
+  return out;
+});
+
 function pctClass(value: number) {
   if (!Number.isFinite(value) || value === 0) return "text-flat";
   return value > 0 ? "text-up" : "text-down";
@@ -78,6 +97,18 @@ function pctClass(value: number) {
               </span>
             </th>
             <th class="px-2.5 py-2 text-left font-medium">名称</th>
+            <th
+              v-for="column in lakeColumns"
+              :key="column.key"
+              class="cursor-pointer px-2.5 py-2 text-right font-medium select-none"
+              :title="column.key === 'relativeStrength' ? '相对强度：个股涨幅 − 对标指数涨幅' : ''"
+              @click="toggleSort(column.key)"
+            >
+              <span class="inline-flex items-center gap-1">
+                {{ column.label }}
+                <ArrowUpDown v-if="sortKey === column.key" class="size-3" :class="sortAsc ? 'rotate-180' : ''" />
+              </span>
+            </th>
             <th class="px-2.5 py-2 text-left font-medium">板块</th>
           </tr>
         </thead>
@@ -111,6 +142,30 @@ function pctClass(value: number) {
                 <span class="max-w-[140px] truncate">{{ item.name || "—" }}</span>
                 <Badge v-if="item.isST" variant="destructive" class="px-1 py-0 text-[10px]">ST</Badge>
               </span>
+            </td>
+            <td
+              v-if="hasPS"
+              class="tabular px-2.5 py-1.5 text-right"
+            >
+              {{ item.ps ? item.ps.toFixed(2) : "—" }}
+            </td>
+            <td v-if="hasInstitution" class="tabular px-2.5 py-1.5 text-right">
+              {{ item.institution ? `${item.institution.toFixed(2)}%` : "—" }}
+            </td>
+            <td
+              v-if="hasGrowth"
+              class="tabular px-2.5 py-1.5 text-right"
+              :class="item.quarterGrowth > 0 ? 'text-up' : item.quarterGrowth < 0 ? 'text-down' : ''"
+            >
+              {{ item.quarterGrowth ? `${item.quarterGrowth.toFixed(2)}%` : "—" }}
+            </td>
+            <td
+              v-if="hasRS"
+              class="tabular px-2.5 py-1.5 text-right"
+              :class="pctClass(item.relativeStrength)"
+              :title="item.benchmark ? `对标 ${item.benchmark}` : ''"
+            >
+              {{ formatPercent(item.relativeStrength) }}
             </td>
             <td class="px-2.5 py-1.5">
               <span v-if="item.boards?.length" class="text-muted-foreground text-[11px]">

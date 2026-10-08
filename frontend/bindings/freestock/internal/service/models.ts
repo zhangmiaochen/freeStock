@@ -1014,6 +1014,53 @@ export class KlinePrefsInfo {
 }
 
 /**
+ * LakeScreenCondition 是需要 cnequity 数据湖才能生效的条件。
+ * 
+ * 字段已经对接好了，但**数据集可能尚未入库**。界面要如实显示这个状态：
+ * "字段已对接 / 数据未入库"和"根本不支持"是两回事。
+ */
+export class LakeScreenCondition {
+    "name": string;
+    "dataset": string;
+    "field": string;
+
+    /**
+     * Available 表示该数据集当前是否已入库
+     */
+    "available": boolean;
+    "note": string;
+
+    /** Creates a new LakeScreenCondition instance. */
+    constructor($$source: Partial<LakeScreenCondition> = {}) {
+        if (!("name" in $$source)) {
+            this["name"] = "";
+        }
+        if (!("dataset" in $$source)) {
+            this["dataset"] = "";
+        }
+        if (!("field" in $$source)) {
+            this["field"] = "";
+        }
+        if (!("available" in $$source)) {
+            this["available"] = false;
+        }
+        if (!("note" in $$source)) {
+            this["note"] = "";
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new LakeScreenCondition instance from a string or object.
+     */
+    static createFrom($$source: any = {}): LakeScreenCondition {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new LakeScreenCondition($$parsedSource as Partial<LakeScreenCondition>);
+    }
+}
+
+/**
  * MACondition 一条均线比较条件，例如 MA5 > MA10。
  * 多条之间是 AND（与原项目一致）。
  */
@@ -1333,6 +1380,25 @@ export class ScreenCondition {
     "hasQuoteOnly": boolean;
 
     /**
+     * MinPS/MaxPS 市销率（valuation_metrics.ps_ttm）
+     */
+    "minPS": number;
+    "maxPS": number;
+
+    /**
+     * MinInstitution/MaxInstitution 机构参与度 %：
+     * top_holders 里 is_institution 的**流通股东**持股比例合计
+     */
+    "minInstitution": number;
+    "maxInstitution": number;
+
+    /**
+     * MinQuarterGrowth 单季归母净利润同比增长率 %：
+     * financial_statement_items 里 statement_type=income + item_code=net_profit
+     */
+    "minQuarterGrowth": number;
+
+    /**
      * ---- 板块层 ----
      */
     "boardFilters": BoardFilter[];
@@ -1355,9 +1421,26 @@ export class ScreenCondition {
     "maxDrawdown": number;
 
     /**
+     * EnableRelativeStrength 相对强度 RS = 个股 N 日涨幅 − 对标指数 N 日涨幅。
+     * 对标指数取自数据湖的 index_bars（free-stockdb 没有指数行情）。
+     */
+    "enableRelativeStrength": boolean;
+    "relativeStrengthDays": number;
+    "minRelativeStrength": number;
+
+    /**
      * Limit 限制返回条数，<=0 表示不限
      */
     "limit": number;
+
+    /**
+     * TradeDate 指定筛选所用的交易日（YYYYMMDD）。
+     * 
+     * 0 表示用最新交易日。指定时会落到**该日或之前最近一个有数据的交易日** ——
+     * 用户填的那天可能不是交易日，更常见的是当天数据还没同步，
+     * 这时按"指定日期或之前"取数才有意义。
+     */
+    "tradeDate": number;
 
     /** Creates a new ScreenCondition instance. */
     constructor($$source: Partial<ScreenCondition> = {}) {
@@ -1424,6 +1507,21 @@ export class ScreenCondition {
         if (!("hasQuoteOnly" in $$source)) {
             this["hasQuoteOnly"] = false;
         }
+        if (!("minPS" in $$source)) {
+            this["minPS"] = 0;
+        }
+        if (!("maxPS" in $$source)) {
+            this["maxPS"] = 0;
+        }
+        if (!("minInstitution" in $$source)) {
+            this["minInstitution"] = 0;
+        }
+        if (!("maxInstitution" in $$source)) {
+            this["maxInstitution"] = 0;
+        }
+        if (!("minQuarterGrowth" in $$source)) {
+            this["minQuarterGrowth"] = 0;
+        }
         if (!("boardFilters" in $$source)) {
             this["boardFilters"] = [];
         }
@@ -1442,8 +1540,20 @@ export class ScreenCondition {
         if (!("maxDrawdown" in $$source)) {
             this["maxDrawdown"] = 0;
         }
+        if (!("enableRelativeStrength" in $$source)) {
+            this["enableRelativeStrength"] = false;
+        }
+        if (!("relativeStrengthDays" in $$source)) {
+            this["relativeStrengthDays"] = 0;
+        }
+        if (!("minRelativeStrength" in $$source)) {
+            this["minRelativeStrength"] = 0;
+        }
         if (!("limit" in $$source)) {
             this["limit"] = 0;
+        }
+        if (!("tradeDate" in $$source)) {
+            this["tradeDate"] = 0;
         }
 
         Object.assign(this, $$source);
@@ -1454,17 +1564,17 @@ export class ScreenCondition {
      */
     static createFrom($$source: any = {}): ScreenCondition {
         const $$createField19_0 = $$createType0;
-        const $$createField21_0 = $$createType31;
-        const $$createField22_0 = $$createType33;
+        const $$createField26_0 = $$createType31;
+        const $$createField27_0 = $$createType33;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("markets" in $$parsedSource) {
             $$parsedSource["markets"] = $$createField19_0($$parsedSource["markets"]);
         }
         if ("boardFilters" in $$parsedSource) {
-            $$parsedSource["boardFilters"] = $$createField21_0($$parsedSource["boardFilters"]);
+            $$parsedSource["boardFilters"] = $$createField26_0($$parsedSource["boardFilters"]);
         }
         if ("maConditions" in $$parsedSource) {
-            $$parsedSource["maConditions"] = $$createField22_0($$parsedSource["maConditions"]);
+            $$parsedSource["maConditions"] = $$createField27_0($$parsedSource["maConditions"]);
         }
         return new ScreenCondition($$parsedSource as Partial<ScreenCondition>);
     }
@@ -1522,10 +1632,32 @@ export class ScreenItem {
     "volumeRatio": number;
     "peTTM": number;
     "pb": number;
+    "ps": number;
     "roe": number;
     "totalMV": number;
     "floatMV": number;
     "isST": boolean;
+
+    /**
+     * 来自数据湖的指标（对应数据集未入库时保持 0）
+     * 机构参与度 %
+     */
+    "institution": number;
+
+    /**
+     * 单季归母净利润同比 %
+     */
+    "quarterGrowth": number;
+
+    /**
+     * 相对强度 %
+     */
+    "relativeStrength": number;
+
+    /**
+     * Benchmark 是算 RS 时用的对标指数（例如 399006.SZ）
+     */
+    "benchmark": string;
 
     /**
      * Boards 是命中的板块名（用于回答"它为什么被选出来"）
@@ -1573,6 +1705,9 @@ export class ScreenItem {
         if (!("pb" in $$source)) {
             this["pb"] = 0;
         }
+        if (!("ps" in $$source)) {
+            this["ps"] = 0;
+        }
         if (!("roe" in $$source)) {
             this["roe"] = 0;
         }
@@ -1584,6 +1719,18 @@ export class ScreenItem {
         }
         if (!("isST" in $$source)) {
             this["isST"] = false;
+        }
+        if (!("institution" in $$source)) {
+            this["institution"] = 0;
+        }
+        if (!("quarterGrowth" in $$source)) {
+            this["quarterGrowth"] = 0;
+        }
+        if (!("relativeStrength" in $$source)) {
+            this["relativeStrength"] = 0;
+        }
+        if (!("benchmark" in $$source)) {
+            this["benchmark"] = "";
         }
         if (!("boards" in $$source)) {
             this["boards"] = [];
@@ -1602,30 +1749,45 @@ export class ScreenItem {
      * Creates a new ScreenItem instance from a string or object.
      */
     static createFrom($$source: any = {}): ScreenItem {
-        const $$createField15_0 = $$createType0;
-        const $$createField17_0 = $$createType36;
+        const $$createField20_0 = $$createType0;
+        const $$createField22_0 = $$createType36;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("boards" in $$parsedSource) {
-            $$parsedSource["boards"] = $$createField15_0($$parsedSource["boards"]);
+            $$parsedSource["boards"] = $$createField20_0($$parsedSource["boards"]);
         }
         if ("maValues" in $$parsedSource) {
-            $$parsedSource["maValues"] = $$createField17_0($$parsedSource["maValues"]);
+            $$parsedSource["maValues"] = $$createField22_0($$parsedSource["maValues"]);
         }
         return new ScreenItem($$parsedSource as Partial<ScreenItem>);
     }
 }
 
 /**
- * ScreenOptions 汇总界面需要知道的信息：可选分类、支持的市场、不支持的条件。
+ * ScreenOptions 汇总界面需要知道的信息：可选分类、支持的市场、条件的数据可用性。
  */
 export class ScreenOptions {
     "categories": BoardCategoryInfo[];
     "markets": MarketInfo[];
 
     /**
-     * Unsupported 列出数据源不支持、因此无法移植的条件及原因
+     * Unsupported 列出数据源完全没有字段、无法实现的条件
      */
     "unsupported": string[];
+
+    /**
+     * LakeConditions 列出依赖数据湖的条件，以及数据集是否已入库
+     */
+    "lakeConditions": LakeScreenCondition[];
+
+    /**
+     * LakeAvailable 表示当前是否有可用的 cnequity 数据湖
+     */
+    "lakeAvailable": boolean;
+
+    /**
+     * LakeRoot 是数据湖路径（便于界面提示去哪配置）
+     */
+    "lakeRoot": string;
 
     /**
      * Defaults 是首次使用时的默认条件
@@ -1643,6 +1805,15 @@ export class ScreenOptions {
         if (!("unsupported" in $$source)) {
             this["unsupported"] = [];
         }
+        if (!("lakeConditions" in $$source)) {
+            this["lakeConditions"] = [];
+        }
+        if (!("lakeAvailable" in $$source)) {
+            this["lakeAvailable"] = false;
+        }
+        if (!("lakeRoot" in $$source)) {
+            this["lakeRoot"] = "";
+        }
         if (!("defaults" in $$source)) {
             this["defaults"] = (new ScreenCondition());
         }
@@ -1657,7 +1828,8 @@ export class ScreenOptions {
         const $$createField0_0 = $$createType38;
         const $$createField1_0 = $$createType40;
         const $$createField2_0 = $$createType0;
-        const $$createField3_0 = $$createType34;
+        const $$createField3_0 = $$createType42;
+        const $$createField6_0 = $$createType34;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("categories" in $$parsedSource) {
             $$parsedSource["categories"] = $$createField0_0($$parsedSource["categories"]);
@@ -1668,8 +1840,11 @@ export class ScreenOptions {
         if ("unsupported" in $$parsedSource) {
             $$parsedSource["unsupported"] = $$createField2_0($$parsedSource["unsupported"]);
         }
+        if ("lakeConditions" in $$parsedSource) {
+            $$parsedSource["lakeConditions"] = $$createField3_0($$parsedSource["lakeConditions"]);
+        }
         if ("defaults" in $$parsedSource) {
-            $$parsedSource["defaults"] = $$createField3_0($$parsedSource["defaults"]);
+            $$parsedSource["defaults"] = $$createField6_0($$parsedSource["defaults"]);
         }
         return new ScreenOptions($$parsedSource as Partial<ScreenOptions>);
     }
@@ -1698,6 +1873,11 @@ export class ScreenResult {
     "boardPassed": number;
 
     /**
+     * LakePassed 再通过数据湖层（市销率/机构参与度/季报增长）的数量
+     */
+    "lakePassed": number;
+
+    /**
      * TechPassed 再通过技术层的数量（= 最终命中数）
      */
     "techPassed": number;
@@ -1713,6 +1893,16 @@ export class ScreenResult {
      * Notes 说明哪些条件没有生效、为什么 —— 不能静默忽略
      */
     "notes": string[];
+
+    /**
+     * RequestedDate 是用户指定的日期（0 表示未指定）
+     */
+    "requestedDate": number;
+
+    /**
+     * Historical 表示这次筛选用的是历史交易日而不是最新交易日
+     */
+    "historical": boolean;
 
     /** Creates a new ScreenResult instance. */
     constructor($$source: Partial<ScreenResult> = {}) {
@@ -1731,6 +1921,9 @@ export class ScreenResult {
         if (!("boardPassed" in $$source)) {
             this["boardPassed"] = 0;
         }
+        if (!("lakePassed" in $$source)) {
+            this["lakePassed"] = 0;
+        }
         if (!("techPassed" in $$source)) {
             this["techPassed"] = 0;
         }
@@ -1746,6 +1939,12 @@ export class ScreenResult {
         if (!("notes" in $$source)) {
             this["notes"] = [];
         }
+        if (!("requestedDate" in $$source)) {
+            this["requestedDate"] = 0;
+        }
+        if (!("historical" in $$source)) {
+            this["historical"] = false;
+        }
 
         Object.assign(this, $$source);
     }
@@ -1754,14 +1953,14 @@ export class ScreenResult {
      * Creates a new ScreenResult instance from a string or object.
      */
     static createFrom($$source: any = {}): ScreenResult {
-        const $$createField0_0 = $$createType42;
-        const $$createField9_0 = $$createType0;
+        const $$createField0_0 = $$createType44;
+        const $$createField10_0 = $$createType0;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("items" in $$parsedSource) {
             $$parsedSource["items"] = $$createField0_0($$parsedSource["items"]);
         }
         if ("notes" in $$parsedSource) {
-            $$parsedSource["notes"] = $$createField9_0($$parsedSource["notes"]);
+            $$parsedSource["notes"] = $$createField10_0($$parsedSource["notes"]);
         }
         return new ScreenResult($$parsedSource as Partial<ScreenResult>);
     }
@@ -2081,6 +2280,14 @@ export class StockProfile {
      */
     "moneyFlowDay": number;
 
+    /**
+     * Boards 是所属板块名，按分类优先级排序（申万一级在最前）。
+     * 
+     * 板块成分名单只有"当前"这一份（数据源没有历史版本），
+     * 所以这是**当前**的板块归属，与 K 线显示的日期无关。
+     */
+    "boards": string[];
+
     /** Creates a new StockProfile instance. */
     constructor($$source: Partial<StockProfile> = {}) {
         if (!("code" in $$source)) {
@@ -2194,6 +2401,9 @@ export class StockProfile {
         if (!("moneyFlowDay" in $$source)) {
             this["moneyFlowDay"] = 0;
         }
+        if (!("boards" in $$source)) {
+            this["boards"] = [];
+        }
 
         Object.assign(this, $$source);
     }
@@ -2202,7 +2412,11 @@ export class StockProfile {
      * Creates a new StockProfile instance from a string or object.
      */
     static createFrom($$source: any = {}): StockProfile {
+        const $$createField37_0 = $$createType0;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        if ("boards" in $$parsedSource) {
+            $$parsedSource["boards"] = $$createField37_0($$parsedSource["boards"]);
+        }
         return new StockProfile($$parsedSource as Partial<StockProfile>);
     }
 }
@@ -2315,7 +2529,7 @@ export class StockUniverse {
      */
     static createFrom($$source: any = {}): StockUniverse {
         const $$createField7_0 = $$createType40;
-        const $$createField8_0 = $$createType44;
+        const $$createField8_0 = $$createType46;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("markets" in $$parsedSource) {
             $$parsedSource["markets"] = $$createField7_0($$parsedSource["markets"]);
@@ -2418,7 +2632,9 @@ const $$createType37 = BoardCategoryInfo.createFrom;
 const $$createType38 = $Create.Array($$createType37);
 const $$createType39 = MarketInfo.createFrom;
 const $$createType40 = $Create.Array($$createType39);
-const $$createType41 = ScreenItem.createFrom;
+const $$createType41 = LakeScreenCondition.createFrom;
 const $$createType42 = $Create.Array($$createType41);
-const $$createType43 = StockItem.createFrom;
+const $$createType43 = ScreenItem.createFrom;
 const $$createType44 = $Create.Array($$createType43);
+const $$createType45 = StockItem.createFrom;
+const $$createType46 = $Create.Array($$createType45);

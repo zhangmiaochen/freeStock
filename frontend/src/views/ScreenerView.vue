@@ -58,7 +58,16 @@ function emptyCondition(): ScreenCondition {
     enableDrawdown: false,
     drawdownDays: 30,
     minDrawdown: 0, maxDrawdown: 0,
+    // 数据湖条件
+    minPS: 0, maxPS: 0,
+    minInstitution: 0, maxInstitution: 0,
+    minQuarterGrowth: 0,
+    enableRelativeStrength: false,
+    relativeStrengthDays: 20,
+    minRelativeStrength: 0,
     limit: 0,
+    // 0 = 用最新交易日
+    tradeDate: 0,
   } as ScreenCondition;
 }
 
@@ -79,6 +88,11 @@ const activeCount = computed(() => {
   count += c.boardFilters.filter((f) => f.names.length > 0).length;
   count += c.maConditions.filter((m) => m.fast > 0 && m.slow > 0).length;
   if (c.enableDrawdown && c.drawdownDays >= 2) count++;
+  // 数据湖条件
+  if (c.minPS !== 0 || c.maxPS !== 0) count++;
+  if (c.minInstitution !== 0 || c.maxInstitution !== 0) count++;
+  if (c.minQuarterGrowth !== 0) count++;
+  if (c.enableRelativeStrength) count++;
   return count;
 });
 
@@ -106,6 +120,13 @@ function reset() {
 
 function openKline(item: ScreenItem) {
   void router.push({ path: "/kline", query: { code: item.code } });
+}
+
+/** 后端用 YYYYMMDD 整数传交易日，展示时补上分隔符 */
+function formatTradeDate(value: number): string {
+  const text = String(value ?? "");
+  if (text.length !== 8) return text || "—";
+  return `${text.slice(0, 4)}-${text.slice(4, 6)}-${text.slice(6, 8)}`;
 }
 
 // ---- 条件自动保存（防抖，避免每敲一个数字就写盘） ----
@@ -219,9 +240,16 @@ onBeforeUnmount(() => {
       </div>
 
       <!-- 统计条 -->
-      <div v-if="result" class="flex shrink-0 flex-wrap items-center gap-x-5 gap-y-1 border-b px-4 py-2 text-xs">
+      <div
+        v-if="result"
+        data-testid="screen-stats"
+        class="flex shrink-0 flex-wrap items-center gap-x-5 gap-y-1 border-b px-4 py-2 text-xs"
+      >
         <span class="text-muted-foreground">
-          交易日 <b class="text-foreground">{{ result.tradeDate }}</b>
+          交易日
+          <b class="text-foreground">{{ formatTradeDate(result.tradeDate) }}</b>
+          <Badge v-if="result.historical" variant="default" class="ml-1 text-[10px]">历史</Badge>
+          <Badge v-else variant="secondary" class="ml-1 text-[10px]">最新</Badge>
         </span>
         <span class="text-muted-foreground">
           扫描 <b class="text-foreground">{{ result.scanned }}</b>
@@ -231,6 +259,12 @@ onBeforeUnmount(() => {
         </span>
         <span v-if="result.boardPassed !== result.snapshotPassed" class="text-muted-foreground">
           板块条件后 <b class="text-foreground">{{ result.boardPassed }}</b>
+        </span>
+        <span
+          v-if="result.lakePassed !== undefined && result.lakePassed !== result.boardPassed"
+          class="text-muted-foreground"
+        >
+          数据湖条件后 <b class="text-foreground">{{ result.lakePassed }}</b>
         </span>
         <span v-if="result.historyEvaluated" class="text-muted-foreground">
           技术条件后 <b class="text-foreground">{{ result.techPassed }}</b>

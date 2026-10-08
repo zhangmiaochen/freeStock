@@ -1,6 +1,7 @@
 package cnlake
 
 import (
+	"fmt"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -359,6 +360,140 @@ func (l *Lake) Valuations(code string, startYear, endYear int) ([]ValuationRow, 
 	return rows, err
 }
 
+// IndexBarRow 是 index_bars 的一行（指数日线）。
+//
+// 注意 index_bars 的分区粒度是**年**（trade_date=2023），
+// 而 daily_bars 是**按日**（trade_date=2016-01-04）。
+// partitionYear 只取分区值前 4 位，所以两者都适用，不需要区分处理。
+type IndexBarRow struct {
+	Symbol    string  `parquet:"symbol"`
+	TradeDate int32   `parquet:"trade_date,date"`
+	Open      float64 `parquet:"open"`
+	High      float64 `parquet:"high"`
+	Low       float64 `parquet:"low"`
+	Close     float64 `parquet:"close"`
+	Volume    float64 `parquet:"volume"`
+	Amount    float64 `parquet:"amount"`
+}
+
+// Date 返回 YYYYMMDD。
+func (r IndexBarRow) Date() int64 { return daysToDate(r.TradeDate) }
+
+// IndexBars 读取某个指数在 [startYear, endYear] 内的日线，按日期升序。
+//
+// symbol 支持 000300.SH 与 000300 两种写法；指数代码带交易所后缀，
+// 不带后缀会同时匹配 .SH/.SZ，实际调用时应当传带后缀的代码。
+func (l *Lake) IndexBars(symbol string, startYear, endYear int) ([]IndexBarRow, error) {
+	if !l.HasDataset("index_bars") {
+		return nil, fmt.Errorf("cnlake: index_bars 尚未入库")
+	}
+	want := strings.ToUpper(strings.TrimSpace(symbol))
+	rows, err := readTyped(l.FilesForYears("index_bars", startYear, endYear), func(row *IndexBarRow) bool {
+		return strings.EqualFold(row.Symbol, want)
+	})
+	sort.Slice(rows, func(i, j int) bool { return rows[i].TradeDate < rows[j].TradeDate })
+	return rows, err
+}
+
+// HasIndexBars 报告指数日线是否可用（相对强度条件依赖它）。
+func (l *Lake) HasIndexBars() bool { return l.HasDataset("index_bars") }
+
+// ---------------------------------------------------------------------------
+// 批量读取
+//
+// 条件选股要一次拿到全市场的数据。逐只调用上面的单标的读取器会把同一批
+// 分区重复扫描几千遍，所以这里提供整批读取。
+// ---------------------------------------------------------------------------
+
+// ValuationsOn 返回指定交易日全市场的估值指标，按代码索引。
+// date 为 YYYYMMDD。
+func (l *Lake) ValuationsOn(date int64) (map[string]ValuationRow, error) {
+	if !l.HasDataset("valuation_metrics") {
+		return nil, fmt.Errorf("cnlake: valuation_metrics 尚未入库")
+	}
+	want := dateToDays(date)
+	year := int(date / 10000)
+	rows, err := readTyped(l.FilesForYears("valuation_metrics", year, year), func(row *ValuationRow) bool {
+		return row.TradeDate == want
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]ValuationRow, len(rows))
+	for _, row := range rows {
+		out[BareSymbol(row.Symbol)] = row
+	}
+	return out, nil
+}
+
+// LatestTopHolders 返回每只股票在 asOf（含）之前最近一期的十大股东明细。
+//
+// 机构参与度按流通股东口径汇总，所以调用方拿到行之后还要按
+// HolderScope / IsInstitution 过滤。
+func (l *Lake) LatestTopHolders(asOf int64) ([]TopHolderRow, error) {
+	if !l.HasDataset("top_holders") {
+		return nil, fmt.Errorf("cnlake: top_holders 尚未入库")
+	}
+	limit := dateToDays(asOf)
+	rows, err := readTyped(l.DatasetFiles("top_holders"), func(row *TopHolderRow) bool {
+		// asOf<=0 时不限日期；DATE 为空读作 0，要放行
+		return limit <= 0 || row.RecordDate == 0 || row.RecordDate <= limit
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// 每只股票只保留最近一期
+	latest := make(map[string]int32, 1024)
+	for _, row := range rows {
+		code := BareSymbol(row.Symbol)
+		if row.RecordDate > latest[code] {
+			latest[code] = row.RecordDate
+		}
+	}
+	out := make([]TopHolderRow, 0, len(rows)/4)
+	for _, row := range rows {
+		if row.RecordDate == latest[BareSymbol(row.Symbol)] {
+			out = append(out, row)
+		}
+	}
+	return out, nil
+}
+
+// NetProfitsByPeriod 返回每只股票按报告期的归母净利润。
+//
+// 数据湖的规范科目是 statement_type="income" + item_code="net_profit"
+// （归母净利润，已排除少数股东损益）。报告期形如 2025Q2。
+func (l *Lake) NetProfitsByPeriod() (map[string]map[string]float64, error) {
+	const dataset = "financial_statement_items"
+	if !l.HasDataset(dataset) {
+		return nil, fmt.Errorf("cnlake: %s 尚未入库", dataset)
+	}
+	rows, err := l.Rows(dataset, 0)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]map[string]float64, 4096)
+	for _, row := range rows {
+		if !strings.EqualFold(asString(row["statement_type"]), "income") {
+			continue
+		}
+		if !strings.EqualFold(asString(row["item_code"]), "net_profit") {
+			continue
+		}
+		code := BareSymbol(asString(row["symbol"]))
+		period := asString(row["report_period"])
+		if code == "" || period == "" {
+			continue
+		}
+		if out[code] == nil {
+			out[code] = make(map[string]float64, 16)
+		}
+		out[code][period] = asFloat(row["item_value"])
+	}
+	return out, nil
+}
+
 // CorporateActions 读取某只股票的分红送转记录，按除权日升序。
 func (l *Lake) CorporateActions(code string) ([]CorporateActionRow, error) {
 	bare := BareSymbol(code)
@@ -466,6 +601,15 @@ func (l *Lake) TopHolders(code string) ([]TopHolderRow, error) {
 
 // LatestTradeDate 从 trading_calendar 找出最新交易日（YYYYMMDD）。
 func (l *Lake) LatestTradeDate() (int64, error) {
+	return l.TradeDateAt(0)
+}
+
+// TradeDateAt 找出**不晚于** before 的最近交易日（YYYYMMDD）。
+// before <= 0 时等价于 LatestTradeDate。
+//
+// 条件选股指定日期时用它：用户填的那天可能不是交易日，
+// 也可能当天数据还没同步，所以要落到该日或之前最近的一个交易日。
+func (l *Lake) TradeDateAt(before int64) (int64, error) {
 	type calendarRow struct {
 		TradeDate int32 `parquet:"trade_date,date"`
 		IsTrading bool  `parquet:"is_trading"`
@@ -476,11 +620,15 @@ func (l *Lake) LatestTradeDate() (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	latest := int64(0)
+	best := int64(0)
 	for _, row := range rows {
-		if date := daysToDate(row.TradeDate); date > latest {
-			latest = date
+		date := daysToDate(row.TradeDate)
+		if before > 0 && date > before {
+			continue
+		}
+		if date > best {
+			best = date
 		}
 	}
-	return latest, nil
+	return best, nil
 }

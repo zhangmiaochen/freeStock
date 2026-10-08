@@ -217,6 +217,38 @@ describe("K 线页面", () => {
     expect(mocks.getKline).not.toHaveBeenCalled();
   });
 
+  // 页面被 KeepAlive 缓存后，onMounted 不会再执行 ——
+  // 如果加载逻辑只写在 onMounted 里，"从选股页点股票跳 K 线"就会永远显示上一只。
+  // 所以这里必须验证路由参数变化能触发重新加载。
+  it("路由参数变化时会加载新股票", async () => {
+    const { router } = await mountPage({ code: "600519" });
+    await vi.waitFor(() => {
+      expect(mocks.getKline).toHaveBeenCalledWith("600519", "qfq", 1990);
+    });
+
+    mocks.getKline.mockClear();
+
+    // 模拟从别的页面跳到另一只股票
+    await router.push({ path: "/kline", query: { code: "300750" } });
+    await vi.waitFor(() => {
+      expect(mocks.getKline).toHaveBeenCalledWith("300750", "qfq", 1990);
+    });
+  });
+
+  it("路由参数与当前股票相同时不重复请求", async () => {
+    const { router } = await mountPage({ code: "600519" });
+    await vi.waitFor(() => {
+      expect(mocks.getKline).toHaveBeenCalledWith("600519", "qfq", 1990);
+    });
+
+    mocks.getKline.mockClear();
+    // 推同一个 code 不该再拉一次
+    await router.push({ path: "/kline", query: { code: "600519" } });
+    await nextTick();
+    await nextTick();
+    expect(mocks.getKline).not.toHaveBeenCalled();
+  });
+
   it("带 code 进入时自动加载并显示股票信息", async () => {
     const { wrapper } = await mountPage({ code: "600519" });
 

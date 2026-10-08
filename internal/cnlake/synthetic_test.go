@@ -263,6 +263,31 @@ func TestSyntheticLakeIndustryAndCalendar(t *testing.T) {
 	if latest != 20260930 {
 		t.Errorf("最新交易日错误: %d，期望 20260930", latest)
 	}
+
+	// TradeDateAt：不晚于指定日期的最近交易日
+	at, err := lake.TradeDateAt(20260920)
+	if err != nil {
+		t.Fatalf("TradeDateAt 失败: %v", err)
+	}
+	if at > 20260920 {
+		t.Errorf("TradeDateAt(%d) 返回了更晚的日期 %d", 20260920, at)
+	}
+	if at == 0 {
+		t.Error("20260920 之前应该有交易日")
+	}
+	// before<=0 等价于 LatestTradeDate
+	if all, err := lake.TradeDateAt(0); err != nil || all != latest {
+		t.Errorf("TradeDateAt(0) 应等价于最新交易日: got=%d want=%d err=%v", all, latest, err)
+	}
+	// 指定最新交易日本身
+	if same, err := lake.TradeDateAt(20260930); err != nil || same != 20260930 {
+		t.Errorf("TradeDateAt(20260930) = %d (err=%v)，期望 20260930", same, err)
+	}
+	// 早于日历起点时返回 0 而不是报错
+	if early, err := lake.TradeDateAt(19900101); err != nil || early != 0 {
+		t.Errorf("早于日历起点应返回 0: got=%d err=%v", early, err)
+	}
+	t.Logf("trading_calendar 最新=%d，不晚于 20260920 的最近交易日=%d", latest, at)
 }
 
 func TestSyntheticLakeIsolatedFromRealLake(t *testing.T) {

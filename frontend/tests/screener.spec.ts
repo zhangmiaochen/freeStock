@@ -40,7 +40,15 @@ function defaultCondition() {
     excludeST: true, markets: [], hasQuoteOnly: true,
     boardFilters: [], maConditions: [],
     enableDrawdown: false, drawdownDays: 30, minDrawdown: 0, maxDrawdown: 0,
+    // 数据湖条件
+    minPS: 0, maxPS: 0,
+    minInstitution: 0, maxInstitution: 0,
+    minQuarterGrowth: 0,
+    enableRelativeStrength: false,
+    relativeStrengthDays: 20,
+    minRelativeStrength: 0,
     limit: 0,
+    tradeDate: 0,
   };
 }
 
@@ -58,6 +66,15 @@ function options() {
       "市销率 PS：free-stockdb 的日K没有市销率字段",
       "季报增长：本地数据集不含财务报表科目",
     ],
+    // 数据湖条件：RS 可用，另外三个等入库
+    lakeAvailable: true,
+    lakeRoot: "D:\\lake",
+    lakeConditions: [
+      { name: "市销率 PS", dataset: "valuation_metrics", field: "ps_ttm", available: false, note: "" },
+      { name: "机构参与度", dataset: "top_holders", field: "is_institution", available: false, note: "" },
+      { name: "季报增长", dataset: "financial_statement_items", field: "income/net_profit", available: false, note: "" },
+      { name: "相对强度 RS", dataset: "index_bars", field: "close", available: true, note: "" },
+    ],
     defaults: defaultCondition(),
   };
 }
@@ -68,23 +85,28 @@ function screenResult(overrides: Record<string, unknown> = {}) {
     scanned: 7563,
     snapshotPassed: 550,
     boardPassed: 38,
+    lakePassed: 38,
     techPassed: 38,
     matched: 2,
     historyEvaluated: false,
     elapsed: "20ms",
     notes: [],
+    requestedDate: 0,
+    historical: false,
     items: [
       {
         code: "000423", name: "东阿阿胶", market: "sz-main", marketCN: "深市主板",
         close: 45.95, pctChg: 1.57, amount: 1e8, turnover: 1.2, volumeRatio: 1.1,
-        peTTM: 16.47, pb: 3.16, roe: 19.19, totalMV: 294e8, floatMV: 290e8,
+        peTTM: 16.47, pb: 3.16, ps: 0, roe: 19.19, totalMV: 294e8, floatMV: 290e8,
         isST: false, boards: ["医药生物"], drawdownPct: 0, maValues: [],
+        institution: 0, quarterGrowth: 0, relativeStrength: 0, benchmark: "",
       },
       {
         code: "600276", name: "恒瑞医药", market: "sh-main", marketCN: "沪市主板",
         close: 50.1, pctChg: -0.9, amount: 2e8, turnover: 0.8, volumeRatio: 0.9,
-        peTTM: 60.2, pb: 7.1, roe: 11.8, totalMV: 3200e8, floatMV: 3100e8,
+        peTTM: 60.2, pb: 7.1, ps: 0, roe: 11.8, totalMV: 3200e8, floatMV: 3100e8,
         isST: false, boards: ["医药生物", "创新药"], drawdownPct: 0, maValues: [],
+        institution: 0, quarterGrowth: 0, relativeStrength: 0, benchmark: "",
       },
     ],
     ...overrides,
@@ -419,6 +441,119 @@ describe("条件选股页面", () => {
     expect(wrapper.text()).not.toContain("100 / 457");
   });
 
+  // ---- 数据湖条件 ----
+
+  it("数据湖条件区块如实显示数据集是否已入库", async () => {
+    const { wrapper } = await mountPage();
+
+    expect(wrapper.text()).toContain("数据湖条件");
+    expect(wrapper.text()).toContain("cnequity");
+
+    // RS 的数据集（index_bars）已入库 → 标记可用
+    expect(wrapper.text()).toContain("可用");
+    // 另外三个未入库 → 要写明在等哪个数据集，而不是含糊地说"不支持"
+    expect(wrapper.text()).toContain("valuation_metrics");
+    expect(wrapper.text()).toContain("top_holders");
+    expect(wrapper.text()).toContain("financial_statement_items");
+  });
+
+  it("启用相对强度后提交窗口与阈值", async () => {
+    const { wrapper } = await mountPage();
+
+    // 找到"相对强度"那一块里的启用勾选框
+    const section = wrapper.findAll("section").find((s) => s.text().includes("数据湖条件"));
+    expect(section, "找不到数据湖条件区块").toBeTruthy();
+    const enable = section!.findAll('input[type="checkbox"]').at(-1)!;
+    await enable.setValue(true);
+    await nextTick();
+
+    // 窗口与阈值输入框出现后填阈值
+    const inputs = section!.findAll('input[inputmode="decimal"]');
+    const rsInput = inputs.at(-1)!;
+    const el = rsInput.element as HTMLInputElement;
+    el.value = "5";
+    await rsInput.trigger("change");
+    await nextTick();
+
+    await button(wrapper, "开始筛选")!.trigger("click");
+    await vi.waitFor(() => expect(mocks.screenStocks).toHaveBeenCalled());
+
+    const submitted = mocks.screenStocks.mock.calls[0][0];
+    expect(submitted.enableRelativeStrength).toBe(true);
+    expect(submitted.relativeStrengthDays).toBe(20);
+    expect(submitted.minRelativeStrength).toBe(5);
+  });
+
+  it("市销率区间与机构参与度会提交给后端", async () => {
+    const { wrapper } = await mountPage();
+
+    const section = wrapper.findAll("section").find((s) => s.text().includes("数据湖条件"))!;
+    const fields = section.findAllComponents(RangeField);
+    const ps = fields.find((f) => f.props("label") === "市销率")!;
+    const inst = fields.find((f) => f.props("label") === "机构持股")!;
+    expect(ps && inst).toBeTruthy();
+
+    await ps.find('input[type="checkbox"]').setValue(true);
+    const psMax = ps.findAll('input[inputmode="decimal"]')[1].element as HTMLInputElement;
+    psMax.value = "8";
+    await ps.findAll('input[inputmode="decimal"]')[1].trigger("change");
+
+    await inst.find('input[type="checkbox"]').setValue(true);
+    const instMin = inst.findAll('input[inputmode="decimal"]')[0].element as HTMLInputElement;
+    instMin.value = "10";
+    await inst.findAll('input[inputmode="decimal"]')[0].trigger("change");
+    await nextTick();
+
+    await button(wrapper, "开始筛选")!.trigger("click");
+    await vi.waitFor(() => expect(mocks.screenStocks).toHaveBeenCalled());
+
+    const submitted = mocks.screenStocks.mock.calls[0][0];
+    expect(submitted.maxPS).toBe(8);
+    expect(submitted.minInstitution).toBe(10);
+  });
+
+  it("结果里有 RS 数据时才显示 RS 列", async () => {
+    // 没有 RS 数据 → 不显示该列
+    const { wrapper } = await mountPage();
+    await button(wrapper, "开始筛选")!.trigger("click");
+    await vi.waitFor(() => expect(wrapper.text()).toContain("东阿阿胶"));
+    await nextTick();
+    expect(wrapper.findAll("th").map((th) => th.text()).join("|")).not.toContain("RS");
+
+    // 有 RS 数据 → 显示该列
+    mocks.screenStocks.mockResolvedValue(
+      screenResult({
+        historyEvaluated: true,
+        items: [
+          { ...screenResult().items[0], relativeStrength: 12.34, benchmark: "399001.SZ" },
+        ],
+      }),
+    );
+    const second = await mountPage();
+    await button(second.wrapper, "开始筛选")!.trigger("click");
+    await vi.waitFor(() => expect(second.wrapper.text()).toContain("+12.34%"));
+    await nextTick();
+
+    const headers = second.wrapper.findAll("th").map((th) => th.text());
+    expect(headers.join("|")).toContain("RS");
+    // 悬停能看到对标指数
+    expect(second.wrapper.html()).toContain("399001.SZ");
+  });
+
+  it("数据集未入库时后端提示会显示出来", async () => {
+    mocks.screenStocks.mockResolvedValue(
+      screenResult({ notes: ["市销率条件已跳过：cnlake: valuation_metrics 尚未入库"] }),
+    );
+    const { wrapper } = await mountPage();
+
+    await button(wrapper, "开始筛选")!.trigger("click");
+    await vi.waitFor(() => expect(wrapper.text()).toContain("尚未入库"));
+    await nextTick();
+
+    expect(wrapper.text()).toContain("市销率条件已跳过");
+    expect(wrapper.text()).not.toContain("**");
+  });
+
   it("筛选失败时给出错误与重试", async () => {
     mocks.screenStocks.mockRejectedValue(new Error("数据源不可用"));
     const { wrapper } = await mountPage();
@@ -427,5 +562,110 @@ describe("条件选股页面", () => {
     await vi.waitFor(() => expect(wrapper.text()).toContain("筛选失败"));
     expect(wrapper.text()).toContain("数据源不可用");
     expect(button(wrapper, "重试")).toBeTruthy();
+  });
+
+  // ---- 交易日 ----
+
+  it("默认用最新交易日，提交时 tradeDate 为 0", async () => {
+    const { wrapper } = await mountPage();
+
+    // 面板上标明当前是"最新"
+    const dateSection = wrapper.findAll("section").find((s) => s.text().includes("交易日"));
+    expect(dateSection).toBeTruthy();
+    expect(dateSection!.text()).toContain("最新");
+
+    await button(wrapper, "开始筛选")!.trigger("click");
+    await vi.waitFor(() => expect(mocks.screenStocks).toHaveBeenCalled());
+    expect(mocks.screenStocks.mock.calls[0][0].tradeDate).toBe(0);
+  });
+
+  it("指定日期后提交 YYYYMMDD 整数", async () => {
+    const { wrapper } = await mountPage();
+
+    const input = wrapper.find('input[type="date"]');
+    expect(input.exists()).toBe(true);
+
+    // 原生日期输入给的是 YYYY-MM-DD，提交前要转成 YYYYMMDD
+    await input.setValue("2026-06-30");
+    await nextTick();
+
+    await button(wrapper, "开始筛选")!.trigger("click");
+    await vi.waitFor(() => expect(mocks.screenStocks).toHaveBeenCalled());
+    expect(mocks.screenStocks.mock.calls[0][0].tradeDate).toBe(20260630);
+  });
+
+  it("「用最新」把日期清回自动", async () => {
+    const { wrapper } = await mountPage();
+
+    await wrapper.find('input[type="date"]').setValue("2026-06-30");
+    await nextTick();
+    await button(wrapper, "用最新")!.trigger("click");
+    await nextTick();
+
+    // 输入框应被清空
+    expect((wrapper.find('input[type="date"]').element as HTMLInputElement).value).toBe("");
+
+    await button(wrapper, "开始筛选")!.trigger("click");
+    await vi.waitFor(() => expect(mocks.screenStocks).toHaveBeenCalled());
+    expect(mocks.screenStocks.mock.calls[0][0].tradeDate).toBe(0);
+  });
+
+  it("结果里区分「最新」与「历史」，并显示实际交易日", async () => {
+    mocks.screenStocks.mockResolvedValue(
+      screenResult({ tradeDate: 20260630, requestedDate: 20260630, historical: true }),
+    );
+    const { wrapper } = await mountPage();
+
+    await button(wrapper, "开始筛选")!.trigger("click");
+    await vi.waitFor(() => expect(wrapper.text()).toContain("2026-06-30"));
+    await nextTick();
+
+    // 只看统计条 —— 左侧面板的说明文字里也有"最新"，不能全局断言
+    const stats = wrapper.find('[data-testid="screen-stats"]');
+    expect(stats.exists(), "找不到统计条").toBe(true);
+    const text = stats.text();
+
+    expect(text).toContain("2026-06-30");
+    expect(text).toContain("历史");
+    expect(text).not.toContain("最新");
+  });
+
+  it("指定日期被回退时，把实际用的日期和原因显示出来", async () => {
+    mocks.screenStocks.mockResolvedValue(
+      screenResult({
+        tradeDate: 20260930,
+        requestedDate: 20261003,
+        historical: true,
+        notes: ["指定日期 20261003 不是交易日或当天数据尚未同步，已改用 20260930 及之前的数据"],
+      }),
+    );
+    const { wrapper } = await mountPage();
+
+    await button(wrapper, "开始筛选")!.trigger("click");
+    await vi.waitFor(() => expect(wrapper.text()).toContain("不是交易日"));
+    await nextTick();
+
+    expect(wrapper.text()).toContain("20261003");
+    expect(wrapper.text()).toContain("2026-09-30");
+  });
+
+  it("历史日期 + 板块条件时提示成分股口径", async () => {
+    mocks.screenStocks.mockResolvedValue(
+      screenResult({
+        tradeDate: 20260630,
+        historical: true,
+        // 用后端真实的措辞（界面按纯文本渲染，不能有 Markdown 标记）
+        notes: ["板块成分名单只有当前这一份（数据源没有历史成分），所以板块条件按今天的成分股匹配"],
+      }),
+    );
+    const { wrapper } = await mountPage();
+
+    await button(wrapper, "开始筛选")!.trigger("click");
+    await vi.waitFor(() => expect(wrapper.text()).toContain("板块成分名单"));
+    await nextTick();
+
+    expect(wrapper.text()).toContain("当前");
+    // 提示是纯文本渲染，星号会原样露出来
+    expect(wrapper.text()).not.toContain("**");
   });
 });

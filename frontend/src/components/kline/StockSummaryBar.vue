@@ -13,7 +13,7 @@
  *
  * 版式刻意做得紧凑：图表才是主角，信息栏每行只用一行高度。
  */
-import { computed } from "vue";
+import { computed, ref } from "vue";
 
 import { Badge } from "@/components/ui/badge";
 import type { StockProfile } from "@/lib/backend";
@@ -29,6 +29,18 @@ import {
 } from "@/lib/format";
 
 const props = defineProps<{ profile: StockProfile }>();
+
+/** 板块默认只显示前几个，避免概念多的股票把信息栏撑得很长 */
+const BOARD_PREVIEW = 6;
+const showAllBoards = ref(false);
+const visibleBoards = computed(() => {
+  const boards = props.profile.boards ?? [];
+  return showAllBoards.value ? boards : boards.slice(0, BOARD_PREVIEW);
+});
+const hiddenBoardCount = computed(() =>
+  Math.max(0, (props.profile.boards?.length ?? 0) - BOARD_PREVIEW),
+);
+
 
 interface StatItem {
   label: string;
@@ -179,6 +191,28 @@ const flowStats = computed<StatItem[]>(() => {
       <span class="text-muted-foreground ml-auto text-[11px]">
         最新交易日 {{ formatDate(profile.tradeDate) }}
       </span>
+    </div>
+
+    <!-- 所属板块：申万一级在最前，后面是二级/三级与概念 -->
+    <div v-if="profile.boards?.length" class="mt-1.5 flex flex-wrap items-center gap-1">
+      <span class="text-muted-foreground text-[11px]">板块</span>
+      <Badge
+        v-for="(name, index) in visibleBoards"
+        :key="name"
+        :variant="index === 0 ? 'default' : 'outline'"
+        class="text-[11px]"
+      >
+        {{ name }}
+      </Badge>
+      <button
+        v-if="hiddenBoardCount > 0"
+        type="button"
+        class="text-muted-foreground hover:text-foreground text-[11px]"
+        :title="profile.boards.join('、')"
+        @click="showAllBoards = !showAllBoards"
+      >
+        {{ showAllBoards ? "收起" : `+${hiddenBoardCount}` }}
+      </button>
     </div>
 
     <!-- 第二行：当日行情 -->

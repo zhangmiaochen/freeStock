@@ -36,6 +36,11 @@ type Provider interface {
 
 	StockCodes(ctx context.Context) (map[string][]string, error)
 	LatestTradeDate(ctx context.Context) (int, error)
+	// TradeDateAt 返回**不晚于** date 的最近一个交易日。
+	//
+	// 条件选股指定日期时用它：用户填的那天可能不是交易日、也可能当天数据还没同步，
+	// 所以要落到"该日或之前最近一个有数据的交易日"。date<=0 时等价于 LatestTradeDate。
+	TradeDateAt(ctx context.Context, date int) (int, error)
 	QuotePoint(ctx context.Context, code string, date int) (*stockdb.Quote, error)
 	// LatestQuotes 批量取某个交易日的行情。
 	// 数据湖按年分区存放，逐只查询会把同一分区重复扫描上千次，所以列表页走这个接口。
@@ -70,6 +75,49 @@ func (p *stockdbProvider) StockCodes(ctx context.Context) (map[string][]string, 
 
 func (p *stockdbProvider) LatestTradeDate(ctx context.Context) (int, error) {
 	return p.client.LatestTradeDate(ctx)
+}
+
+// tradeDateProbes 是用来找交易日的活跃股票。
+// 它们几乎从不停牌，所以它们的最新日 K 就能代表市场的最新交易日。
+var tradeDateProbes = []string{"000001", "600519"}
+
+// tradeDateWindows 是查找历史交易日时的回溯窗口（自然日），由窄到宽。
+// 窄窗口命中是常态（周末/节假日最多隔几天），宽窗口兜底长假与冷门时段。
+var tradeDateWindows = []int{20, 60, 400}
+
+func (p *stockdbProvider) TradeDateAt(ctx context.Context, date int) (int, error) {
+	if date <= 0 {
+		return p.LatestTradeDate(ctx)
+	}
+
+	// 用区间查询取"不晚于 date 的最近一根 K 线"。
+	// 不能直接用 date 做点查询：那天可能不是交易日，或者数据还没同步。
+	var lastErr error
+	for _, window := range tradeDateWindows {
+		start := shiftDate(date, -window)
+		best := 0
+		for _, code := range tradeDateProbes {
+			list, err := p.client.QuoteRangeDesc(ctx, code, start, date)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			if len(list) > 0 && list[0] != nil {
+				// QuoteRangeDesc 是倒序的，第一条就是最近的一根
+				if d := int(list[0].Date); d > best {
+					best = d
+				}
+			}
+		}
+		if best > 0 {
+			return best, nil
+		}
+	}
+
+	if lastErr != nil {
+		return 0, fmt.Errorf("找不到 %d 或之前的交易日：%w", date, lastErr)
+	}
+	return 0, fmt.Errorf("找不到 %d 或之前的交易日（该日期之前的日 K 数据可能未同步）", date)
 }
 
 func (p *stockdbProvider) QuotePoint(ctx context.Context, code string, date int) (*stockdb.Quote, error) {
@@ -220,6 +268,20 @@ func (p *lakeProvider) LatestTradeDate(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("数据湖的 trading_calendar 没有可用交易日，请确认已同步")
 	}
 	return int(date), nil
+}
+
+func (p *lakeProvider) TradeDateAt(ctx context.Context, date int) (int, error) {
+	at, err := p.lake.TradeDateAt(int64(date))
+	if err != nil {
+		return 0, err
+	}
+	if at == 0 {
+		if date > 0 {
+			return 0, fmt.Errorf("数据湖里找不到 %d 或之前的交易日", date)
+		}
+		return 0, fmt.Errorf("数据湖的 trading_calendar 没有可用交易日，请确认已同步")
+	}
+	return int(at), nil
 }
 
 // quoteLookbackDays 取单点行情时向前回看的自然日数。

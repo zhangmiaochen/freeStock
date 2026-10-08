@@ -33,6 +33,8 @@ const (
 	fallbackWindowDays = 45
 	// progressInterval 每处理多少只股票上报一次进度。
 	progressInterval = 200
+	// maxDatedUniverses 历史全量快照最多缓存几个交易日。
+	maxDatedUniverses = 4
 )
 
 // BoardCategoryOrder 是行业分类的展示顺序。
@@ -156,6 +158,11 @@ type StockService struct {
 	tradeDateMu sync.Mutex
 	tradeDate   int
 	tradeDateAt time.Time
+
+	// 按交易日的历史全量快照（条件选股指定日期时用）。
+	// 只保留最近 maxDatedUniverses 个，避免来回改日期把内存吃满。
+	datedUniverseMu sync.Mutex
+	datedUniverses  map[int]*StockUniverse
 
 	// cnequity 数据湖（可选）：本地数据集没有财报，从这里补
 	lakeMu sync.Mutex
@@ -505,6 +512,46 @@ func (s *StockService) GetStockUniverse(refresh bool) (*StockUniverse, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 
+	tradeDate, err := provider.LatestTradeDate(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	result, err := s.buildUniverse(ctx, provider, source, tradeDate, started)
+	if err != nil {
+		return nil, err
+	}
+
+	s.universe = result
+	s.universeAt = time.Now()
+
+	// 顺手把最新交易日缓存起来，K 线页面就不用再查一次
+	s.tradeDateMu.Lock()
+	s.tradeDate = tradeDate
+	s.tradeDateAt = time.Now()
+	s.tradeDateMu.Unlock()
+
+	slog.Info("股票列表就绪",
+		"total", result.Total,
+		"withQuote", result.WithQuote,
+		"tradeDate", result.TradeDate,
+		"markets", len(result.Markets),
+		"elapsed", result.Elapsed,
+	)
+	return result, nil
+}
+
+// buildUniverse 按**指定交易日**抓全量行情并组装快照。
+//
+// 不碰缓存 —— 缓存策略交给调用方：最新快照用 s.universe，
+// 历史快照（条件选股指定日期时）用 s.datedUniverses。
+func (s *StockService) buildUniverse(
+	ctx context.Context,
+	provider Provider,
+	source config.DataSource,
+	tradeDate int,
+	started time.Time,
+) (*StockUniverse, error) {
 	buckets, err := provider.StockCodes(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("读取股票代码失败：%w", err)
@@ -525,12 +572,7 @@ func (s *StockService) GetStockUniverse(refresh bool) (*StockUniverse, error) {
 	}
 	sort.Slice(targets, func(i, j int) bool { return targets[i].code < targets[j].code })
 
-	tradeDate, err := provider.LatestTradeDate(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	// ---- 第一轮：按最新交易日取点（走批量接口） ----
+	// ---- 第一轮：按交易日取点（走批量接口） ----
 	s.emit("stock:progress", Progress{Phase: "quoting", Total: len(targets)})
 
 	codes := make([]string, len(targets))
@@ -643,23 +685,142 @@ func (s *StockService) GetStockUniverse(refresh bool) (*StockUniverse, error) {
 		Stocks:     stocks,
 	}
 
-	s.universe = result
-	s.universeAt = time.Now()
-
-	// 顺手把最新交易日缓存起来，K 线页面就不用再查一次
-	s.tradeDateMu.Lock()
-	s.tradeDate = tradeDate
-	s.tradeDateAt = time.Now()
-	s.tradeDateMu.Unlock()
-
-	slog.Info("股票列表就绪",
-		"total", result.Total,
-		"withQuote", result.WithQuote,
-		"tradeDate", result.TradeDate,
-		"markets", len(result.Markets),
-		"elapsed", result.Elapsed,
-	)
+	// 缓存与日志交给调用方：这个函数只管按 tradeDate 抓数据、组装快照
 	return result, nil
+}
+
+// peekUniverse 返回当前缓存的最新快照（不触发加载）；缓存过期或为空时返回 nil。
+func (s *StockService) peekUniverse() *StockUniverse {
+	s.universeMu.Lock()
+	defer s.universeMu.Unlock()
+	if s.universe == nil || time.Since(s.universeAt) >= universeTTL {
+		return nil
+	}
+	return s.universe
+}
+
+// universeOn 返回**指定交易日**的全量快照，供条件选股的历史筛选使用。
+//
+// 指定日期是很自然的需求：当天数据还没同步时，用户会想"按昨天的数据筛"。
+// 结果按交易日缓存，避免来回改日期时反复抓同一份数据。
+func (s *StockService) universeOn(
+	ctx context.Context,
+	provider Provider,
+	source config.DataSource,
+	tradeDate int,
+) (*StockUniverse, error) {
+	s.datedUniverseMu.Lock()
+	defer s.datedUniverseMu.Unlock()
+
+	if cached, ok := s.datedUniverses[tradeDate]; ok {
+		return cached, nil
+	}
+
+	result, err := s.buildUniverse(ctx, provider, source, tradeDate, time.Now())
+	if err != nil {
+		return nil, err
+	}
+
+	// 只留最近几个交易日；筛选时来回改日期很常见，但没必要无限缓存
+	if s.datedUniverses == nil || len(s.datedUniverses) >= maxDatedUniverses {
+		s.datedUniverses = make(map[int]*StockUniverse, maxDatedUniverses)
+	}
+	s.datedUniverses[tradeDate] = result
+
+	slog.Info("历史股票列表就绪",
+		"tradeDate", tradeDate, "total", result.Total,
+		"withQuote", result.WithQuote, "elapsed", result.Elapsed)
+	return result, nil
+}
+
+// maxBoardsPerStock 是每只股票最多返回多少个板块名。
+//
+// 概念板块是多对多，热门股可能挂在几十个概念上。界面只显示前几个 + "+N"，
+// 全量返回会让结果 payload 膨胀好几倍，所以这里截断。
+// 排序按分类优先级（申万一级在最前），保证截断掉的都是最不重要的。
+const maxBoardsPerStock = 12
+
+// boardsForCodes 返回这些股票所属的板块名，按分类优先级排序。
+//
+// 与 screener.go 的 buildBoardMembership 分工不同：那个是给"按板块筛选"用的
+// （要按条件求并集/交集），这个是给**结果展示**用的 —— 只需要名字，
+// 而且只处理传入的代码，不对全市场建索引。
+func (s *StockService) boardsForCodes(codes []string) (map[string][]string, error) {
+	out := make(map[string][]string, len(codes))
+	if len(codes) == 0 {
+		return out, nil
+	}
+
+	want := make(map[string]struct{}, len(codes))
+	for _, code := range codes {
+		want[code] = struct{}{}
+	}
+
+	boards, err := s.loadBoards()
+	if err != nil {
+		return out, err
+	}
+
+	// 排序键必须跟着**每个板块条目**走，不能事后按名字查表 ——
+	// 同名板块可以存在于不同分类（例如「石油石化」既是申万一级也可能是概念），
+	// 用名字做 key 会让后遍历到的分类覆盖前面的优先级，排序就错了。
+	collected := make(map[string][]boardEntry, len(codes))
+	rank := boardCategoryRank()
+
+	for _, board := range boards {
+		boardRank := rank[board.Category]
+		for _, symbol := range board.Symbols {
+			if _, ok := want[symbol]; !ok {
+				continue
+			}
+			collected[symbol] = append(collected[symbol], boardEntry{name: board.Name, rank: boardRank})
+		}
+	}
+
+	for code, list := range collected {
+		out[code] = orderBoardNames(list)
+	}
+	return out, nil
+}
+
+// boardEntry 是"某个板块名 + 它所属分类的优先级"。
+type boardEntry struct {
+	name string
+	rank int
+}
+
+// orderBoardNames 按分类优先级排序、去重并截断。
+//
+// 抽成纯函数是为了能精确测试排序 —— 真实板块数据里同名板块跨分类存在，
+// 用真实数据很难判断"排错了"还是"本来就没有行业分类"。
+func orderBoardNames(entries []boardEntry) []string {
+	// 按分类优先级排序（申万一级在最前），同级保持原有顺序
+	sorted := make([]boardEntry, len(entries))
+	copy(sorted, entries)
+	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].rank < sorted[j].rank })
+
+	names := make([]string, 0, min(len(sorted), maxBoardsPerStock))
+	seen := make(map[string]struct{}, len(sorted))
+	for _, item := range sorted {
+		if _, dup := seen[item.name]; dup {
+			continue
+		}
+		seen[item.name] = struct{}{}
+		names = append(names, item.name)
+		if len(names) >= maxBoardsPerStock {
+			break
+		}
+	}
+	return names
+}
+
+// boardCategoryRank 给出各分类的展示优先级（越小越靠前）。
+func boardCategoryRank() map[string]int {
+	rank := make(map[string]int, len(BoardCategoryOrder)+1)
+	for i, name := range BoardCategoryOrder {
+		rank[name] = i
+	}
+	return rank
 }
 
 // GetBoardCategories 返回可用的行业分类。
