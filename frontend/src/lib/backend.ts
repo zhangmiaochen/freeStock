@@ -37,9 +37,35 @@ import type {
 import type { DatasetStatus, Partition } from "../../bindings/freestock/internal/cnlake/models";
 // K 线偏好的数据结构定义在 config 包，外层包装（含配置文件路径）在 service 包
 import type { BollPrefs, KlinePrefs, MaPrefs, MacdPrefs } from "../../bindings/freestock/internal/config/models";
+// 组合管理的类型定义在 portfolio 包里，Wails 按包生成模型
+import type {
+  Detail as PortfolioDetail,
+  Overview as PortfolioOverview,
+  Portfolio,
+  PortfolioInput,
+  Position,
+  PositionInput,
+  ScopeValue,
+  Summary as PortfolioSummary,
+  Transaction as PortfolioTransaction,
+} from "../../bindings/freestock/internal/portfolio/models";
+import type { PortfolioOptions } from "../../bindings/freestock/internal/service/models";
 import * as StockService from "../../bindings/freestock/internal/service/stockservice";
+import * as PortfolioService from "../../bindings/freestock/internal/service/portfolioservice";
 
 export type { BollPrefs, KlinePrefs, MaPrefs, MacdPrefs };
+export type {
+  Portfolio,
+  PortfolioDetail,
+  PortfolioInput,
+  PortfolioOptions,
+  PortfolioOverview,
+  PortfolioSummary,
+  PortfolioTransaction,
+  Position,
+  PositionInput,
+  ScopeValue,
+};
 
 export type {
   BoardCategoryInfo,
@@ -156,4 +182,22 @@ export const api = {
     StockService.GetScreenCondition() as Promise<ScreenConditionInfo | null>,
   saveScreenCondition: (cond: ScreenCondition) =>
     StockService.SaveScreenCondition(cond) as Promise<void>,
+
+  // ---- 组合管理 ----
+  portfolio: {
+    getOptions: () => PortfolioService.GetPortfolioOptions() as Promise<PortfolioOptions>,
+    getDatabasePath: () => PortfolioService.GetDatabasePath() as Promise<string>,
+    list: () => PortfolioService.ListPortfolios() as Promise<Portfolio[]>,
+    create: (input: PortfolioInput) =>
+      PortfolioService.CreatePortfolio(input) as Promise<Portfolio>,
+    update: (id: string, input: PortfolioInput) =>
+      PortfolioService.UpdatePortfolio(id, input) as Promise<Portfolio>,
+    remove: (id: string) => PortfolioService.DeletePortfolio(id) as Promise<void>,
+    detail: (id: string) => PortfolioService.GetPortfolioDetail(id) as Promise<PortfolioDetail>,
+    overview: () => PortfolioService.GetPortfolioOverview() as Promise<PortfolioOverview>,
+    addPosition: (portfolioID: string, input: PositionInput) =>
+      PortfolioService.AddPosition(portfolioID, input) as Promise<Position>,
+    removePosition: (portfolioID: string, code: string) =>
+      PortfolioService.DeletePosition(portfolioID, code) as Promise<void>,
+  },
 };

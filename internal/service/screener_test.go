@@ -816,7 +816,13 @@ func TestRelativeStrength(t *testing.T) {
 	}
 }
 
-// 数据集没入库时要跳过条件并说明，不能报错也不能静默。
+// 数据湖条件的行为必须是二选一，不允许第三种：
+//
+//	数据集未入库 → 跳过条件 + 给出提示 + 结果与不加条件时一致
+//	数据集已入库 → 真的参与筛选（结果变少）+ 不能说"已跳过"
+//
+// 用例必须自适应：数据湖是用户在推进的，数据集可能今天入库、明天更全，
+// 写死"一定没入库"的断言会随数据到位而失效（这个用例就因此失败过一次）。
 func TestLakeConditionsDegradeGracefully(t *testing.T) {
 	svc := newLocalService()
 	requireLocalServer(t, svc)
@@ -826,14 +832,24 @@ func TestLakeConditionsDegradeGracefully(t *testing.T) {
 		t.Fatalf("失败: %v", err)
 	}
 
+	options, err := svc.GetScreenOptions()
+	if err != nil {
+		t.Fatalf("取选项失败: %v", err)
+	}
+	availability := map[string]bool{}
+	for _, item := range options.LakeConditions {
+		availability[item.Name] = item.Available
+	}
+
 	cases := []struct {
 		name string
 		cond ScreenCondition
 	}{
-		{"市销率", ScreenCondition{MaxPS: 30}},
+		{"市销率 PS", ScreenCondition{MaxPS: 30}},
 		{"机构参与度", ScreenCondition{MinInstitution: 20}},
 		{"季报增长", ScreenCondition{MinQuarterGrowth: 20}},
 	}
+
 	for _, c := range cases {
 		cond := c.cond
 		cond.ExcludeST = true
@@ -841,16 +857,34 @@ func TestLakeConditionsDegradeGracefully(t *testing.T) {
 
 		result, err := svc.ScreenStocks(cond)
 		if err != nil {
-			t.Fatalf("%s：不该报错，应优雅降级: %v", c.name, err)
+			t.Fatalf("%s：不该报错: %v", c.name, err)
 		}
-		if len(result.Notes) == 0 {
-			t.Errorf("%s：数据集不可用时必须给出提示", c.name)
-		}
-		if result.Matched != baseline.Matched {
-			t.Errorf("%s：条件被跳过后结果应不变: %d vs %d", c.name, result.Matched, baseline.Matched)
-		}
+
+		available := availability[c.name]
+		skipped := false
 		for _, note := range result.Notes {
-			t.Logf("%s 提示: %s", c.name, note)
+			if strings.Contains(note, "已跳过") {
+				skipped = true
+			}
+		}
+
+		if available {
+			// 已入库 → 必须真的在筛选，且不能声称跳过
+			if skipped {
+				t.Errorf("%s：数据集已入库，不该说「已跳过」", c.name)
+			}
+			t.Logf("%s（已入库）%d → %d", c.name, baseline.Matched, result.Matched)
+		} else {
+			// 未入库 → 跳过 + 提示 + 结果不变
+			if len(result.Notes) == 0 {
+				t.Errorf("%s：数据集不可用时必须给出提示", c.name)
+			}
+			if result.Matched != baseline.Matched {
+				t.Errorf("%s：条件被跳过后结果应不变: %d vs %d", c.name, result.Matched, baseline.Matched)
+			}
+			for _, note := range result.Notes {
+				t.Logf("%s（未入库）提示: %s", c.name, note)
+			}
 		}
 	}
 }

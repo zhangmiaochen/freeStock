@@ -1330,6 +1330,115 @@ export class MoneyFlowSummary {
 }
 
 /**
+ * PortfolioOption 是一个可选值。
+ */
+export class PortfolioOption {
+    "key": string;
+    "label": string;
+    "description"?: string;
+
+    /** Creates a new PortfolioOption instance. */
+    constructor($$source: Partial<PortfolioOption> = {}) {
+        if (!("key" in $$source)) {
+            this["key"] = "";
+        }
+        if (!("label" in $$source)) {
+            this["label"] = "";
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new PortfolioOption instance from a string or object.
+     */
+    static createFrom($$source: any = {}): PortfolioOption {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new PortfolioOption($$parsedSource as Partial<PortfolioOption>);
+    }
+}
+
+/**
+ * PortfolioOptions 是组合界面的元信息。
+ */
+export class PortfolioOptions {
+    "types": PortfolioOption[];
+    "strategies": PortfolioOption[];
+    "statuses": PortfolioOption[];
+    "scopeTypes": PortfolioOption[];
+    "markets": PortfolioOption[];
+    "holdingTypes": PortfolioOption[];
+
+    /**
+     * DefaultBenchmark 原项目默认基准（000300.SH）
+     */
+    "defaultBenchmark": string;
+    "defaultLayers": number;
+
+    /** Creates a new PortfolioOptions instance. */
+    constructor($$source: Partial<PortfolioOptions> = {}) {
+        if (!("types" in $$source)) {
+            this["types"] = [];
+        }
+        if (!("strategies" in $$source)) {
+            this["strategies"] = [];
+        }
+        if (!("statuses" in $$source)) {
+            this["statuses"] = [];
+        }
+        if (!("scopeTypes" in $$source)) {
+            this["scopeTypes"] = [];
+        }
+        if (!("markets" in $$source)) {
+            this["markets"] = [];
+        }
+        if (!("holdingTypes" in $$source)) {
+            this["holdingTypes"] = [];
+        }
+        if (!("defaultBenchmark" in $$source)) {
+            this["defaultBenchmark"] = "";
+        }
+        if (!("defaultLayers" in $$source)) {
+            this["defaultLayers"] = 0;
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new PortfolioOptions instance from a string or object.
+     */
+    static createFrom($$source: any = {}): PortfolioOptions {
+        const $$createField0_0 = $$createType31;
+        const $$createField1_0 = $$createType31;
+        const $$createField2_0 = $$createType31;
+        const $$createField3_0 = $$createType31;
+        const $$createField4_0 = $$createType31;
+        const $$createField5_0 = $$createType31;
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        if ("types" in $$parsedSource) {
+            $$parsedSource["types"] = $$createField0_0($$parsedSource["types"]);
+        }
+        if ("strategies" in $$parsedSource) {
+            $$parsedSource["strategies"] = $$createField1_0($$parsedSource["strategies"]);
+        }
+        if ("statuses" in $$parsedSource) {
+            $$parsedSource["statuses"] = $$createField2_0($$parsedSource["statuses"]);
+        }
+        if ("scopeTypes" in $$parsedSource) {
+            $$parsedSource["scopeTypes"] = $$createField3_0($$parsedSource["scopeTypes"]);
+        }
+        if ("markets" in $$parsedSource) {
+            $$parsedSource["markets"] = $$createField4_0($$parsedSource["markets"]);
+        }
+        if ("holdingTypes" in $$parsedSource) {
+            $$parsedSource["holdingTypes"] = $$createField5_0($$parsedSource["holdingTypes"]);
+        }
+        return new PortfolioOptions($$parsedSource as Partial<PortfolioOptions>);
+    }
+}
+
+/**
  * ScreenCondition 是一整套筛选条件。零值表示"该条件不启用"。
  */
 export class ScreenCondition {
@@ -1564,8 +1673,8 @@ export class ScreenCondition {
      */
     static createFrom($$source: any = {}): ScreenCondition {
         const $$createField19_0 = $$createType0;
-        const $$createField26_0 = $$createType31;
-        const $$createField27_0 = $$createType33;
+        const $$createField26_0 = $$createType33;
+        const $$createField27_0 = $$createType35;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("markets" in $$parsedSource) {
             $$parsedSource["markets"] = $$createField19_0($$parsedSource["markets"]);
@@ -1608,7 +1717,7 @@ export class ScreenConditionInfo {
      * Creates a new ScreenConditionInfo instance from a string or object.
      */
     static createFrom($$source: any = {}): ScreenConditionInfo {
-        const $$createField0_0 = $$createType34;
+        const $$createField0_0 = $$createType36;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("condition" in $$parsedSource) {
             $$parsedSource["condition"] = $$createField0_0($$parsedSource["condition"]);
@@ -1750,7 +1859,7 @@ export class ScreenItem {
      */
     static createFrom($$source: any = {}): ScreenItem {
         const $$createField20_0 = $$createType0;
-        const $$createField22_0 = $$createType36;
+        const $$createField22_0 = $$createType38;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("boards" in $$parsedSource) {
             $$parsedSource["boards"] = $$createField20_0($$parsedSource["boards"]);
@@ -1825,11 +1934,11 @@ export class ScreenOptions {
      * Creates a new ScreenOptions instance from a string or object.
      */
     static createFrom($$source: any = {}): ScreenOptions {
-        const $$createField0_0 = $$createType38;
-        const $$createField1_0 = $$createType40;
+        const $$createField0_0 = $$createType40;
+        const $$createField1_0 = $$createType42;
         const $$createField2_0 = $$createType0;
-        const $$createField3_0 = $$createType42;
-        const $$createField6_0 = $$createType34;
+        const $$createField3_0 = $$createType44;
+        const $$createField6_0 = $$createType36;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("categories" in $$parsedSource) {
             $$parsedSource["categories"] = $$createField0_0($$parsedSource["categories"]);
@@ -1953,7 +2062,7 @@ export class ScreenResult {
      * Creates a new ScreenResult instance from a string or object.
      */
     static createFrom($$source: any = {}): ScreenResult {
-        const $$createField0_0 = $$createType44;
+        const $$createField0_0 = $$createType46;
         const $$createField10_0 = $$createType0;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("items" in $$parsedSource) {
@@ -2528,8 +2637,8 @@ export class StockUniverse {
      * Creates a new StockUniverse instance from a string or object.
      */
     static createFrom($$source: any = {}): StockUniverse {
-        const $$createField7_0 = $$createType40;
-        const $$createField8_0 = $$createType46;
+        const $$createField7_0 = $$createType42;
+        const $$createField8_0 = $$createType48;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("markets" in $$parsedSource) {
             $$parsedSource["markets"] = $$createField7_0($$parsedSource["markets"]);
@@ -2621,20 +2730,22 @@ const $$createType26 = $Create.Array($$createType25);
 const $$createType27 = MoneyFlowPoint.createFrom;
 const $$createType28 = $Create.Array($$createType27);
 const $$createType29 = config$0.KlinePrefs.createFrom;
-const $$createType30 = BoardFilter.createFrom;
+const $$createType30 = PortfolioOption.createFrom;
 const $$createType31 = $Create.Array($$createType30);
-const $$createType32 = MACondition.createFrom;
+const $$createType32 = BoardFilter.createFrom;
 const $$createType33 = $Create.Array($$createType32);
-const $$createType34 = ScreenCondition.createFrom;
-const $$createType35 = MAValue.createFrom;
-const $$createType36 = $Create.Array($$createType35);
-const $$createType37 = BoardCategoryInfo.createFrom;
+const $$createType34 = MACondition.createFrom;
+const $$createType35 = $Create.Array($$createType34);
+const $$createType36 = ScreenCondition.createFrom;
+const $$createType37 = MAValue.createFrom;
 const $$createType38 = $Create.Array($$createType37);
-const $$createType39 = MarketInfo.createFrom;
+const $$createType39 = BoardCategoryInfo.createFrom;
 const $$createType40 = $Create.Array($$createType39);
-const $$createType41 = LakeScreenCondition.createFrom;
+const $$createType41 = MarketInfo.createFrom;
 const $$createType42 = $Create.Array($$createType41);
-const $$createType43 = ScreenItem.createFrom;
+const $$createType43 = LakeScreenCondition.createFrom;
 const $$createType44 = $Create.Array($$createType43);
-const $$createType45 = StockItem.createFrom;
+const $$createType45 = ScreenItem.createFrom;
 const $$createType46 = $Create.Array($$createType45);
+const $$createType47 = StockItem.createFrom;
+const $$createType48 = $Create.Array($$createType47);

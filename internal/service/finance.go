@@ -355,8 +355,8 @@ func (s *StockService) financeSources(hasMoneyFlow bool, statements FinancialSta
 			Fallback:  statementFallback,
 		},
 		{
-			Key:       "share_structure",
-			Name:      "股本结构 / 股东户数 / 十大股东",
+			Key:  "share_structure",
+			Name: "股本结构 / 股东户数 / 十大股东",
 			Available: func() bool {
 				status, ok := datasetStatus(statements.Datasets, "share_structure")
 				return ok && status.Exists

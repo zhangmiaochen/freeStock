@@ -472,9 +472,93 @@ FreeStock 内置只读读取器（`internal/cnlake`），位置按优先级：
 - **读配置先于取数**：复权方式存在配置里，读晚了会先用默认值多发一次请求。
 - 界面上能看到它存在哪：K 线页的「指标设置」面板与设置页的「设置文件」卡片都会显示完整路径。
 
-### 9. 规划中的入口
+### 9. 组合管理（`/portfolio`）
 
-左侧菜单已预留**指标计算**，点击显示占位页。
+逻辑移植自 `tushare-stock-tonyz` 的 `portfolio_service.py` / `portfolio_store.py` /
+`portfolio_manager.py`。
+
+> **当前是阶段一**：组合 + 持仓管理。策略轮动与回测是后续阶段，见第 10 节。
+
+#### 9.1 存储：独立的 SQLite 库
+
+组合、持仓、流水存在**单独的 `portfolio.db`**（与 `config.json` 同目录），
+不塞进配置文件 —— 持仓流水会持续增长，配置文件不适合放这种数据。
+
+驱动是 `modernc.org/sqlite`（**纯 Go，不需要 CGO**），代价是 exe 从 19.5 MB 涨到 23.5 MB。
+
+组合库**按需打开**：首次用到组合功能时才建文件。这样即使安装目录只读
+（装在 `Program Files` 下），也不会因为建不了库而让整个程序起不来。
+
+三张表：
+
+| 表 | 说明 |
+|---|---|
+| `portfolio` | 组合主表 |
+| `portfolio_position` | 当前持仓，主键 `(portfolio_id, ts_code)` —— 一个组合一只股票只能有一条 |
+| `portfolio_position_txn` | 持仓流水，**只增不改**，作为唯一审计账 |
+
+原实现删组合时要手动级联清理 7 张表，漏一张就留垃圾；这里用外键
+`ON DELETE CASCADE` 让它自己清干净。
+
+#### 9.2 几条反直觉、但**如实照搬**的口径
+
+这几条是移植时最容易"顺手改好"、结果与原实现不一致的地方，
+所以代码注释和界面上都写明了：
+
+| 口径 | 说明 |
+|---|---|
+| **数量是「层数」，不是股数** | 1 层 = 总资金的 `1/总层数`。整个组合模块**没有股数字段**，股数只存在于后续的回测引擎里 |
+| **权重是「计划权重」** | `层数 ÷ 总层数 × 100`。股价翻倍后权重不会变，它不是市值权重 |
+| **组合收益率不含现金** | `Σ(逐仓收益率 × 权重)`，是持仓收益的加权和，**不除以权重之和**。两个 10% 仓位一涨一跌 → 收益率正好 0 |
+| **手动新增持仓时层数上限是 2** | 原实现 `min(2, max(1, ...))` 如此，尽管界面允许填到 999 |
+| **取不到现价记 0** | 不是 NULL、也不报错，盈亏按 0 计。界面会单独提示有几只没取到 |
+| **成本不含手续费** | 实盘成本口径；回测的成本才含费（阶段三） |
+| **`rebalance_frequency` 是死字段** | 无论传什么，写入恒为 `signal`（条件触发）—— 原实现如此，如实保留 |
+
+#### 9.3 两处有意的偏离
+
+都是为了让代码更干净，**算出来的数值与原来完全一致**：
+
+1. **`total_layers` 提升为组合级字段**。原实现把它放在一个全局的
+   `data/portfolio_config.json` 里（默认 10），每次算权重都去读那个文件 ——
+   于是"每个组合的仓位分母"实际上是个隐式的全局配置，多个组合无法用不同的分母。
+   这里显式建模成组合字段。
+2. **股票代码用 6 位裸码**（`600519`）。原实现用 `600519.SH`，而本项目其余部分
+   （行情、K 线、板块、选股）统一用裸码，混用两套写法只会制造 bug。
+   基准代码保留后缀（`000300.SH`），因为它是指数。
+
+#### 9.4 现价从哪来
+
+原实现从"最新评分日"的 `stock_strength_history.close_price` 取现价。
+本项目阶段一还没有评分表，改为取**最新交易日的日 K 收盘价** ——
+语义一致（都是最近一个有数据的交易日的收盘价），且复用股票列表的缓存，
+不会为几只持仓单独发请求。
+
+#### 9.5 数据库结构
+
+```sql
+portfolio(portfolio_id PK, name, portfolio_type, strategy_id, benchmark_code,
+          status, max_stock_count, target_position_count, total_layers,
+          rebalance_frequency, scope_type, scope_value_json, notes,
+          created_at, updated_at)
+
+portfolio_position(portfolio_id, ts_code, name, entry_price, entry_date,
+                   position_layers, position_weight, source_type, holding_type,
+                   strategy_tag, last_action, created_at, updated_at,
+                   PRIMARY KEY (portfolio_id, ts_code),
+                   FOREIGN KEY (portfolio_id) REFERENCES portfolio ON DELETE CASCADE)
+
+portfolio_position_txn(txn_id PK, portfolio_id, ts_code, name, trade_date,
+                       action, price, layers_delta, weight_delta, reason,
+                       source_signal_id, created_at,
+                       FOREIGN KEY (portfolio_id) REFERENCES portfolio ON DELETE CASCADE)
+```
+
+日期统一是 `YYYYMMDD` 字符串（与原实现一致，不是 DATE 类型）。
+
+### 10. 规划中的入口
+
+左侧菜单已预留**指标计算**，点击显示占位页。`/portfolio` 当前是**组合管理的阶段一**（组合 + 持仓），策略轮动与回测待后续阶段。
 
 ---
 
@@ -563,6 +647,7 @@ freeStock/
 │       ├── stock.go               # 股票列表 / 板块 / 数据源切换
 │       ├── board.go               # 板块行情聚合（加权/等权、换手率、涨跌家数、重叠识别）
 │       ├── screener.go            # 条件选股（分层筛选、板块匹配、均线与回撤、条件持久化）
+│       ├── portfolio.go           # 组合服务（惰性打开组合库、现价来源、Wails 方法）
 │       ├── kline.go               # 搜索索引（拼音）+ K 线 & 复权 & 快照
 │       ├── finance.go             # ROE 等推导指标 + 资金流 + 财报/股本/股东数据
 │       └── *_test.go              # 单元测试 + 合成数据湖测试 + 对拍本机 free-stockdb
@@ -573,6 +658,7 @@ freeStock/
 │   │   ├── components/layout/     # 侧边栏 / 顶栏
 │   │   ├── components/boards/     # 板块页子组件（热力图 / 表格 / 成分股面板）
 │   │   ├── components/screener/   # 选股页子组件（条件面板 / 区间输入 / 板块选择 / 结果表）
+│   │   ├── components/portfolio/  # 组合页子组件（组合表单）
 │   │   ├── components/kline/      # K 线页子组件（搜索框 / 信息栏 / 图表 / 均线与指标参数）
 │   │   ├── components/settings/   # 设置页子组件（数据湖卡片）│   │   ├── config/menu.ts         # 左侧菜单定义
 │   │   ├── router/index.ts        # 路由定义
@@ -581,7 +667,7 @@ freeStock/
 │   │   ├── lib/backend.ts         # Wails 绑定封装
 │   │   ├── lib/format.ts          # 数字/日期格式化
 │   │   └── views/                 # 页面：StockListView / KlineView / DataSourceView …
-│   └── tests/                     # 95 个前端用例（指标、store、各页面、外壳）
+│   └── tests/                     # 112 个前端用例（指标、store、各页面、外壳）
 ├── docs/free-stockdb-api.md       # 逆向整理的 free-stockdb HTTP 接口说明
 └── build/                         # Wails 打包配置（图标、Taskfile）
 ```
@@ -630,7 +716,7 @@ K  线   : 贵州茅台 2855 根（2015 起）+ 31 条分红；股息率 4.13%
 Go 测试里既有纯函数单测（推导指标、复权、拼音、市场分类），
 也有**对拍本机 free-stockdb 的集成测试**（服务不可达时自动 skip）。
 
-前端 95 个用例，覆盖：
+前端 112 个用例，覆盖：
 
 - `indicators.spec.ts` — 均线 / 布林 / MACD 数值、参数校正、日→周/月/年聚合（含 ISO 跨年周）、**资金流周期求和**
 - `stock.spec.ts` — 股票列表 store（市场、行业、搜索、排序、分页、未分类分组）+ 列表页联想搜索
@@ -639,6 +725,7 @@ Go 测试里既有纯函数单测（推导指标、复权、拼音、市场分�
 - `finance.spec.ts` — 财务数据页（四类数据渲染、表未入库、表在库但该股无记录、读取失败）
 - `boards.spec.ts` — 板块行情页（分类切换、排序、热力图裁剪、成分展开与过滤、重叠提示、覆盖徽标）
 - `screener.spec.ts` — 条件选股页（条件提交、板块选择、数据湖条件、区间启用、排序、进度条、指定/回退交易日、自动保存与读回、错误处理）
+- `portfolio.spec.ts` — 组合管理页（列表/总览、新建与编辑回填、持仓增删、口径说明、盈亏着色、缺现价提示）
 - `app.spec.ts` — 整体外壳（侧边栏 + 顶栏 + 路由）渲染
 
 ---

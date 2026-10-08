@@ -1,0 +1,563 @@
+// Package portfolio 实现组合管理（组合 + 持仓 + 流水）。
+//
+// 逻辑移植自 Python 项目 tushare-stock-tonyz 的
+// portfolio_service.py / portfolio_store.py / portfolio_manager.py。
+//
+// 移植时做了**两处有意的偏离**，都是为了去掉原实现里的耦合，
+// 但保证所有算出来的数值与原来一致：
+//
+//  1. **total_layers 提升为组合级字段**。原实现把它放在一个全局的
+//     data/portfolio_config.json 里（默认 10），每次算权重都去读那个文件 ——
+//     于是"每个组合的仓位分母"实际上是一个隐式的全局配置。这里显式建模成
+//     组合字段，语义不变、数值不变，但不再有隐式耦合。
+//
+//  2. **股票代码用 6 位裸码**（600519），与原项目的 600519.SH 不同。
+//     本项目其余部分（行情、K 线、板块）统一用裸码，混用两套写法只会制造
+//     bug。基准代码保留后缀（000300.SH），因为它是指数。
+//
+// 还有几处**如实照搬**的反直觉之处，不要"顺手改好"：
+//
+//   - 数量口径是**层数**（position_layers），不是股数。1 层 = 总资金的
+//     1/total_layers。股数只存在于回测引擎里。
+//   - 手动新增持仓时层数被 **clamp 到 [1,2]**，尽管界面允许输入到 999。
+//     （原实现如此，见 add_position）
+//   - position_weight 是**百分数**（0–100），算组合收益时才 /100。
+//   - 组合收益率 = Σ(逐仓收益率 × 权重)，**不含现金**，不是真金白银收益率。
+//   - 实盘持仓**没有金额字段**，也没有止盈止损价/目标价/备注。
+//   - 实盘成本**不含手续费**（回测的成本才含费）。
+package portfolio
+
+import (
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	_ "modernc.org/sqlite" // 纯 Go 驱动，不需要 CGO
+)
+
+// ---------------------------------------------------------------------------
+// 取值常量（与原项目一致）
+// ---------------------------------------------------------------------------
+
+// 组合类型。别名归一化见 NormalizeType。
+const (
+	TypeManual   = "manual"    // 手动组合：仅分析提醒
+	TypeSemiAuto = "semi_auto" // 半自动：人工确认后执行
+	TypeAuto     = "auto"      // 自动：可直接应用
+)
+
+// 组合类型对应的执行模式（原项目 portfolio_service 的三元组）。
+var executionModes = map[string]struct {
+	Mode                      string
+	ModeLabel                 string
+	AllowApplyRotation        bool
+	RequireManualConfirmation bool
+	ActionPrefix              string
+	TypeLabel                 string
+}{
+	TypeManual:   {"manual_review", "仅分析提醒", false, true, "人工复核", "手动组合"},
+	TypeSemiAuto: {"confirm_required", "人工确认后执行", true, true, "待确认", "半自动组合"},
+	TypeAuto:     {"auto_ready", "可直接应用", true, false, "", "自动组合"},
+}
+
+// 策略 ID。参数不落库，运行时现算（见 StrategyConfig）。
+const (
+	StrategyTrendGrowth = "trend_growth"
+	StrategyTrendLowBuy = "trend_pullback_low_buy"
+	StrategyOversold    = "oversold_rebound"
+	StrategyExpert      = "expert_simulation"
+)
+
+// strategyLabels 是策略 ID 的中文名。
+var strategyLabels = map[string]string{
+	StrategyTrendGrowth: "趋势成长",
+	StrategyTrendLowBuy: "趋势低吸",
+	StrategyOversold:    "超跌反弹",
+	StrategyExpert:      "高手模拟",
+}
+
+// 选股范围类型。
+const (
+	ScopeAll         = "all"
+	ScopeManualCodes = "manual_codes"
+	ScopeIndustry    = "industry"
+	ScopeConcept     = "concept"
+)
+
+// 组合状态。
+const (
+	StatusActive   = "active"
+	StatusPaused   = "paused"
+	StatusArchived = "archived"
+)
+
+// 持仓来源。
+const (
+	SourceManual = "manual"
+	SourceAuto   = "auto_compose"
+	SourceImport = "import_current"
+	SourceSystem = "system"
+)
+
+// 仓位性质。
+const (
+	HoldingSwing = "swing" // 波段仓
+	HoldingBase  = "base"  // 底仓
+)
+
+// RotationMode 是调仓频率的常量。原项目里这个字段是**死字段** ——
+// 无论界面传什么，写入时一律是 "signal"（条件触发）。
+const RotationMode = "signal"
+
+// DefaultTotalLayers 是层数上限的默认值（原项目 DEFAULT_TOTAL_LAYERS）。
+const DefaultTotalLayers = 10
+
+// DefaultBenchmark 是基准代码的默认值（原项目同样是 000300.SH）。
+const DefaultBenchmark = "000300.SH"
+
+// defaultBenchmark 是包内使用的别名。
+const defaultBenchmark = DefaultBenchmark
+
+// maxManualLayers 是**手动新增持仓**时层数的上限。
+//
+// 原项目把它硬编码成 2（`min(2, max(1, ...))`），而界面上允许输入到 999、
+// apply_rotation 的上限又是 3、低吸策略的上限是 total_layers —— 三处不一致。
+// 这里照搬 add_position 的 [1,2]，因为阶段一只做手动新增。
+const maxManualLayers = 2
+
+// ---------------------------------------------------------------------------
+// 模型
+// ---------------------------------------------------------------------------
+
+// Portfolio 是一个组合。
+type Portfolio struct {
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	Type          string `json:"type"` // manual / semi_auto / auto
+	TypeLabel     string `json:"typeLabel"`
+	StrategyID    string `json:"strategyId"` // trend_growth / ...
+	StrategyLabel string `json:"strategyLabel"`
+
+	BenchmarkCode string `json:"benchmarkCode"`
+	Status        string `json:"status"` // active / paused / archived
+
+	TargetPositionCount int `json:"targetPositionCount"`
+	MaxStockCount       int `json:"maxStockCount"`
+	// TotalLayers 是**仓位权重的分母**。原项目放在全局 JSON 里，这里提升为组合字段。
+	TotalLayers int `json:"totalLayers"`
+
+	// RebalanceFrequency 恒为 "signal"（条件触发）
+	RebalanceFrequency string `json:"rebalanceFrequency"`
+
+	ScopeType      string `json:"scopeType"`      // all / manual_codes / industry / concept
+	ScopeValueJSON string `json:"scopeValueJson"` // 见 ScopeValue
+	ScopeLabel     string `json:"scopeLabel"`
+
+	Notes string `json:"notes"`
+
+	CreatedAt string `json:"createdAt"`
+	UpdatedAt string `json:"updatedAt"`
+
+	// 执行模式三元组（由 Type 推导，便于界面直接用）
+	ExecutionMode             string `json:"executionMode"`
+	ExecutionModeLabel        string `json:"executionModeLabel"`
+	AllowApplyRotation        bool   `json:"allowApplyRotation"`
+	RequireManualConfirmation bool   `json:"requireManualConfirmation"`
+
+	// 运行时汇总（查询时填充，不落库）
+	PositionCount   int     `json:"positionCount"`
+	UsedLayers      int     `json:"usedLayers"`
+	AvailableLayers int     `json:"availableLayers"`
+	PositionRatio   float64 `json:"positionRatio"` // 已用层数占比 %
+}
+
+// ScopeValue 是 scope_value_json 的结构。键随 ScopeType 变化。
+type ScopeValue struct {
+	Codes   []string `json:"codes,omitempty"`   // manual_codes
+	Items   []string `json:"items,omitempty"`   // industry / concept
+	Markets []string `json:"markets,omitempty"` // main / gem / star
+}
+
+// Position 是一条持仓。
+//
+// 注意：**没有股数、没有市值、没有手续费、没有止盈止损价**。
+// 数量口径是层数，1 层 = 总资金的 1/totalLayers。
+type Position struct {
+	PortfolioID string `json:"portfolioId"`
+	Code        string `json:"code"` // 6 位裸码
+	Name        string `json:"name"`
+
+	// EntryPrice 是建仓均价，**不含手续费**（与原项目的实盘口径一致）
+	EntryPrice float64 `json:"entryPrice"`
+	EntryDate  string  `json:"entryDate"` // YYYYMMDD
+
+	PositionLayers int     `json:"positionLayers"`
+	PositionWeight float64 `json:"positionWeight"` // 百分数 0–100
+
+	SourceType  string `json:"sourceType"`  // manual / auto_compose / import_current / system
+	HoldingType string `json:"holdingType"` // swing / base / ""
+	StrategyTag string `json:"strategyTag"`
+	LastAction  string `json:"lastAction"`
+
+	CreatedAt string `json:"createdAt"`
+	UpdatedAt string `json:"updatedAt"`
+
+	// ---- 以下为查询时按行情填充，不落库 ----
+	CurrentPrice  float64 `json:"currentPrice"`  // 最新交易日收盘价；缺失为 0
+	ProfitLossPct float64 `json:"profitLossPct"` // (现价/成本-1)*100；成本为 0 记 0
+	PriceDate     string  `json:"priceDate"`     // 现价对应的交易日
+}
+
+// Transaction 是一条持仓流水。只有 INSERT，不修改 —— 唯一的审计账。
+type Transaction struct {
+	ID             string  `json:"id"`
+	PortfolioID    string  `json:"portfolioId"`
+	Code           string  `json:"code"`
+	Name           string  `json:"name"`
+	TradeDate      string  `json:"tradeDate"`
+	Action         string  `json:"action"` // buy / clear / add / keep / reduce / ...
+	Price          float64 `json:"price"`
+	LayersDelta    int     `json:"layersDelta"`
+	WeightDelta    float64 `json:"weightDelta"`
+	Reason         string  `json:"reason"`
+	SourceSignalID string  `json:"sourceSignalId"`
+	CreatedAt      string  `json:"createdAt"`
+}
+
+// Summary 是组合层面的汇总。
+//
+// 与 Python 一致：**现金不参与盈亏/收益率/权重**，收益率是持仓收益的加权和。
+type Summary struct {
+	PortfolioID     string  `json:"portfolioId"`
+	PositionCount   int     `json:"positionCount"`
+	UsedLayers      int     `json:"usedLayers"`
+	AvailableLayers int     `json:"availableLayers"`
+	PositionRatio   float64 `json:"positionRatio"` // 已用层数 / 总层数 * 100
+
+	// TotalReturnPct = Σ(逐仓收益率 × 权重)，权重是百分数 /100
+	TotalReturnPct float64 `json:"totalReturnPct"`
+	// MaxDrawdownPct 在阶段一无数据来源（原项目取持仓的 120 日回撤），
+	// 阶段三接入评分表后填充。
+	MaxDrawdownPct float64 `json:"maxDrawdownPct"`
+	PriceDate      string  `json:"priceDate"`
+	MissingPrices  int     `json:"missingPrices"`
+}
+
+// ---------------------------------------------------------------------------
+// 归一化（严格对齐原项目的 _normalize_* 规则）
+// ---------------------------------------------------------------------------
+
+// NormalizeType 归一化组合类型。无法识别 → manual。
+func NormalizeType(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case TypeManual, "手动", "手动组合", "manual_portfolio":
+		return TypeManual
+	case TypeSemiAuto, "半自动", "半自动组合", "semi", "semi-auto":
+		return TypeSemiAuto
+	case TypeAuto, "自动", "自动组合", "ai", "ai管理":
+		return TypeAuto
+	}
+	return TypeManual
+}
+
+// NormalizeStrategy 归一化策略 ID。
+// 缺省时回退到组合类型，再回退到 trend_growth（与原项目一致）。
+func NormalizeStrategy(strategyID, portfolioType string) string {
+	value := strings.ToLower(strings.TrimSpace(strategyID))
+	if _, ok := strategyLabels[value]; ok {
+		return value
+	}
+	// 原项目用 portfolio_type 兜底
+	switch NormalizeType(portfolioType) {
+	case TypeAuto:
+		return StrategyTrendGrowth
+	}
+	return StrategyTrendGrowth
+}
+
+// StrategyLabel 返回策略的中文名。
+func StrategyLabel(strategyID string) string {
+	if label, ok := strategyLabels[strategyID]; ok {
+		return label
+	}
+	return strategyLabels[StrategyTrendGrowth]
+}
+
+// NormalizeStatus 归一化状态。白名单外 → active。
+func NormalizeStatus(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case StatusActive, StatusPaused, StatusArchived:
+		return strings.ToLower(strings.TrimSpace(value))
+	}
+	return StatusActive
+}
+
+// NormalizeScopeType 归一化范围类型。无法识别 → all。
+func NormalizeScopeType(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case ScopeAll, "all_market", "market":
+		return ScopeAll
+	case ScopeManualCodes, "codes", "manual":
+		return ScopeManualCodes
+	case ScopeIndustry:
+		return ScopeIndustry
+	case ScopeConcept:
+		return ScopeConcept
+	}
+	return ScopeAll
+}
+
+// NormalizeScopeValue 把范围内容归一化成 JSON。
+func NormalizeScopeValue(scopeType string, value ScopeValue) string {
+	out := ScopeValue{}
+	switch scopeType {
+	case ScopeManualCodes:
+		out.Codes = cleanCodes(value.Codes)
+	case ScopeIndustry, ScopeConcept:
+		out.Items = cleanStrings(value.Items)
+	}
+	out.Markets = normalizeMarkets(value.Markets)
+	// 全选或为空 → 视为"全部市场"，不写 markets
+	if len(out.Markets) >= 3 {
+		out.Markets = nil
+	}
+	raw, err := json.Marshal(out)
+	if err != nil {
+		return "{}"
+	}
+	return string(raw)
+}
+
+// ParseScopeValue 解析 scope_value_json；坏数据返回空值而不是报错。
+func ParseScopeValue(raw string) ScopeValue {
+	var out ScopeValue
+	if strings.TrimSpace(raw) == "" {
+		return out
+	}
+	_ = json.Unmarshal([]byte(raw), &out)
+	return out
+}
+
+// normalizeMarkets 归一化市场取值。别名含中文与拼音缩写。
+func normalizeMarkets(values []string) []string {
+	out := make([]string, 0, 3)
+	seen := map[string]bool{}
+	for _, item := range values {
+		var key string
+		switch strings.ToLower(strings.TrimSpace(item)) {
+		case "main", "主板", "mb", "sh-main", "sz-main":
+			key = "main"
+		case "gem", "创业板", "cyb", "chinext":
+			key = "gem"
+		case "star", "科创板", "kcb":
+			key = "star"
+		default:
+			continue
+		}
+		if !seen[key] {
+			seen[key] = true
+			out = append(out, key)
+		}
+	}
+	return out
+}
+
+func cleanStrings(values []string) []string {
+	out := make([]string, 0, len(values))
+	seen := map[string]bool{}
+	for _, item := range values {
+		value := strings.TrimSpace(item)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	return out
+}
+
+// cleanCodes 清洗股票代码：统一成 6 位裸码。
+func cleanCodes(values []string) []string {
+	out := make([]string, 0, len(values))
+	seen := map[string]bool{}
+	for _, item := range values {
+		code := BareCode(item)
+		if code == "" || seen[code] {
+			continue
+		}
+		seen[code] = true
+		out = append(out, code)
+	}
+	return out
+}
+
+// BareCode 去掉交易所后缀：600519.SH → 600519。
+func BareCode(value string) string {
+	text := strings.ToUpper(strings.TrimSpace(value))
+	if idx := strings.Index(text, "."); idx >= 0 {
+		text = text[:idx]
+	}
+	return strings.TrimSpace(text)
+}
+
+// ---------------------------------------------------------------------------
+// 存储
+// ---------------------------------------------------------------------------
+
+// Store 是组合库（SQLite）。
+type Store struct {
+	db   *sql.DB
+	path string
+}
+
+// DefaultPath 返回组合库的默认路径：**与 config.json 同目录**。
+//
+// 组合数据量比配置大得多（流水会持续增长），所以单独一个文件，
+// 不塞进 config.json。
+func DefaultPath(configPath string) string {
+	if configPath == "" {
+		return "portfolio.db"
+	}
+	return filepath.Join(filepath.Dir(configPath), "portfolio.db")
+}
+
+// Open 打开（必要时创建）组合库并建表。
+func Open(path string) (*Store, error) {
+	if path == "" {
+		return nil, fmt.Errorf("组合库路径不能为空")
+	}
+	if dir := filepath.Dir(path); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, fmt.Errorf("创建组合库目录失败：%w", err)
+		}
+	}
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return nil, fmt.Errorf("打开组合库失败：%w", err)
+	}
+	// SQLite 单文件，并发写会互相阻塞；限制成单连接最省心
+	db.SetMaxOpenConns(1)
+
+	store := &Store{db: db, path: path}
+	if err := store.migrate(); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return store, nil
+}
+
+// Close 关闭组合库。
+func (s *Store) Close() error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	return s.db.Close()
+}
+
+// Path 返回组合库文件路径。
+func (s *Store) Path() string { return s.path }
+
+// schema 建表语句。
+//
+// 与原项目（DuckDB）的差异说明：
+//   - 原表所有列都可空且无默认值、无外键。这里给关键列加了 NOT NULL 与默认值 ——
+//     逻辑不变，但坏数据写不进去。
+//   - 原表 portfolio_id 是裸 VARCHAR 没有外键。这里加了 ON DELETE CASCADE，
+//     因为原项目删组合时要手动级联清理 7 张表，漏一张就留垃圾。
+//   - 日期仍是 YYYYMMDD 字符串（与原项目一致），不是 DATE 类型。
+const schema = `
+CREATE TABLE IF NOT EXISTS portfolio (
+  portfolio_id         TEXT PRIMARY KEY,
+  name                 TEXT NOT NULL,
+  portfolio_type       TEXT NOT NULL DEFAULT 'manual',
+  strategy_id          TEXT NOT NULL DEFAULT 'trend_growth',
+  benchmark_code       TEXT NOT NULL DEFAULT '000300.SH',
+  status               TEXT NOT NULL DEFAULT 'active',
+  max_stock_count      INTEGER NOT NULL DEFAULT 5,
+  target_position_count INTEGER NOT NULL DEFAULT 5,
+  total_layers         INTEGER NOT NULL DEFAULT 10,
+  rebalance_frequency  TEXT NOT NULL DEFAULT 'signal',
+  scope_type           TEXT NOT NULL DEFAULT 'all',
+  scope_value_json     TEXT NOT NULL DEFAULT '{}',
+  notes                TEXT NOT NULL DEFAULT '',
+  created_at           TEXT NOT NULL,
+  updated_at           TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS portfolio_position (
+  portfolio_id    TEXT NOT NULL,
+  ts_code         TEXT NOT NULL,
+  name            TEXT NOT NULL DEFAULT '',
+  entry_price     REAL NOT NULL DEFAULT 0,
+  entry_date      TEXT NOT NULL DEFAULT '',
+  position_layers INTEGER NOT NULL DEFAULT 1,
+  position_weight REAL NOT NULL DEFAULT 0,
+  source_type     TEXT NOT NULL DEFAULT 'manual',
+  holding_type    TEXT NOT NULL DEFAULT '',
+  strategy_tag    TEXT NOT NULL DEFAULT '',
+  last_action     TEXT NOT NULL DEFAULT '',
+  created_at      TEXT NOT NULL,
+  updated_at      TEXT NOT NULL,
+  PRIMARY KEY (portfolio_id, ts_code),
+  FOREIGN KEY (portfolio_id) REFERENCES portfolio(portfolio_id) ON DELETE CASCADE
+);
+
+-- 持仓流水：只有 INSERT，不做 UPDATE/DELETE（删组合时级联清理）。
+-- 原项目这张表没有已实现盈亏 —— 已实现盈亏只存在于回测成交表。
+CREATE TABLE IF NOT EXISTS portfolio_position_txn (
+  txn_id            TEXT PRIMARY KEY,
+  portfolio_id      TEXT NOT NULL,
+  ts_code           TEXT NOT NULL,
+  name              TEXT NOT NULL DEFAULT '',
+  trade_date        TEXT NOT NULL DEFAULT '',
+  action            TEXT NOT NULL,
+  price             REAL NOT NULL DEFAULT 0,
+  layers_delta      INTEGER NOT NULL DEFAULT 0,
+  weight_delta      REAL NOT NULL DEFAULT 0,
+  reason            TEXT NOT NULL DEFAULT '',
+  source_signal_id  TEXT NOT NULL DEFAULT '',
+  created_at        TEXT NOT NULL,
+  FOREIGN KEY (portfolio_id) REFERENCES portfolio(portfolio_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_position_portfolio ON portfolio_position(portfolio_id);
+CREATE INDEX IF NOT EXISTS idx_txn_portfolio      ON portfolio_position_txn(portfolio_id);
+CREATE INDEX IF NOT EXISTS idx_txn_code           ON portfolio_position_txn(portfolio_id, ts_code);
+`
+
+func (s *Store) migrate() error {
+	if _, err := s.db.Exec("PRAGMA foreign_keys = ON"); err != nil {
+		return fmt.Errorf("开启外键约束失败：%w", err)
+	}
+	if _, err := s.db.Exec(schema); err != nil {
+		return fmt.Errorf("建表失败：%w", err)
+	}
+	// 评分物化表（见 strength.go）
+	if err := s.migrateStrength(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// nowText 返回当前时间戳文本（原项目用 TIMESTAMP，这里用 RFC3339）。
+func nowText() string { return time.Now().Format(time.RFC3339) }
+
+// newPortfolioID 生成组合 ID，格式与原项目一致：
+// pf_{YYYYMMDDHHMMSSffffff}_{random8}
+func newPortfolioID() string {
+	now := time.Now()
+	suffix := fmt.Sprintf("%08x", now.UnixNano()&0xFFFFFFFF)
+	return fmt.Sprintf("pf_%s_%s", now.Format("20060102150405.000000"), suffix[:8])
+}
+
+// newTxnID 生成流水 ID。
+func newTxnID() string {
+	now := time.Now()
+	suffix := fmt.Sprintf("%08x", now.UnixNano()&0xFFFFFFFF)
+	return fmt.Sprintf("txn_%d_%s", now.UnixNano(), suffix[:8])
+}

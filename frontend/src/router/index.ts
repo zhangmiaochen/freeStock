@@ -42,6 +42,12 @@ export const routes = [
     meta: { title: "条件选股", subtitle: "基础面 + 行业/概念板块 + 技术形态组合筛选" },
   },
   {
+    path: "/portfolio",
+    name: "portfolio",
+    component: () => import("@/views/PortfolioView.vue"),
+    meta: { title: "组合管理", subtitle: "组合、持仓与浮动盈亏" },
+  },
+  {
     path: "/settings",
     name: "settings",
     component: () => import("@/views/DataSourceView.vue"),

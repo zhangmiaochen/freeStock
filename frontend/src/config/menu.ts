@@ -2,6 +2,7 @@ import type { Component } from "vue";
 import {
   Activity,
   BarChart3,
+  Briefcase,
   ChartLine,
   Database,
   Funnel,
@@ -42,6 +43,10 @@ export const menuGroups: MenuGroup[] = [
       { title: "指标计算", to: "/indicators", icon: Activity, badge: "规划中" },
       { title: "条件选股", to: "/screener", icon: Funnel },
     ],
+  },
+  {
+    label: "组合管理",
+    items: [{ title: "组合管理", to: "/portfolio", icon: Briefcase }],
   },
   {
     label: "系统",

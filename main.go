@@ -122,6 +122,9 @@ func main() {
 
 	store := config.NewStore()
 	stockService := service.NewStockService(store)
+	// 组合库按需打开（首次用到组合功能时才建文件），这里只构造服务
+	portfolioService := service.NewPortfolioService(stockService)
+	defer portfolioService.Close()
 
 	app := application.New(application.Options{
 		Name:        "FreeStock",
@@ -130,6 +133,7 @@ func main() {
 		LogLevel:    slog.LevelDebug,
 		Services: []application.Service{
 			application.NewService(stockService),
+			application.NewService(portfolioService),
 		},
 		Assets: application.AssetOptions{
 			Handler: application.AssetFileServerFS(assets),
