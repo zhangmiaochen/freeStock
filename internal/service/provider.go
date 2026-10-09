@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"sync"
@@ -197,7 +198,79 @@ type lakeProvider struct {
 	assets map[string]string // bare code -> asset_type
 	boards []stockdb.Board   // 行业 + 概念板块（缓存）
 	shares map[string][]cnlake.ShareStructureRow
+	// shareOnce 让"全量股本索引"只建一次
+	shareOnce sync.Once
+
+	// bulk 是**按交易日批量读**的缓存。
+	//
+	// 数据湖的 `daily_bars` **按交易日分区**（每个日分区约 40KB = 一天的全市场），
+	// 所以"一段区间 × 全市场"一次读只要秒级（实测 320 个交易日 / 174 万行 / 1.56s）；
+	// 而按代码读 `DailyBars(code, year, year)` 会把区间内**每个日文件**都打开一遍
+	// 再按代码过滤（实测 861ms/只，全市场 1h20m）。
+	//
+	// 所以第一次有人要某段区间时，就把这段区间的**全市场**一次读进来，
+	// 后续所有代码直接从内存取 —— **对调用方完全透明**。
+	bulkMu   sync.Mutex
+	bulkFrom int
+	bulkTo   int
+	bulkBars map[string][]cnlake.BarRow
+
+	// valuations 是 `code -> 日期 -> 估值行` 的索引。
+	//
+	// `Valuations(code, ...)` 是**每只股票把整个数据集读一遍再过滤**，
+	// 数据集虽小（0.2MB），但 parquet 打开+解码是固定开销，
+	// 逐只调用时实测约 99ms/只 —— 比日线还慢。
+	// 一次读完建索引后，命中是 O(1)。
+	valMu      sync.Mutex
+	valuations map[string]map[int64]cnlake.ValuationRow
+	valLoaded  bool
 }
+
+// valuationFor 取某只股票在 [start, end] 内的估值行（按日期）。
+func (p *lakeProvider) valuationFor(code string, start, end int) map[int64]cnlake.ValuationRow {
+	p.valMu.Lock()
+	defer p.valMu.Unlock()
+	if !p.valLoaded {
+		rows, err := p.lake.AllValuations()
+		if err == nil {
+			index := make(map[string]map[int64]cnlake.ValuationRow, 8192)
+			for _, row := range rows {
+				bare := cnlake.BareSymbol(row.Symbol)
+				if bare == "" {
+					continue
+				}
+				byDate := index[bare]
+				if byDate == nil {
+					byDate = map[int64]cnlake.ValuationRow{}
+					index[bare] = byDate
+				}
+				byDate[row.Date()] = row
+			}
+			p.valuations = index
+			p.valLoaded = true
+			slog.Info("数据湖估值索引就绪", "codes", len(index), "rows", len(rows))
+		}
+	}
+	byDate := p.valuations[cnlake.BareSymbol(code)]
+	if len(byDate) == 0 {
+		return nil
+	}
+	out := make(map[int64]cnlake.ValuationRow, len(byDate))
+	for date, row := range byDate {
+		if date < int64(start) || date > int64(end) {
+			continue
+		}
+		out[date] = row
+	}
+	return out
+}
+
+// bulkMaxDays 是允许走批量读的**最长区间**（交易日数）。
+//
+// 上限的意义是**给内存封顶**：一天约 5500 只股票，
+// 400 个交易日约 220 万行。再长就会把整段历史读进内存
+// （K 线页可能一次要十年），所以那种情况仍走按代码读。
+const bulkMaxDays = 400
 
 // NewLakeProvider 用数据湖构造行情来源。
 func NewLakeProvider(lake *cnlake.Lake) Provider {
@@ -357,6 +430,96 @@ func (p *lakeProvider) buildQuote(bare, name string, bar cnlake.BarRow, prevClos
 }
 
 // quoteRange 组装一只股票的区间行情。
+// barsFor 取某只股票 [start, end] 的日线，**优先走批量缓存**。
+//
+// 返回的行是 `[start, end]`（调用方还会再按日期过滤一遍，所以这里多给也无妨）。
+// 走不了批量就回落到按代码读 —— 结果必须完全一致。
+func (p *lakeProvider) barsFor(code string, start, end int) ([]cnlake.BarRow, error) {
+	if bars, ok := p.cachedBars(code, start, end); ok {
+		return bars, nil
+	}
+
+	// 区间够短 → 一次把**全市场**读进来，后续所有代码直接命中内存
+	if p.bulkFillAllowed(start, end) {
+		if err := p.fillBulk(start, end); err == nil {
+			if bars, ok := p.cachedBars(code, start, end); ok {
+				return bars, nil
+			}
+		}
+		// 批量失败不算错 —— 回落到按代码读，只是慢
+	}
+
+	return p.lake.DailyBars(code, start/10000, end/10000)
+}
+
+// cachedBars 命中批量缓存时返回该股票的日线。
+func (p *lakeProvider) cachedBars(code string, start, end int) ([]cnlake.BarRow, bool) {
+	p.bulkMu.Lock()
+	defer p.bulkMu.Unlock()
+	if p.bulkBars == nil || start < p.bulkFrom || end > p.bulkTo {
+		return nil, false
+	}
+	bars, ok := p.bulkBars[cnlake.BareSymbol(code)]
+	if !ok {
+		// 缓存**覆盖了这个区间**但该股票没数据 —— 这也是有效答案
+		return nil, true
+	}
+	return bars, true
+}
+
+// bulkFillAllowed 判断这个区间是否适合批量读（按"区间内的交易日数"算）。
+func (p *lakeProvider) bulkFillAllowed(start, end int) bool {
+	p.bulkMu.Lock()
+	covered := p.bulkBars != nil && start >= p.bulkFrom && end <= p.bulkTo
+	p.bulkMu.Unlock()
+	if covered {
+		return false // 已经覆盖，不必再灌
+	}
+	dates, err := p.lake.DatesInRange(int64(start), int64(end))
+	if err != nil {
+		return false
+	}
+	return len(dates) > 0 && len(dates) <= bulkMaxDays
+}
+
+// fillBulk 把 [start, end] 的**全市场**日线一次读进内存。
+//
+// 全程持锁：并发调用时只灌一次，其它 goroutine 等它完成即可
+// （读一遍约 1.5 秒，比各自重复读划算得多）。
+func (p *lakeProvider) fillBulk(start, end int) error {
+	p.bulkMu.Lock()
+	defer p.bulkMu.Unlock()
+	if p.bulkBars != nil && start >= p.bulkFrom && end <= p.bulkTo {
+		return nil
+	}
+
+	began := time.Now()
+	rows, err := p.lake.DailyBarsInRange(nil, int64(start), int64(end))
+	if err != nil {
+		return fmt.Errorf("批量读取数据湖 daily_bars 失败：%w", err)
+	}
+
+	byCode := make(map[string][]cnlake.BarRow, 8192)
+	for _, row := range rows {
+		bare := cnlake.BareSymbol(row.Symbol)
+		if bare == "" {
+			continue
+		}
+		byCode[bare] = append(byCode[bare], row)
+	}
+
+	// 这里**替换**而不是合并：换了区间就重建，
+	// 否则缓存会随区间扩张无限增长
+	p.bulkBars = byCode
+	p.bulkFrom = start
+	p.bulkTo = end
+	slog.Info("数据湖批量读完成",
+		"from", start, "to", end,
+		"codes", len(byCode), "rows", len(rows),
+		"elapsed", time.Since(began).Round(time.Millisecond))
+	return nil
+}
+
 func (p *lakeProvider) quoteRange(code string, start, end int, desc bool) ([]*stockdb.Quote, error) {
 	if err := p.ensureMeta(); err != nil {
 		return nil, err
@@ -368,17 +531,18 @@ func (p *lakeProvider) quoteRange(code string, start, end int, desc bool) ([]*st
 		start = 19900101
 	}
 
-	bars, err := p.lake.DailyBars(code, start/10000, end/10000)
+	// ⚠ 这一行是**唯一**的取数步骤。走批量缓存时它由"扫区间内每个日文件"
+	// 变成"一次读全市场 + 内存命中"（实测快 3 个数量级，且逐字段一致）。
+	// 下面的估值/股本/前收/过滤/排序**完全不变**，保证输出一致。
+	bars, err := p.barsFor(code, start, end)
 	if err != nil {
 		return nil, fmt.Errorf("读取数据湖 daily_bars 失败：%w", err)
 	}
 
 	// 估值表可能缺失（或只有部分年份），缺失时行情照样出，只是没有 PE/PB
-	valuations, _ := p.lake.Valuations(code, start/10000, end/10000)
-	byDate := make(map[int64]cnlake.ValuationRow, len(valuations))
-	for _, row := range valuations {
-		byDate[row.Date()] = row
-	}
+	// ⚠ 改成走**一次建好的索引**：原来每只股票都把这个数据集读一遍再过滤，
+	// parquet 的固定开销乘以股票数（实测约 99ms/只），比日线还慢。
+	byDate := p.valuationFor(code, start, end)
 
 	bare := cnlake.BareSymbol(code)
 	shares := p.shareHistory(bare)
@@ -511,18 +675,32 @@ func (p *lakeProvider) shareHistory(code string) []cnlake.ShareStructureRow {
 		return cached
 	}
 
-	rows, err := p.lake.ShareStructures(bare)
-	if err != nil {
-		rows = nil
-	}
+	// ⚠ **一次读出全部股本行建索引**，而不是每只扫一遍整个数据集。
+	// `ShareStructures(code)` 每次都要读 6.1MB / 26 个分区再过滤，
+	// 实测约 84ms/只 —— 在日线和估值都批量化之后，这是最后一个按代码的慢路径。
+	p.shareOnce.Do(func() {
+		rows, err := p.lake.AllShareStructures()
+		if err != nil {
+			return
+		}
+		index := make(map[string][]cnlake.ShareStructureRow, 8192)
+		for _, row := range rows {
+			code := cnlake.BareSymbol(row.Symbol)
+			if code == "" {
+				continue
+			}
+			index[code] = append(index[code], row)
+		}
+		p.mu.Lock()
+		p.shares = index
+		p.mu.Unlock()
+		slog.Info("数据湖股本索引就绪", "codes", len(index), "rows", len(rows))
+	})
 
 	p.mu.Lock()
-	if p.shares == nil {
-		p.shares = map[string][]cnlake.ShareStructureRow{}
-	}
-	p.shares[bare] = rows
+	cached = p.shares[bare]
 	p.mu.Unlock()
-	return rows
+	return cached
 }
 
 // sharesFor 找出截至 date 生效的股本。

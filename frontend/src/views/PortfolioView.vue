@@ -88,8 +88,31 @@ const planError = ref("");
 const applying = ref(false);
 const refreshing = ref(false);
 const strength = ref<StrengthSummary | null>(null);
-/** 刷新评分时评多少只（保护数据源，全市场要几分钟） */
-const refreshLimit = ref(800);
+/** 刷新评分时评多少只。**默认 0 = 全市场**（原版没有这个参数，广度闸门需要全市场样本） */
+const refreshLimit = ref(0);
+
+/**
+ * 「刷新评分 / 全量重算 / 指定区间」都是**统一刷新所有活跃策略**
+ *（原版 refresh_latest / refresh_backfill 也是全局的：取所有**非归档**组合
+ * 用到的策略去重后一次刷完）。这里把范围显式讲出来，避免用户以为
+ * 只刷了当前组合、或者以为没生效。
+ */
+const activeStrategies = ref<string[]>([]);
+const refreshScopeHint = computed(() => {
+  const names = activeStrategies.value;
+  const scope = refreshLimit.value > 0 ? `前 ${refreshLimit.value} 只` : "全市场";
+  if (names.length === 0) return `刷新全部活跃策略（${scope}）`;
+  return `统一刷新 ${names.length} 个活跃策略：${names.join("、")}（${scope}）`;
+});
+
+/** 拉一次活跃策略列表（非归档组合用到的策略，去重） */
+async function loadActiveStrategies() {
+  try {
+    activeStrategies.value = (await api.portfolio.activeStrategyIds()) as string[];
+  } catch {
+    activeStrategies.value = [];
+  }
+} // **默认全市场** —— 广度闸门按全市场统计，只评一部分会判成「广度不足」并删光买入信号
 
 // ---- 指定区间刷新 ----
 //
@@ -135,24 +158,36 @@ async function refreshRange(force = false) {
   planError.value = "";
   applyResult.value = "";
   try {
-    const result = (await api.portfolio.refreshBackfill(
-      current.value.portfolio.strategyId,
+    // **刷所有活跃策略**（原版 `refresh_backfill(start, end)` 也是全局的）。
+    // 只刷当前组合的策略会让其它组合的区间评分悄悄过期。
+    const result = (await api.portfolio.refreshBackfillAll(
       start,
       end,
       refreshLimit.value,
       force,
     )) as unknown as {
-      days: number; scored: number; skipped: string[];
-      elapsed: string; reused: number; scoredFromCache: number;
+      days: number; scored: number; reused: number; total: number; elapsed: string;
+      strategies: { strategyLabel: string; scored: number; reused: number; error?: string }[];
     };
     await loadStrength();
     await loadPlan();
     const scope = refreshLimit.value > 0 ? `前 ${refreshLimit.value} 只` : "全市场";
+    const failed = (result.strategies ?? []).filter((s) => s.error);
+    const perStrategy = (result.strategies ?? [])
+      .map((s) =>
+        s.error ? `${s.strategyLabel}✗` : `${s.strategyLabel} ${s.scored} 天`,
+      )
+      .join("，");
     applyResult.value =
-      `区间评分完成（${scope}）：${result.days} 个交易日，实算 ${result.scored} 天` +
-      (result.scoredFromCache > 0 ? `、跳过已完成 ${result.scoredFromCache} 天` : "") +
-      (result.reused > 0 ? `、复用已有 ${result.reused} 条` : "") +
-      `，耗时 ${result.elapsed}`;
+      `区间评分完成（${scope}）：${result.days} 个交易日、` +
+      `${result.strategies?.length ?? 0} 个活跃策略` +
+      `（实算 ${result.scored} 天、复用 ${result.reused} 条，耗时 ${result.elapsed}）` +
+      (perStrategy ? `：${perStrategy}` : "");
+    if (failed.length > 0) {
+      planError.value = `以下策略区间回填失败：${failed
+        .map((s) => `${s.strategyLabel}（${s.error}）`)
+        .join("；")}`;
+    }
   } catch (err) {
     planError.value = errorMessage(err);
   } finally {
@@ -442,6 +477,9 @@ function openKline(code: string) {
 onMounted(async () => {
   await loadOptions();
   await loadList();
+  // 活跃策略列表只用来给「刷新评分（全部策略）」按钮显示范围，
+  // 失败不影响主流程
+  void loadActiveStrategies();
 });
 </script>
 
@@ -780,23 +818,34 @@ onMounted(async () => {
                   <select
                     v-model.number="refreshLimit"
                     class="bg-background h-6 rounded border px-1 text-[11px] outline-none"
+                    title="广度闸门按**全市场**统计「评分≥70 的只数」。只评一部分会让它被系统性低估，判成「广度不足」并删光买入信号 —— 回测就会一笔都不成交。"
                   >
-                    <option :value="300">300</option>
-                    <option :value="800">800</option>
+                    <option :value="0">全市场</option>
+                    <option :value="3000">3000</option>
                     <option :value="1500">1500</option>
-                    <option :value="0">全市场（很慢）</option>
+                    <option :value="800">800</option>
+                    <option :value="300">300</option>
                   </select>
                 </label>
-                <Button size="xs" variant="outline" :disabled="refreshing" @click="refreshStrength(false)">
+                <!-- ⚠ 这几个按钮都是**统一刷新所有活跃策略**（原版 refresh_latest /
+                     refresh_backfill 也是全局的，取所有非归档组合用到的策略去重）。
+                     只刷当前组合会让其它组合的评分悄悄过期。 -->
+                <Button
+                  size="xs"
+                  variant="outline"
+                  :disabled="refreshing"
+                  :title="refreshScopeHint"
+                  @click="refreshStrength(false)"
+                >
                   <LoaderCircle v-if="refreshing" class="animate-spin" />
                   <RefreshCw v-else />
-                  {{ refreshing ? "评分中…" : "刷新评分" }}
+                  {{ refreshing ? "评分中…" : "刷新评分（全部策略）" }}
                 </Button>
                 <Button
                   size="xs"
                   variant="ghost"
                   :disabled="refreshing"
-                  title="忽略已有评分，全部重算（数据修订后需要覆盖时用）"
+                  :title="`忽略已有评分全部重算 —— ${refreshScopeHint}`"
                   @click="refreshStrength(true)"
                 >
                   <RefreshCw v-if="!refreshing" />
@@ -806,7 +855,7 @@ onMounted(async () => {
                   size="xs"
                   variant="outline"
                   :disabled="rangeRefreshing"
-                  title="给指定区间内每个交易日打分 —— 回测需要的就是这个"
+                  :title="`给指定区间内每个交易日打分（全部活跃策略）—— 回测需要的就是这个`"
                   @click="toggleRange(!useRange)"
                 >
                   <CalendarDays v-if="!rangeRefreshing" />
@@ -918,7 +967,8 @@ onMounted(async () => {
             >
               <template v-if="!strength || !strength.latestDate">
                 还没有 {{ current.portfolio.strategyLabel }} 的评分数据。
-                评分需要对全市场逐股拉一年日线，先点「刷新评分」（约 {{ refreshLimit || "几" }} 只需要几分钟）。
+                点「刷新评分（全部策略）」—— {{ refreshLimit > 0 ? `只评前 ${refreshLimit} 只` : "评全市场" }}，
+                全市场约 30 秒。
               </template>
               <template v-else>
                 点「生成建议」查看候选池与调仓动作

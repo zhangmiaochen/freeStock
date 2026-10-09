@@ -273,6 +273,22 @@ export function RefreshBackfill(strategyID: string, startDate: number, endDate: 
 }
 
 /**
+ * RefreshBackfillAll 刷新**所有活跃策略**在 [startDate, endDate] 区间的评分。
+ * 
+ * 与 `RefreshStrengthAll` 同理：原实现的 `refresh_backfill(start, end)` 也是
+ * **全局**操作（portfolio_service.py:685，取 `_active_strategy_ids()` 一次刷完），
+ * 而且**连 limit 参数都没有**。
+ * 
+ * ⚠ 前端「指定区间」按钮此前只刷当前组合的策略 —— 其它组合的评分会悄悄过期，
+ * 区间数据更容易被忽略（用户以为整段历史都算好了）。
+ */
+export function RefreshBackfillAll(startDate: number, endDate: number, limit: number, force: boolean): $CancellablePromise<$models.BackfillAllResult | null> {
+    return $Call.ByID(2095863476, startDate, endDate, limit, force).then(($result: any) => {
+        return $$createType33($result);
+    });
+}
+
+/**
  * RefreshStrength 给指定策略评分并把结果物化。
  * 
  * limit > 0 时只评前 limit 只（保护数据源；全市场 7000+ 次请求要几分钟）。
@@ -292,7 +308,7 @@ export function RefreshBackfill(strategyID: string, startDate: number, endDate: 
  */
 export function RefreshStrength(strategyID: string, limit: number, force: boolean): $CancellablePromise<$models.RefreshResult | null> {
     return $Call.ByID(3438224358, strategyID, limit, force).then(($result: any) => {
-        return $$createType33($result);
+        return $$createType35($result);
     });
 }
 
@@ -304,7 +320,7 @@ export function RefreshStrength(strategyID: string, limit: number, force: boolea
  */
 export function RefreshStrengthAll(limit: number, force: boolean): $CancellablePromise<$models.RefreshAllResult | null> {
     return $Call.ByID(757294405, limit, force).then(($result: any) => {
-        return $$createType35($result);
+        return $$createType37($result);
     });
 }
 
@@ -350,7 +366,9 @@ const $$createType28 = $Create.Array($$createType27);
 const $$createType29 = $Create.Array($$createType11);
 const $$createType30 = $models.BackfillResult.createFrom;
 const $$createType31 = $Create.Nullable($$createType30);
-const $$createType32 = $models.RefreshResult.createFrom;
+const $$createType32 = $models.BackfillAllResult.createFrom;
 const $$createType33 = $Create.Nullable($$createType32);
-const $$createType34 = $models.RefreshAllResult.createFrom;
+const $$createType34 = $models.RefreshResult.createFrom;
 const $$createType35 = $Create.Nullable($$createType34);
+const $$createType36 = $models.RefreshAllResult.createFrom;
+const $$createType37 = $Create.Nullable($$createType36);

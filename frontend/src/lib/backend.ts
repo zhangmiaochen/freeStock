@@ -58,6 +58,7 @@ import type { Metrics as BacktestMetrics } from "../../bindings/freestock/intern
 import type {
   AutoPortfolioRequest,
   AutoPortfolioResult,
+  BackfillAllResult,
   BackfillResult,
   BacktestPayload,
   BacktestRequest,
@@ -293,6 +294,13 @@ export const api = {
       force = false,
     ) =>
       PortfolioService.RefreshBackfill(strategyId, startDate, endDate, limit, force) as Promise<BackfillResult>,
+
+    /**
+     * 区间回填**所有活跃策略**（原版 `refresh_backfill` 的语义 —— 它也是全局的，
+     * 取所有非归档组合用到的策略一次刷完）。
+     */
+    refreshBackfillAll: (startDate: number, endDate: number, limit: number, force = false) =>
+      PortfolioService.RefreshBackfillAll(startDate, endDate, limit, force) as Promise<BackfillAllResult>,
     /** 跑一次回测（区间内必须有已回填的历史评分） */
     createBacktest: (req: BacktestRequest) =>
       PortfolioService.CreateBacktest(req) as Promise<BacktestRunResult>,

@@ -87,6 +87,89 @@ type RefreshAllResult struct {
 	Total  int `json:"total"`
 }
 
+// RefreshBackfillAll 刷新**所有活跃策略**在 [startDate, endDate] 区间的评分。
+//
+// 与 `RefreshStrengthAll` 同理：原实现的 `refresh_backfill(start, end)` 也是
+// **全局**操作（portfolio_service.py:685，取 `_active_strategy_ids()` 一次刷完），
+// 而且**连 limit 参数都没有**。
+//
+// ⚠ 前端「指定区间」按钮此前只刷当前组合的策略 —— 其它组合的评分会悄悄过期，
+// 区间数据更容易被忽略（用户以为整段历史都算好了）。
+func (s *PortfolioService) RefreshBackfillAll(startDate, endDate, limit int, force bool) (*BackfillAllResult, error) {
+	store, err := s.db()
+	if err != nil {
+		return nil, err
+	}
+	ids, err := activeStrategyIDs(store)
+	if err != nil {
+		return nil, err
+	}
+
+	out := &BackfillAllResult{
+		StartDate: startDate, EndDate: endDate, Limit: limit, Force: force,
+		Strategies: make([]BackfillStrategy, 0, len(ids)),
+	}
+	began := time.Now()
+	for _, id := range ids {
+		entry := BackfillStrategy{StrategyID: id, StrategyLabel: score.StrategyLabelOf(id)}
+		result, err := s.RefreshBackfill(id, startDate, endDate, limit, force)
+		if err != nil {
+			entry.Error = err.Error()
+			out.Strategies = append(out.Strategies, entry)
+			slog.Warn("区间回填失败", "strategy", id, "err", err)
+			continue
+		}
+		entry.Days = result.Days
+		entry.Scored = result.Scored
+		entry.Reused = result.Reused
+		entry.Total = result.Total
+		if len(result.Dates) > 0 {
+			entry.StartDate, entry.EndDate = result.Dates[0], result.Dates[len(result.Dates)-1]
+		}
+		if result.Days > out.Days {
+			out.Days = result.Days
+		}
+		out.Scored += result.Scored
+		out.Reused += result.Reused
+		out.Total += result.Total
+		out.Dates = result.Dates // 交易日历与策略无关，取最后一个即可
+		out.Strategies = append(out.Strategies, entry)
+	}
+	out.Elapsed = time.Since(began).Round(time.Millisecond).String()
+	slog.Info("区间回填所有活跃策略完成",
+		"strategies", len(out.Strategies), "days", out.Days,
+		"scored", out.Scored, "reused", out.Reused, "elapsed", out.Elapsed)
+	return out, nil
+}
+
+// BackfillStrategy 是单个策略的区间回填结果。
+type BackfillStrategy struct {
+	StrategyID    string `json:"strategyId"`
+	StrategyLabel string `json:"strategyLabel"`
+	StartDate     int    `json:"startDate"`
+	EndDate       int    `json:"endDate"`
+	Days          int    `json:"days"`
+	Scored        int    `json:"scored"`
+	Reused        int    `json:"reused"`
+	Total         int    `json:"total"`
+	Error         string `json:"error,omitempty"`
+}
+
+// BackfillAllResult 是"区间回填所有活跃策略"的结果。
+type BackfillAllResult struct {
+	StartDate  int                `json:"startDate"`
+	EndDate    int                `json:"endDate"`
+	Limit      int                `json:"limit"`
+	Force      bool               `json:"force"`
+	Elapsed    string             `json:"elapsed"`
+	Days       int                `json:"days"`
+	Scored     int                `json:"scored"`
+	Reused     int                `json:"reused"`
+	Total      int                `json:"total"`
+	Dates      []int              `json:"dates"`
+	Strategies []BackfillStrategy `json:"strategies"`
+}
+
 // RefreshStrengthAll 刷新所有活跃策略的评分（原版 `refresh_latest` 的语义）。
 //
 // 单个策略失败**不影响其它策略** —— 错误记在该策略的 `Error` 上，

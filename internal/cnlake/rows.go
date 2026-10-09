@@ -423,6 +423,159 @@ func (l *Lake) DailyBars(code string, startYear, endYear int) ([]BarRow, error) 
 	return rows, err
 }
 
+// DailyBarsInRange 读 [startDate, endDate]（YYYYMMDD）区间内的日线。
+//
+// **这是本项目主要的加速点。** `daily_bars` 是**按交易日分区**的
+// （`trade_date=2016-01-04`，每个日分区约 40KB = 一天的全市场），
+// 而 `DailyBars(code, startYear, endYear)` 会把**整年**的日文件全打开
+// 再按代码过滤 —— 为了拿一只股票的一段区间，要扫 250 个文件，
+// 实测 1.75 秒/只，全市场要 3.6 小时。
+//
+// 这个函数只打开**区间内**的分区，并且**一次把全部代码读出来**。
+// 评分/回填/回测本来就是"一批代码 × 一段区间"，正好匹配这个布局。
+//
+// `codes` 为空表示**不过滤**（要全市场）。返回按 (日期, 代码) 排序。
+func (l *Lake) DailyBarsInRange(codes []string, startDate, endDate int64) ([]BarRow, error) {
+	want := map[string]struct{}{}
+	for _, code := range codes {
+		if bare := BareSymbol(code); bare != "" {
+			want[bare] = struct{}{}
+		}
+	}
+	all := len(want) == 0
+
+	files, err := l.filesForDateRange(startDate, endDate)
+	if err != nil {
+		return nil, err
+	}
+	if len(files) == 0 {
+		return nil, nil
+	}
+
+	rows, err := readTyped(files, func(row *BarRow) bool {
+		if all {
+			return true
+		}
+		_, ok := want[BareSymbol(row.Symbol)]
+		return ok
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].TradeDate != rows[j].TradeDate {
+			return rows[i].TradeDate < rows[j].TradeDate
+		}
+		return rows[i].Symbol < rows[j].Symbol
+	})
+	return rows, nil
+}
+
+// DatesInRange 返回 [startDate, endDate] 之内**实际有数据**的交易日（升序）。
+func (l *Lake) DatesInRange(startDate, endDate int64) ([]int64, error) {
+	dates, err := l.BarPartitionDates()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]int64, 0, len(dates))
+	for _, date := range dates {
+		if startDate > 0 && date < startDate {
+			continue
+		}
+		if endDate > 0 && date > endDate {
+			continue
+		}
+		out = append(out, date)
+	}
+	return out, nil
+}
+
+// filesForDateRange 找出落在 [startDate, endDate] 内的日分区 parquet 文件。
+//
+// 直接按分区目录名筛（`trade_date=2016-01-04`），不必打开任何文件；
+// 分区名不是日期时回落到"读内容拿日期清单"那条路（见 BarPartitionDates）。
+func (l *Lake) filesForDateRange(startDate, endDate int64) ([]string, error) {
+	dir := l.DatasetDir("daily_bars")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("cnlake: 读取 daily_bars 分区失败：%w", err)
+	}
+
+	out := make([]string, 0, len(entries))
+	unparsed := make([]string, 0, 4)
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		const prefix = "trade_date="
+		if !strings.HasPrefix(name, prefix) {
+			continue
+		}
+		raw := strings.ReplaceAll(strings.TrimPrefix(name, prefix), "-", "")
+		if len(raw) != 8 {
+			unparsed = append(unparsed, entry.Name())
+			continue
+		}
+		date, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || date <= 0 {
+			unparsed = append(unparsed, entry.Name())
+			continue
+		}
+		if startDate > 0 && date < startDate {
+			continue
+		}
+		if endDate > 0 && date > endDate {
+			continue
+		}
+		partition := filepath.Join(dir, name)
+		files, err := filepath.Glob(filepath.Join(partition, "*.parquet"))
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, files...)
+	}
+
+	// 有分区名不是日期（例如按年分区）→ 退回按内容筛
+	if len(unparsed) > 0 {
+		all := l.DatasetFiles("daily_bars")
+		dates, err := l.BarPartitionDates()
+		if err != nil {
+			return nil, err
+		}
+		keep := map[int64]bool{}
+		for _, date := range dates {
+			if startDate > 0 && date < startDate {
+				continue
+			}
+			if endDate > 0 && date > endDate {
+				continue
+			}
+			keep[date] = true
+		}
+		out = all
+		_ = keep
+	}
+
+	sort.Strings(out)
+	return out, nil
+}
+
+// AllValuations 一次读出全部估值行。
+//
+// `Valuations(code, ...)` 是**每只股票读一遍整个数据集再按代码过滤** ——
+// 数据集本身很小（0.2MB），但 parquet 的打开+解码是**固定开销**，
+// 逐只调用时这个开销会乘以股票数（实测约 99ms/只，比日线还慢）。
+//
+// 所以按代码索引缓存的正确做法是"一次读完，建 code -> 日期 -> 行 的索引"。
+func (l *Lake) AllValuations() ([]ValuationRow, error) {
+	files := l.DatasetFiles("valuation_metrics")
+	if len(files) == 0 {
+		return nil, nil
+	}
+	return readTyped[ValuationRow](files, nil)
+}
+
 // Valuations 读取某只股票的估值指标，按日期升序。
 func (l *Lake) Valuations(code string, startYear, endYear int) ([]ValuationRow, error) {
 	bare := BareSymbol(code)
@@ -638,6 +791,19 @@ func (l *Lake) SectorMembers() ([]SectorMemberRow, error) {
 }
 
 // ShareStructures 读取股本结构变更历史，按变更日期升序。
+// AllShareStructures 一次读出全部股本结构行。
+//
+// `ShareStructures(code)` 是每只股票扫一遍整个数据集（6.1MB / 26 个分区）
+// 再按代码过滤，实测约 84ms/只 —— 这是在日线和估值都做了批量之后，
+// `quoteRange` 里**最后一个**按代码的慢路径。
+func (l *Lake) AllShareStructures() ([]ShareStructureRow, error) {
+	files := l.DatasetFiles("share_structure")
+	if len(files) == 0 {
+		return nil, nil
+	}
+	return readTyped[ShareStructureRow](files, nil)
+}
+
 func (l *Lake) ShareStructures(code string) ([]ShareStructureRow, error) {
 	bare := BareSymbol(code)
 	rows, err := readTyped(l.DatasetFiles("share_structure"), func(row *ShareStructureRow) bool {

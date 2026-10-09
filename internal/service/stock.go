@@ -142,8 +142,15 @@ type StockService struct {
 	source   config.DataSource
 
 	universeMu sync.Mutex
-	universe   *StockUniverse
-	universeAt time.Time
+	// universeGen 是缓存代次。
+	//
+	// ⚠ **用原子量而不是用 `universeMu`**：`ClearCache`（每次切换数据源都会调）
+	// 必须能在**不抢锁**的情况下让正在进行的加载作废 —— 否则切换会被一次
+	// 几分钟的全量列表加载堵死（数据湖上按代码逐只读，可长达数分钟），
+	// 用户看到的是「点了切换没反应」。
+	universeGen atomic.Int64
+	universe    *StockUniverse
+	universeAt  time.Time
 
 	boardsMu sync.Mutex
 	boards   []stockdb.Board
@@ -496,11 +503,24 @@ func (s *StockService) GetConfigPath() string {
 }
 
 // ClearCache 清空内存缓存，下次请求会重新拉取。
+//
+// ⚠ **不能死等这些锁**。`switchProvider` 每次切换都调它，而
+// `GetStockUniverse` 是**全程持 `universeMu`** 的（加载一次可能要几分钟，
+// 数据湖上尤其慢）。如果这里用 `Lock()`，切换数据源就会一直卡到那次加载结束 ——
+// 用户的复现步骤正是这样：切到数据湖 → 进股票列表（触发慢加载）→
+// 回设置页点切换 → **没反应**。
+//
+// 所以改成：先**原子地推进代次**（让正在进行的加载不会写回旧源的数据），
+// 再用 `TryLock` 顺手清一把；拿不到锁说明加载在进行，而它结束时会自己
+// 发现代次变了并清空缓存（见 `GetStockUniverse`）。
 func (s *StockService) ClearCache() {
-	s.universeMu.Lock()
-	s.universe = nil
-	s.universeAt = time.Time{}
-	s.universeMu.Unlock()
+	s.universeGen.Add(1)
+
+	if s.universeMu.TryLock() {
+		s.universe = nil
+		s.universeAt = time.Time{}
+		s.universeMu.Unlock()
+	}
 
 	s.boardsMu.Lock()
 	s.boards = nil
@@ -526,6 +546,8 @@ func (s *StockService) GetStockUniverse(refresh bool) (*StockUniverse, error) {
 	if !refresh && s.universe != nil && time.Since(s.universeAt) < universeTTL {
 		return s.universe, nil
 	}
+	// 记下加载开始时的代次：加载期间若切换了数据源，结果就不能写回
+	gen := s.universeGen.Load()
 
 	started := time.Now()
 	provider, source := s.snapshot()
@@ -541,6 +563,14 @@ func (s *StockService) GetStockUniverse(refresh bool) (*StockUniverse, error) {
 	result, err := s.buildUniverse(ctx, provider, source, tradeDate, started)
 	if err != nil {
 		return nil, err
+	}
+
+	// 加载期间数据源换过 → 这份结果属于**旧源**，不能写进缓存，
+	// 顺便把旧源的缓存清掉（`ClearCache` 因为抢不到锁，把这一步让给了这里）
+	if s.universeGen.Load() != gen {
+		s.universe = nil
+		s.universeAt = time.Time{}
+		return result, nil
 	}
 
 	s.universe = result

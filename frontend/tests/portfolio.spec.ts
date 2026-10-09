@@ -484,8 +484,10 @@ describe("组合管理页面", () => {
     const { wrapper } = await mountPage();
 
     expect(wrapper.text()).toContain("尚未评分");
-    expect(wrapper.text()).toContain("刷新评分");
-    expect(wrapper.text()).toContain("日线");
+    // 按钮上必须写明"全部策略" —— 用户此前看不出它会统一刷新
+    expect(wrapper.text()).toContain("刷新评分（全部策略）");
+    // 提示要说清评的是**全市场**（只评一部分会让广度闸门误判）
+    expect(wrapper.text()).toContain("全市场");
   });
 
   it("刷新评分刷所有活跃策略并传只数", async () => {
@@ -494,7 +496,10 @@ describe("组合管理页面", () => {
     await vi.waitFor(() => expect(mocks.refreshStrengthAll).toHaveBeenCalled());
 
     const [limit, force] = mocks.refreshStrengthAll.mock.calls[0];
-    expect(limit).toBe(800); // 默认档
+    // ⚠ **默认必须是 0（全市场）** —— 原版根本没有 limit 参数，
+    // 而广度闸门按"全市场评分≥70 的只数"统计；默认只评 800 只会让它
+    // 被系统性低估、判成"广度不足"并删光买入信号（回测一笔都不成交）。
+    expect(limit).toBe(0);
     // 「刷新评分」是**增量**（force=false），不重算已算过的；
     // 且**不再传策略 ID** —— 原版是一次刷所有活跃策略
     expect(force).toBe(false);
