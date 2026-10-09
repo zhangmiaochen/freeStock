@@ -622,7 +622,24 @@ export class PortfolioInput {
     "maxStockCount": number | null;
     "totalLayers": number;
     "scopeType": string;
-    "scopeValue": ScopeValue;
+
+    /**
+     * ScopeValue 用指针区分"**未提供**"与"**显式传空范围**"。
+     * 
+     * 原实现是按 `None` 判的（portfolio_service.py:3609-3614）：
+     * 
+     * 	raw = payload.get("scope_value")
+     * 	if raw is None: raw = payload.get("scope_value_json")
+     * 	if raw is None: raw = base.get("scope_value_json")
+     * 
+     * 即"**显式传空**"= 清空范围，"**根本没传**"= 沿用旧值。
+     * 此前 `ScopeValue` 是值类型，两者不可区分，只能退一步用
+     * "内容为空且 scopeType 未变"近似 —— 于是"显式清空范围内容"会表现为没生效。
+     * 
+     * 前端 `PortfolioForm.vue` 总是回填并回传当前范围，所以改成指针不会
+     * 造成"只改名字却把范围清空"（那才是更糟的副作用）。
+     */
+    "scopeValue": ScopeValue | null;
     "notes": string;
 
     /** Creates a new PortfolioInput instance. */
@@ -655,7 +672,7 @@ export class PortfolioInput {
             this["scopeType"] = "";
         }
         if (!("scopeValue" in $$source)) {
-            this["scopeValue"] = (new ScopeValue());
+            this["scopeValue"] = null;
         }
         if (!("notes" in $$source)) {
             this["notes"] = "";
@@ -668,7 +685,7 @@ export class PortfolioInput {
      * Creates a new PortfolioInput instance from a string or object.
      */
     static createFrom($$source: any = {}): PortfolioInput {
-        const $$createField9_0 = $$createType7;
+        const $$createField9_0 = $$createType8;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("scopeValue" in $$parsedSource) {
             $$parsedSource["scopeValue"] = $$createField9_0($$parsedSource["scopeValue"]);
@@ -1212,3 +1229,4 @@ const $$createType4 = Transaction.createFrom;
 const $$createType5 = $Create.Array($$createType4);
 const $$createType6 = Summary.createFrom;
 const $$createType7 = ScopeValue.createFrom;
+const $$createType8 = $Create.Nullable($$createType7);

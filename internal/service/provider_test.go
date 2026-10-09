@@ -60,8 +60,11 @@ func TestLakeProviderLatestTradeDate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LatestTradeDate 失败: %v", err)
 	}
-	if date != 20260930 {
-		t.Errorf("最新交易日错误: %d", date)
+	// 合成湖故意造成"日历到 20260930、daily_bars 只到 20260320"，
+	// 与真实数据湖同构（真实：日历到 2027，bar 只到 2026-10-08）。
+	// 「最新交易日」必须取**实际有 bar** 的那天。
+	if date != 20260320 {
+		t.Errorf("最新交易日应为最后一个 bar 的日期 20260320，实际 %d", date)
 	}
 }
 

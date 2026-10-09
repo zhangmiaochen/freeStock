@@ -62,6 +62,7 @@ import type {
   BacktestPayload,
   BacktestRequest,
   BacktestRunResult,
+  RefreshAllResult,
 } from "../../bindings/freestock/internal/service/models";
 import type {
   AppliedChange,
@@ -250,6 +251,18 @@ export const api = {
      */
     refreshStrength: (strategyId: string, limit: number, force = false) =>
       PortfolioService.RefreshStrength(strategyId, limit, force) as Promise<RefreshResult>,
+
+    /**
+     * 刷新**所有活跃策略**的评分（原版 `refresh_latest` 的语义）。
+     *
+     * 原版取"所有非归档组合用到的策略"去重后一次刷完；
+     * 只刷当前组合的话，其它组合的评分会**悄悄过期**。
+     */
+    refreshStrengthAll: (limit: number, force = false) =>
+      PortfolioService.RefreshStrengthAll(limit, force) as Promise<RefreshAllResult>,
+    /** 当前活跃策略列表（非归档组合用到的，去重） */
+    activeStrategyIds: () =>
+      PortfolioService.ActiveStrategyIDs() as Promise<string[]>,
     getStrengthSummary: (strategyId: string) =>
       PortfolioService.GetStrengthSummary(strategyId) as Promise<StrengthSummary>,
     /** 生成调仓建议 */

@@ -662,19 +662,48 @@ func breadthThresholds(strategyID string) (readyScore float64, minReadyCount int
 //
 // 分子分母都应当在**全量评分**上算（原实现 portfolio_rotation_logic.py:1772-1786
 // `universe_count = len(scores)`、`ready_count = (scores >= ready_score).sum()`）。
-func breadthEntryAllowed(universeScores []float64, strategyID string) bool {
-	universeCount := len(universeScores)
-	if universeCount < 100 {
-		return true
+// BreadthDetail 是广度闸门的明细（原实现 `policy`/`summary` 里的
+// `market_breadth_ready_count` / `_min_ready_count` / `_universe_count` / `_entry_allowed`）。
+//
+// **为什么要暴露出来**：用户看到"没有建议"时，界面此前只给了一句猜测性提示
+// （"候选池为空说明当前市场状态下没有股票达到建仓质量门槛"）。
+// 而真实原因往往是"广度不够"——回填范围小于全市场时尤其如此
+// （广度判的是**全市场**里评分 ≥70 的只数）。
+// 把这三个数字摆出来，用户一眼就能判断该不该扩大回填范围。
+// ⚠ 必须带 json tag：Wails 按 tag 生成 TS 绑定，
+// 没有 tag 时字段名会原样变成 PascalCase，与前端的 camelCase 约定不一致。
+type BreadthDetail struct {
+	Enabled       bool    `json:"enabled"`
+	ReadyCount    int     `json:"readyCount"`
+	MinReadyCount int     `json:"minReadyCount"`
+	UniverseCount int     `json:"universeCount"`
+	ReadyScore    float64 `json:"readyScore"`
+}
+
+// BreadthOf 算出广度明细。`universe < 100` 时闸门不启用（直接放行），与原实现一致。
+func BreadthOf(universeScores []float64, strategyID string) BreadthDetail {
+	detail := BreadthDetail{
+		UniverseCount: len(universeScores),
 	}
 	readyScore, minReadyCount := breadthThresholds(strategyID)
-	readyCount := 0
-	for _, score := range universeScores {
-		if score >= readyScore {
-			readyCount++
+	detail.ReadyScore = readyScore
+	detail.MinReadyCount = minReadyCount
+	for _, v := range universeScores {
+		if v >= readyScore {
+			detail.ReadyCount++
 		}
 	}
-	return readyCount >= minReadyCount
+	detail.Enabled = len(universeScores) >= 100
+	return detail
+}
+
+// Allowed 返回闸门是否放行（不启用时恒为 true）。
+func (d BreadthDetail) Allowed() bool {
+	return !d.Enabled || d.ReadyCount >= d.MinReadyCount
+}
+
+func breadthEntryAllowed(universeScores []float64, strategyID string) bool {
+	return BreadthOf(universeScores, strategyID).Allowed()
 }
 
 // applyBreadthGate 广度不足时的处理：

@@ -35,8 +35,20 @@ type Metrics struct {
 	AvgProfit        float64 `json:"avgProfit"`
 	AvgLoss          float64 `json:"avgLoss"`
 	// 短期回测警告（少于 60 个交易日时年化会被显著放大）
-	IsShortPeriod       bool   `json:"isShortPeriod"`
-	AnnualReturnWarning string `json:"annualReturnWarning"`
+	// ---- 相对基准的指标（原实现 _calculate_relative_metrics）----
+	//
+	// 这几项此前**整体缺失**：原版会算超额收益、Beta、Alpha（Jensen's）、
+	// 信息比率，而我这边 Metrics 里连字段都没有。
+	ExcessReturn        float64 `json:"excessReturn"`
+	Beta                float64 `json:"beta"`
+	Alpha               float64 `json:"alpha"`
+	InformationRatio    float64 `json:"informationRatio"`
+	IsShortPeriod       bool    `json:"isShortPeriod"`
+	AnnualReturnWarning string  `json:"annualReturnWarning"`
+	// ScopeWarning 提示"回填范围远小于全市场" —— 这会让广度闸门误判，
+	// 进而删光所有买入信号（回测零成交的常见原因）。
+	// 见 service 侧的 backtestScopeWarning。
+	ScopeWarning string `json:"scopeWarning"`
 }
 
 // CalculateMetrics 计算全部指标。
@@ -117,6 +129,9 @@ func CalculateMetrics(snapshots []Snapshot, trades []Trade, initialCapital float
 		}
 	}
 
+	// 相对基准的指标（原实现 `_calculate_relative_metrics` :206-252）
+	calculateRelativeMetrics(&out, snapshots, annual)
+
 	// 交易日统计
 	for _, snap := range snapshots {
 		switch {
@@ -196,4 +211,103 @@ func sampleStd(values []float64) float64 {
 		sum += d * d
 	}
 	return math.Sqrt(sum / float64(n-1))
+}
+
+// calculateRelativeMetrics 算相对基准的四个指标。
+//
+// 对应原实现 `MetricsCalculator._calculate_relative_metrics`（:206-252）：
+//
+//	excess_return      = total_return - 末个基准收益率
+//	beta               = cov(策略日收益, 基准日收益) / var(基准日收益)
+//	alpha (Jensen's)   = 年化 - (无风险 + beta × (基准年化 - 无风险))
+//	information_ratio  = mean(超额日收益) × 252 / (std(超额日收益) × √252)
+//
+// ⚠ 协方差与标准差都按**样本口径（ddof=1）**，与 `np.cov` / `pandas.std()` 一致。
+// ⚠ 基准数据缺失（首日基准净值为 0）时**整体跳过** —— 原实现也是直接 return。
+func calculateRelativeMetrics(out *Metrics, snapshots []Snapshot, annualReturn float64) {
+	if len(snapshots) < 2 {
+		return
+	}
+	// 原实现：`if benchmark_values.iloc[0] > 0` 才算，否则 return
+	if snapshots[0].BenchmarkValue <= 0 {
+		return
+	}
+
+	finalBenchmarkReturn := snapshots[len(snapshots)-1].BenchmarkReturn
+	out.ExcessReturn = round2(out.TotalReturn - finalBenchmarkReturn)
+
+	// 基准日收益：`benchmark_values.pct_change().fillna(0)`
+	n := len(snapshots)
+	strategy := make([]float64, n)
+	benchmark := make([]float64, n)
+	for i, snap := range snapshots {
+		strategy[i] = snap.DailyReturn / 100
+		if i == 0 {
+			benchmark[i] = 0
+			continue
+		}
+		prev := snapshots[i-1].BenchmarkValue
+		if prev > 0 {
+			benchmark[i] = snap.BenchmarkValue/prev - 1
+		}
+	}
+
+	// beta = cov01 / cov11（样本协方差，(n-1) 会约掉）
+	cov01, cov11 := sampleCovariance(strategy, benchmark), sampleVariance(benchmark)
+	if cov11 > 0 {
+		out.Beta = round2(cov01 / cov11)
+	}
+
+	// alpha：注意基准年化用的是**末个基准收益率**（原实现 :242）
+	benchmarkAnnual := finalBenchmarkReturn / 100
+	expected := riskFreeRate + out.Beta*(benchmarkAnnual-riskFreeRate)
+	out.Alpha = round2((annualReturn - expected) * 100)
+
+	// 信息比率
+	excess := make([]float64, n)
+	for i := range strategy {
+		excess[i] = strategy[i] - benchmark[i]
+	}
+	trackingError := sampleStd(excess) * math.Sqrt(tradingDaysPerYear)
+	if trackingError > 0 {
+		avgExcess := mean(excess) * tradingDaysPerYear
+		out.InformationRatio = round2(avgExcess / trackingError)
+	}
+}
+
+func mean(values []float64) float64 {
+	if len(values) == 0 {
+		return 0
+	}
+	sum := 0.0
+	for _, v := range values {
+		sum += v
+	}
+	return sum / float64(len(values))
+}
+
+// sampleVariance 是样本方差（ddof=1），与 `np.cov` 的对角元一致。
+func sampleVariance(values []float64) float64 {
+	if len(values) < 2 {
+		return 0
+	}
+	m := mean(values)
+	sum := 0.0
+	for _, v := range values {
+		sum += (v - m) * (v - m)
+	}
+	return sum / float64(len(values)-1)
+}
+
+// sampleCovariance 是样本协方差（ddof=1），与 `np.cov(x,y)[0][1]` 一致。
+func sampleCovariance(x, y []float64) float64 {
+	if len(x) < 2 || len(x) != len(y) {
+		return 0
+	}
+	mx, my := mean(x), mean(y)
+	sum := 0.0
+	for i := range x {
+		sum += (x[i] - mx) * (y[i] - my)
+	}
+	return sum / float64(len(x)-1)
 }

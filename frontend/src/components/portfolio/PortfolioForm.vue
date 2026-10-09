@@ -20,7 +20,17 @@ const props = defineProps<{
 }>();
 const emit = defineEmits<{ submit: [PortfolioInput]; cancel: [] }>();
 
-function emptyForm(): PortfolioInput {
+/**
+ * 表单模型：`scopeValue` 在**表单里恒为非空**。
+ *
+ * 绑定层的 `PortfolioInput.scopeValue` 是可空的（go 侧用指针区分
+ * "没传"与"传空"），但本表单**总是提供**范围 —— 编辑时回填当前值、
+ * 新建时给空数组。若直接用可空类型，模板里到处都要 `?.`，
+ * 反而掩盖了"表单一定有值"这个事实。
+ */
+type PortfolioFormModel = Omit<PortfolioInput, "scopeValue"> & { scopeValue: ScopeValue };
+
+function emptyForm(): PortfolioFormModel {
   return {
     name: "",
     type: "manual",
@@ -33,10 +43,10 @@ function emptyForm(): PortfolioInput {
     scopeType: "all",
     scopeValue: { codes: [], items: [], markets: [] },
     notes: "",
-  } as PortfolioInput;
+  };
 }
 
-const form = ref<PortfolioInput>(emptyForm());
+const form = ref<PortfolioFormModel>(emptyForm());
 /** 范围内容用文本域编辑，提交时按行拆成数组 */
 const scopeText = ref("");
 const error = ref("");
@@ -63,7 +73,7 @@ watch(
       scopeType: item.scopeType,
       scopeValue: { codes: [], items: [], markets: [] },
       notes: item.notes ?? "",
-    } as PortfolioInput;
+    } as PortfolioFormModel;
     // 回填范围内容
     try {
       const parsed = JSON.parse(item.scopeValueJson || "{}") as ScopeValue;

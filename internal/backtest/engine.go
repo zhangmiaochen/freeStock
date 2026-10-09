@@ -153,6 +153,13 @@ type Engine struct {
 	priceMap       map[string]map[string]PriceBar
 	benchmark      map[string]float64
 
+	// dateIndex 是"交易日 → 在 dates 里的序号"，Run 开始时填好。
+	//
+	// `_build_held_rows` 要算 `holding_trade_days = current_index - buy_index + 1`
+	//（**交易日**口径，不是自然日），据此判断"加层够不够天数""买后是否短期急涨"。
+	// 不填的话这些规则全部按 0 天走，回测结果会系统性偏离原实现。
+	dateIndex map[string]int
+
 	trades    []Trade
 	snapshots []Snapshot
 }
@@ -225,6 +232,16 @@ func (e *Engine) layerBudget(totalValue float64, layerCount int) float64 {
 }
 
 // affordableBuyShares 对应原实现 :174-190：算上手续费后买得起的股数。
+//
+// ⚠ **这里必须每次至少减 1 股。**
+//
+// 原实现是 `shares -= max(1, int(excess / max(deal_price, 1e-9)))`；
+// 我此前写成了 `max0(...)` —— 而 `excess` 只是"手续费那点差额"，
+// 通常远小于股价，`int(excess/price)` 恒为 **0**，
+// 于是 `shares` 永不减少 → **死循环**，`shares < 0` 那道保险也永远不触发。
+//
+// 后果：回测只要走到"真正下单"这一步就会**卡死**。
+// 之前没暴露是因为广度闸门把所有买入行都删了（根本没走到下单）。
 func (e *Engine) affordableBuyShares(available, price float64) int {
 	if available <= 0 || price <= 0 {
 		return 0
@@ -238,7 +255,8 @@ func (e *Engine) affordableBuyShares(available, price float64) int {
 			return shares
 		}
 		excess := total - available
-		shares -= max0(int(excess / math.Max(price, 1e-9)))
+		// 至少减 1 —— 与 `max(1, ...)` 一致，保证循环一定收敛
+		shares -= max1(int(excess / math.Max(price, 1e-9)))
 		if shares < 0 {
 			return 0
 		}

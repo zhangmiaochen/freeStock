@@ -1,6 +1,7 @@
 package backtest
 
 import (
+	"log/slog"
 	"math"
 	"sort"
 	"strconv"
@@ -8,6 +9,17 @@ import (
 
 	"freestock/internal/score"
 )
+
+// trace 打一条逐日耗时日志（供诊断"回测卡在哪一天"）。
+//
+// 只在耗时明显时打，避免正常回测刷屏。
+func (e *Engine) trace(stage, date string, elapsed time.Duration, extra int) {
+	if elapsed < 300*time.Millisecond {
+		return
+	}
+	slog.Info("回测逐日耗时", "stage", stage, "date", date,
+		"elapsed", elapsed.Round(time.Millisecond), "n", extra)
+}
 
 // PlanBuilder 由调用方注入：给定"当日持仓行"与"当日评分截面"，
 // 产出一份调仓计划。
@@ -29,6 +41,11 @@ func (e *Engine) Run(buildPlan PlanBuilder) (*Result, error) {
 	if len(dates) == 0 {
 		return &Result{}, nil
 	}
+	// 交易日序号表：`_build_held_rows` 的 holding_trade_days 要用
+	e.dateIndex = make(map[string]int, len(dates))
+	for i, date := range dates {
+		e.dateIndex[date] = i
+	}
 
 	benchmarkBase := e.benchmark[dates[0]]
 	positions := map[string]*Position{}
@@ -44,7 +61,9 @@ func (e *Engine) Run(buildPlan PlanBuilder) (*Result, error) {
 		executionNAV := totalValue
 
 		if pendingPlan != nil {
+			execBegan := time.Now()
 			e.executePlan(positions, &cash, *pendingPlan, tradeDate, executionNAV, pendingSignalDate)
+			e.trace("执行计划", tradeDate, time.Since(execBegan), len(e.trades)-tradeCountBefore)
 		}
 
 		// 盯市：用当日 close
@@ -66,10 +85,12 @@ func (e *Engine) Run(buildPlan PlanBuilder) (*Result, error) {
 
 		// 用**当日收盘后**的数据生成下一交易日的计划
 		if hasStrength && buildPlan != nil {
+			planBegan := time.Now()
 			held := e.heldRows(positions, day)
 			plan := buildPlan(held, day)
 			pendingPlan = &plan
 			pendingSignalDate = tradeDate
+			e.trace("生成计划", tradeDate, time.Since(planBegan), len(plan.Rows))
 		} else {
 			pendingPlan = nil
 			pendingSignalDate = ""
@@ -208,6 +229,17 @@ func (e *Engine) heldRows(positions map[string]*Position, day StrengthDay) []sco
 		row.EntryPrice = pos.CostPrice
 		row.CurrentPrice = pos.CurrentPrice
 		row.HighestPrice = pos.HighestPrice
+		// 持有**交易日**数（原实现 :215）：
+		// `max(0, current_index - buy_index + 1)` —— 当天买算 1 天。
+		// 两个序号都取不到时记 0（原实现同样回落 0）。
+		if current, okCur := e.dateIndex[day.Date]; okCur {
+			if bought, okBuy := e.dateIndex[pos.BuyDate]; okBuy {
+				held := current - bought + 1
+				if held > 0 {
+					row.HoldingTradeDays = held
+				}
+			}
+		}
 		if pos.CostPrice > 0 && pos.CurrentPrice > 0 {
 			row.ProfitLossPct = (pos.CurrentPrice/pos.CostPrice - 1) * 100
 		}

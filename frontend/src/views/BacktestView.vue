@@ -96,6 +96,12 @@ const warning = computed(() => {
   return typeof value === "string" ? value : "";
 });
 
+/** 回填范围过小时的提示（广度闸门会误判 → 买入信号被删光 → 零成交） */
+const scopeWarning = computed(() => {
+  const value = metrics.value["scope_warning"];
+  return typeof value === "string" ? value : "";
+});
+
 async function loadPortfolios() {
   const list = (await api.portfolio.list()) as unknown as PortfolioLite[];
   portfolios.value = list ?? [];
@@ -316,6 +322,14 @@ onActivated(refreshOnShow); // KeepAlive 下每次切回来
           <div><div class="text-muted-foreground">胜率</div><div class="text-lg font-semibold">{{ num("win_rate") }}%</div></div>
         </div>
         <p v-if="warning" class="mt-3 text-xs text-amber-600 dark:text-amber-400">{{ warning }}</p>
+        <!-- 回填范围远小于全市场时，广度闸门会误判并把买入信号全删掉 —— 这是
+             "回测一笔都不成交"最常见的原因，必须显眼地讲出来 -->
+        <p
+          v-if="scopeWarning"
+          class="mt-2 rounded-md border border-amber-500/40 bg-amber-500/5 p-2 text-xs text-amber-700 dark:text-amber-300"
+        >
+          ⚠ {{ scopeWarning }}
+        </p>
       </CardContent>
     </Card>
 

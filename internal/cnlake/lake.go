@@ -47,6 +47,14 @@ type Lake struct {
 	mu    sync.Mutex
 	files map[string][]string // 数据集 -> parquet 文件列表（带缓存）
 
+	// daily_bars 的日期清单缓存。
+	//
+	// 只有当分区名**不是**日期时才需要（真实湖是按日分区 `trade_date=2016-01-04`，
+	// 直接解析目录名即可；测试/部分数据集按年分区 `trade_date=2026`，才要读内容）。
+	barDatesMu     sync.Mutex
+	barDates       []int64
+	barDatesLoaded bool
+
 	// 静态数据集缓存：内容几乎不变，读一次就留着
 	instruments []InstrumentRow
 	industries  []IndustryMemberRow

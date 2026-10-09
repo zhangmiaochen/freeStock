@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
   addPosition: vi.fn(),
   removePosition: vi.fn(),
   refreshStrength: vi.fn(),
+  refreshStrengthAll: vi.fn(),
   getStrengthSummary: vi.fn(),
   buildPlan: vi.fn(),
   applyRotation: vi.fn(),
@@ -200,12 +201,15 @@ beforeEach(() => {
   mocks.getStrengthSummary.mockResolvedValue({
     strategyId: "trend_growth", latestDate: 20261008, count: 302, dates: [20261008],
   });
-  mocks.refreshStrength.mockResolvedValue({
-    tradeDate: 20261008, saved: 302, skipped: 0, limit: 800,
-    // 增量刷新新增的三个字段（见 RefreshResult）
-    reused: 0, total: 302, skippedFromCache: false,
-    marketState: { marketState: "bear", marketStateLabel: "熊市/风险释放", bullScore: 45, bearScore: 92, proxyRet20: -3.49, days: 80 },
-    unavailable: [], elapsed: "10s",
+  mocks.refreshStrengthAll.mockResolvedValue({
+    tradeDate: 20261008, limit: 800, elapsed: "10s",
+    saved: 302, reused: 0, total: 302,
+    strategies: [
+      {
+        strategyId: "trend_growth", strategyLabel: "趋势成长",
+        saved: 302, reused: 0, total: 302, skipped: 0, fromCache: false,
+      },
+    ],
   });
   mocks.buildPlan.mockResolvedValue({
     portfolioId: "pf_1", portfolioName: "我的组合",
@@ -224,6 +228,12 @@ beforeEach(() => {
       }],
       compare: [], candidates: [], marketState: "bear", strategyId: "trend_growth",
       entryAllowed: true, notes: [],
+      noActionReasons: [],
+      // 广度明细（原实现 policy/summary 里的 market_breadth_* 字段）
+      breadth: {
+        enabled: true, readyCount: 180, minReadyCount: 20,
+        universeCount: 7553, readyScore: 70,
+      },
     },
     holdings: [], candidates: [], notes: [],
   });
@@ -478,32 +488,32 @@ describe("组合管理页面", () => {
     expect(wrapper.text()).toContain("日线");
   });
 
-  it("刷新评分把当前策略和只数传给后端", async () => {
+  it("刷新评分刷所有活跃策略并传只数", async () => {
     const { wrapper } = await mountPage();
     await button(wrapper, "刷新评分")!.trigger("click");
-    await vi.waitFor(() => expect(mocks.refreshStrength).toHaveBeenCalled());
+    await vi.waitFor(() => expect(mocks.refreshStrengthAll).toHaveBeenCalled());
 
-    const [strategyId, limit, force] = mocks.refreshStrength.mock.calls[0];
-    expect(strategyId).toBe("trend_growth");
+    const [limit, force] = mocks.refreshStrengthAll.mock.calls[0];
     expect(limit).toBe(800); // 默认档
-    // 「刷新评分」是**增量**（force=false），不重算已算过的
+    // 「刷新评分」是**增量**（force=false），不重算已算过的；
+    // 且**不再传策略 ID** —— 原版是一次刷所有活跃策略
     expect(force).toBe(false);
     // 结果提示
-    await vi.waitFor(() => expect(wrapper.text()).toContain("新算 302 只"));
-    expect(wrapper.text()).toContain("共 302 只");
+    await vi.waitFor(() => expect(wrapper.text()).toContain("新算 302 条"));
+    expect(wrapper.text()).toContain("合计 302 条");
   });
 
   it("「全量重算」传 force=true", async () => {
     const { wrapper } = await mountPage();
     await button(wrapper, "全量重算")!.trigger("click");
-    await vi.waitFor(() => expect(mocks.refreshStrength).toHaveBeenCalled());
+    await vi.waitFor(() => expect(mocks.refreshStrengthAll).toHaveBeenCalled());
 
-    const [, , force] = mocks.refreshStrength.mock.calls[0];
+    const [, force] = mocks.refreshStrengthAll.mock.calls[0];
     expect(force).toBe(true);
   });
 
   it("全部命中缓存时提示未重算", async () => {
-    mocks.refreshStrength.mockResolvedValue({
+    mocks.refreshStrengthAll.mockResolvedValue({
       tradeDate: 20261008, saved: 0, skipped: 0, limit: 800,
       reused: 302, total: 302, skippedFromCache: true,
       marketState: { marketState: "bear", marketStateLabel: "熊市/风险释放", bullScore: 45, bearScore: 92, proxyRet20: -3.49, days: 80 },

@@ -31,9 +31,24 @@ export class Metrics {
 
     /**
      * 短期回测警告（少于 60 个交易日时年化会被显著放大）
+     * ---- 相对基准的指标（原实现 _calculate_relative_metrics）----
+     * 
+     * 这几项此前**整体缺失**：原版会算超额收益、Beta、Alpha（Jensen's）、
+     * 信息比率，而我这边 Metrics 里连字段都没有。
      */
+    "excessReturn": number;
+    "beta": number;
+    "alpha": number;
+    "informationRatio": number;
     "isShortPeriod": boolean;
     "annualReturnWarning": string;
+
+    /**
+     * ScopeWarning 提示"回填范围远小于全市场" —— 这会让广度闸门误判，
+     * 进而删光所有买入信号（回测零成交的常见原因）。
+     * 见 service 侧的 backtestScopeWarning。
+     */
+    "scopeWarning": string;
 
     /** Creates a new Metrics instance. */
     constructor($$source: Partial<Metrics> = {}) {
@@ -94,11 +109,26 @@ export class Metrics {
         if (!("avgLoss" in $$source)) {
             this["avgLoss"] = 0;
         }
+        if (!("excessReturn" in $$source)) {
+            this["excessReturn"] = 0;
+        }
+        if (!("beta" in $$source)) {
+            this["beta"] = 0;
+        }
+        if (!("alpha" in $$source)) {
+            this["alpha"] = 0;
+        }
+        if (!("informationRatio" in $$source)) {
+            this["informationRatio"] = 0;
+        }
         if (!("isShortPeriod" in $$source)) {
             this["isShortPeriod"] = false;
         }
         if (!("annualReturnWarning" in $$source)) {
             this["annualReturnWarning"] = "";
+        }
+        if (!("scopeWarning" in $$source)) {
+            this["scopeWarning"] = "";
         }
 
         Object.assign(this, $$source);

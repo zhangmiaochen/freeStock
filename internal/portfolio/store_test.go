@@ -237,7 +237,7 @@ func TestUpdatePreservesOmittedFields(t *testing.T) {
 		Name: "原名", Type: "semi_auto", StrategyID: StrategyTrendLowBuy,
 		BenchmarkCode: "000905.SH", Status: "paused",
 		TargetPositionCount: intPtr(8), MaxStockCount: intPtr(12), TotalLayers: (20),
-		ScopeType: ScopeIndustry, ScopeValue: ScopeValue{Items: []string{"银行", "证券"}},
+		ScopeType: ScopeIndustry, ScopeValue: &ScopeValue{Items: []string{"银行", "证券"}},
 		Notes: "重要备注",
 	})
 	if err != nil {
@@ -639,7 +639,7 @@ func TestPersistsAcrossReopen(t *testing.T) {
 	item, _ := store.Create(PortfolioInput{
 		Name: "持久化组合", Type: "semi_auto", StrategyID: StrategyTrendLowBuy,
 		TotalLayers: (20), TargetPositionCount: intPtr(3),
-		ScopeType: ScopeIndustry, ScopeValue: ScopeValue{Items: []string{"银行", "证券"}, Markets: []string{"main"}},
+		ScopeType: ScopeIndustry, ScopeValue: &ScopeValue{Items: []string{"银行", "证券"}, Markets: []string{"main"}},
 		Notes: "备注内容",
 	})
 	store.AddPosition(item.ID, PositionInput{Code: "600519", Name: "贵州茅台", EntryPrice: 1500, Layers: intPtr(2)})

@@ -259,35 +259,42 @@ func TestSyntheticLakeIndustryAndCalendar(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LatestTradeDate 失败: %v", err)
 	}
-	// is_trading=false 的 2026-09-26 要被跳过
-	if latest != 20260930 {
-		t.Errorf("最新交易日错误: %d，期望 20260930", latest)
+	// ⚠ 这个合成湖**故意**造成"日历到 20260930、daily_bars 只到 20260320" ——
+	// 正是真实数据湖的同构情形（真实：日历到 2027，bar 只到 2026-10-08）。
+	//
+	// 「最新交易日」必须是**实际有行情数据**的那天，即 20260320。
+	// 此前实现取的是 trading_calendar 的最大值（20260930），于是湖会报出一个
+	// **没有任何数据**的日期，导致评分/回填/回测全落在空区间上 ——
+	// 这个测试原本断言的正是那个有 bug 的行为。
+	if latest != 20260320 {
+		t.Errorf("最新交易日应为最后一个 bar 的日期 20260320，实际 %d", latest)
 	}
 
-	// TradeDateAt：不晚于指定日期的最近交易日
-	at, err := lake.TradeDateAt(20260920)
+	// TradeDateAt：不晚于指定日期的最近**有数据**交易日
+	at, err := lake.TradeDateAt(20260310)
 	if err != nil {
 		t.Fatalf("TradeDateAt 失败: %v", err)
 	}
-	if at > 20260920 {
-		t.Errorf("TradeDateAt(%d) 返回了更晚的日期 %d", 20260920, at)
+	if at > 20260310 {
+		t.Errorf("TradeDateAt(%d) 返回了更晚的日期 %d", 20260310, at)
 	}
 	if at == 0 {
-		t.Error("20260920 之前应该有交易日")
+		t.Error("20260310 之前应该有交易日")
 	}
 	// before<=0 等价于 LatestTradeDate
 	if all, err := lake.TradeDateAt(0); err != nil || all != latest {
 		t.Errorf("TradeDateAt(0) 应等价于最新交易日: got=%d want=%d err=%v", all, latest, err)
 	}
-	// 指定最新交易日本身
-	if same, err := lake.TradeDateAt(20260930); err != nil || same != 20260930 {
-		t.Errorf("TradeDateAt(20260930) = %d (err=%v)，期望 20260930", same, err)
+	// 指定一个**超出 bar 范围但日历里有**的日期：应回落到最后一个有数据的交易日，
+	// 而不是返回那个没有数据的日历日期
+	if same, err := lake.TradeDateAt(20260930); err != nil || same != 20260320 {
+		t.Errorf("TradeDateAt(20260930) 应回落到 20260320（该日无 bar），实际 %d (err=%v)", same, err)
 	}
-	// 早于日历起点时返回 0 而不是报错
+	// 早于数据起点时返回 0 而不是报错
 	if early, err := lake.TradeDateAt(19900101); err != nil || early != 0 {
-		t.Errorf("早于日历起点应返回 0: got=%d err=%v", early, err)
+		t.Errorf("早于数据起点应返回 0: got=%d err=%v", early, err)
 	}
-	t.Logf("trading_calendar 最新=%d，不晚于 20260920 的最近交易日=%d", latest, at)
+	t.Logf("bar 最新=%d（日历到 20260930，但不取它），不晚于 20260310 的最近交易日=%d", latest, at)
 }
 
 func TestSyntheticLakeIsolatedFromRealLake(t *testing.T) {

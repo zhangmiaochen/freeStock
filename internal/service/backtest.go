@@ -167,6 +167,7 @@ func (s *PortfolioService) CreateBacktest(req BacktestRequest) (*BacktestRunResu
 		initialCapital = 100000
 	}
 	metrics := backtest.CalculateMetrics(result.Snapshots, result.Trades, initialCapital)
+	metrics.ScopeWarning = s.backtestScopeWarning(codes, len(result.Trades))
 
 	// ⑤ 落库
 	runID := portfolio.NewBacktestRunID()
@@ -402,12 +403,21 @@ func (s *PortfolioService) backtestPlanBuilder(
 			maxLayersForBacktest(item.StrategyID, item.TotalLayers),
 			marketScopeKey(item),
 		)
+		poolBegan := time.Now()
 		candidates, universeScores := s.buildCandidatePoolFrom(all, item, cfg, heldCodes)
+		poolElapsed := time.Since(poolBegan)
+		slog.Info("回测候选池完成",
+			"date", day.Date, "持仓", len(held),
+			"评分行", len(all), "候选池", len(candidates),
+			"耗时", poolElapsed.Round(time.Millisecond))
+
+		planBegan := time.Now()
 		plan := score.BuildRotationPlan(score.RotationInput{
 			Holdings: held, Candidates: candidates, Config: cfg,
 			MarketState: marketState, MaxStockLimit: item.MaxStockCount,
 			UniverseScores: universeScores,
 		})
+		planElapsed := time.Since(planBegan)
 
 		// 逐日诊断：回测"零成交"时要能一眼看出是哪道闸门把候选刷没的。
 		adds, exec := 0, 0
@@ -424,10 +434,56 @@ func (s *PortfolioService) backtestPlanBuilder(
 			"评分行", len(day.Rows), "持仓", len(held),
 			"候选池", len(candidates), "广度可用", len(universeScores),
 			"entryAllowed", plan.EntryAllowed,
-			"计划动作", len(plan.Rows), "可买入", adds, "可执行", exec)
+			"计划动作", len(plan.Rows), "可买入", adds, "可执行", exec,
+			"计划耗时", planElapsed.Round(time.Millisecond))
 
 		return plan
 	}
+}
+
+// backtestScopeWarning 在"回填范围远小于全市场"时给出警告。
+//
+// **为什么必须提示**：广度闸门（`market_breadth_status`）判的是
+// "**全市场**里评分 ≥70 的股票数 ≥ 20"。回填只覆盖一部分时，
+// 这个数被系统性低估 → 闸门恒为"广度不足" → 所有 `add`/`replace_in` 行被删光
+// → 从纯现金起步的回测**一笔都不成交、净值是一条直线**。
+//
+// 实测（2026-10-09，本机 stockdb）：回填 799 只时，四个交易日的
+// `entryAllowed` 全是 false、候选池 58~73 只却一条动作都产不出来；
+// 放到 2500 只时 `entryAllowed` 翻成 true 并产出 5 条可买入行。
+//
+// ⚠ 这里**不修改**闸门算法 —— 原版就是拿手里那份评分帧算的，
+// 改了才是偏离。只把"样本不够"这件事明确讲出来。
+func (s *PortfolioService) backtestScopeWarning(codes []string, trades int) string {
+	if s.stock == nil || len(codes) == 0 {
+		return ""
+	}
+	universe, err := s.stock.GetStockUniverse(false)
+	if err != nil || universe == nil || len(universe.Stocks) == 0 {
+		return ""
+	}
+	market := 0
+	for _, item := range universe.Stocks {
+		if item.HasQuote {
+			market++
+		}
+	}
+	if market == 0 || len(codes) >= market {
+		return ""
+	}
+	ratio := float64(len(codes)) / float64(market)
+	// 覆盖到一半以上就不提示了（广度指标的偏差已不显著）
+	if ratio >= 0.5 {
+		return ""
+	}
+	msg := fmt.Sprintf(
+		"回填只覆盖 %d / %d 只（%.0f%%）—— 广度闸门按**全市场**统计「评分≥70 的只数」，"+
+			"样本不足会让它一直判「广度不足」，从而删掉所有买入信号。",
+		len(codes), market, ratio*100)
+	if trades == 0 {
+		return msg + "本次回测一笔都没成交，很可能就是这个原因；请把「回填股票数」填 0（全市场）后重跑。"
+	}
+	return msg + "本次虽有成交，但结果仍可能偏保守；建议用全市场回填后复核。"
 }
 
 // persistBacktest 把回测结果写进三张表。

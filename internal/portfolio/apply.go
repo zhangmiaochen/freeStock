@@ -55,6 +55,38 @@ func IsApplyExecutable(action string) bool {
 	return false
 }
 
+// wouldChangeLayers 判断这批动作里**是否存在真实的层数变化**。
+//
+// 对应原实现的 `changed_count`（只累加 `layer_delta != 0` 的行）。
+// 判据必须是"clamp 之后目标层数 ≠ 当前层数"，而不是"动作名可执行"。
+func wouldChangeLayers(actions []ApplyAction, existing map[string]Position) bool {
+	for _, action := range actions {
+		code := BareCode(action.Code)
+		if code == "" {
+			continue
+		}
+		previous, existed := existing[code]
+		if !IsApplyExecutable(action.Action) && !existed {
+			continue
+		}
+		target := action.TargetLayers
+		if target > maxApplyLayers {
+			target = maxApplyLayers
+		}
+		if target < 0 {
+			target = 0
+		}
+		currentLayers := 0
+		if existed {
+			currentLayers = previous.PositionLayers
+		}
+		if target != currentLayers {
+			return true
+		}
+	}
+	return false
+}
+
 // applyTxnReason 是"一键应用调仓建议"写流水时**固定**的 reason。
 //
 // 原实现 portfolio_service.py:922 是硬编码的 `reason="一键应用调仓建议"`，
@@ -158,6 +190,19 @@ func (s *Store) ApplyRotation(portfolioID string, tradeDate string, actions []Ap
 	//
 	// 这个不变量不能外包给调用方的契约 —— 放在这里成本几乎为零。
 	actions = appendMissingHoldings(actions, existingByCode)
+
+	// ---- 与原实现一致：**没有任何实际层数变化时拒绝应用** ----
+	//
+	// 原实现把 `changed_count` 累加在 `layer_delta != 0` 上，最后
+	// `if changed_count <= 0: raise PortfolioDataUnavailableError("当前组合暂无可执行的层级调仓建议")`，
+	// 而且这个判断发生在**删除持仓之前**（portfolio_service.py:964-967）。
+	//
+	// 我此前是在 service 层按**动作名**判（`IsApplyExecutable`），
+	// 于是"计划说要加层、但目标层数已经等于当前层数"（例如已在上限 3 层）
+	// 会被当成可执行 → 整表重写却没改任何东西 → 与原版的"直接拒绝"行为不同。
+	if !wouldChangeLayers(actions, existingByCode) {
+		return nil, fmt.Errorf("当前组合暂无可执行的层级调仓建议")
+	}
 
 	now := nowText()
 	for _, action := range actions {

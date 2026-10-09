@@ -55,12 +55,26 @@ type PortfolioInput struct {
 	//
 	//	target：未提供 → 旧值或 5；显式 0 → 1
 	//	max   ：未提供 → 旧值或 target；显式 0 → target
-	TargetPositionCount *int       `json:"targetPositionCount"`
-	MaxStockCount       *int       `json:"maxStockCount"`
-	TotalLayers         int        `json:"totalLayers"`
-	ScopeType           string     `json:"scopeType"`
-	ScopeValue          ScopeValue `json:"scopeValue"`
-	Notes               string     `json:"notes"`
+	TargetPositionCount *int   `json:"targetPositionCount"`
+	MaxStockCount       *int   `json:"maxStockCount"`
+	TotalLayers         int    `json:"totalLayers"`
+	ScopeType           string `json:"scopeType"`
+	// ScopeValue 用指针区分"**未提供**"与"**显式传空范围**"。
+	//
+	// 原实现是按 `None` 判的（portfolio_service.py:3609-3614）：
+	//
+	//	raw = payload.get("scope_value")
+	//	if raw is None: raw = payload.get("scope_value_json")
+	//	if raw is None: raw = base.get("scope_value_json")
+	//
+	// 即"**显式传空**"= 清空范围，"**根本没传**"= 沿用旧值。
+	// 此前 `ScopeValue` 是值类型，两者不可区分，只能退一步用
+	// "内容为空且 scopeType 未变"近似 —— 于是"显式清空范围内容"会表现为没生效。
+	//
+	// 前端 `PortfolioForm.vue` 总是回填并回传当前范围，所以改成指针不会
+	// 造成"只改名字却把范围清空"（那才是更糟的副作用）。
+	ScopeValue *ScopeValue `json:"scopeValue"`
+	Notes      string      `json:"notes"`
 }
 
 // PositionInput 是新增持仓的入参。
@@ -225,10 +239,23 @@ func normalizeInput(in PortfolioInput, existing *Portfolio) (Portfolio, error) {
 
 	scopeType := NormalizeScopeType(pick(in.ScopeType, old.ScopeType))
 
-	// 范围内容：入参为空（两个数组都空且 scopeType 没变）时沿用旧 JSON
-	scopeJSON := NormalizeScopeValue(scopeType, in.ScopeValue)
-	if existing != nil && isEmptyScopeValue(in.ScopeValue) && scopeType == NormalizeScopeType(old.ScopeType) {
+	// 范围内容 —— 按"**是否提供**"回落，与原实现的三级 `None` 判一致
+	//（portfolio_service.py:3609-3614）：
+	//
+	//	raw = payload.get("scope_value")
+	//	if raw is None: raw = payload.get("scope_value_json")
+	//	if raw is None: raw = base.get("scope_value_json")
+	//
+	// 即：**显式传空范围 = 清空**；**根本没传 = 沿用旧值**。
+	var scopeJSON string
+	switch {
+	case in.ScopeValue != nil:
+		// 显式提供了范围 —— 哪怕是空数组，也照它写（= 清空）
+		scopeJSON = NormalizeScopeValue(scopeType, *in.ScopeValue)
+	case existing != nil:
 		scopeJSON = old.ScopeValueJSON
+	default:
+		scopeJSON = NormalizeScopeValue(scopeType, ScopeValue{})
 	}
 
 	status := NormalizeStatus(pick(in.Status, old.Status))

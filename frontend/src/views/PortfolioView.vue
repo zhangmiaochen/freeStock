@@ -258,29 +258,42 @@ async function refreshStrength(force = false) {
   planError.value = "";
   applyResult.value = "";
   try {
-    // 第三个参数 force=false → **增量刷新**：已算过的代码不再重算
-    //（评分只取决于 代码 + 交易日 + 策略，重算值完全相同，
-    //  但每只都会省掉一次 320 个交易日的行情拉取）
-    const result = await api.portfolio.refreshStrength(
-      current.value.portfolio.strategyId,
+    // **刷新所有活跃策略**（原版 `refresh_latest` 的语义）——
+    // 原版取所有非归档组合用到的策略一次刷完。只刷当前组合的话，
+    // 其它组合的评分会悄悄过期，之后点「生成建议」就是基于旧数据。
+    const result = (await api.portfolio.refreshStrengthAll(
       refreshLimit.value,
       force,
-    );
-    // 注意顺序：loadPlan 会清空提示，所以结果消息必须**在它之后**设置，
-    // 否则用户看不到"评分完成"的反馈
+    )) as unknown as {
+      tradeDate: number;
+      saved: number;
+      reused: number;
+      total: number;
+      elapsed: string;
+      strategies: { strategyLabel: string; saved: number; reused: number; total: number; fromCache: boolean; error?: string }[];
+    };
     await loadStrength();
     await loadPlan();
-    if (result.skippedFromCache) {
+    const failed = (result.strategies ?? []).filter((s) => s.error);
+    if (result.saved === 0 && failed.length === 0) {
       applyResult.value =
-        `${result.tradeDate} 的评分已是最新（${result.total} 只），本次未重算。` +
+        `${result.tradeDate} 的评分已是最新（共 ${result.total} 条），本次未重算。` +
         `数据有修订需要覆盖时，点「全量重算」。`;
     } else {
+      const perStrategy = (result.strategies ?? [])
+        .map((s) =>
+          s.error
+            ? `${s.strategyLabel}✗`
+            : `${s.strategyLabel} 新算 ${s.saved}${s.reused > 0 ? `/复用 ${s.reused}` : ""}`,
+        )
+        .join("，");
       applyResult.value =
-        `评分完成：${result.tradeDate} 新算 ${result.saved} 只` +
-        (result.reused > 0 ? `、复用已有 ${result.reused} 只` : "") +
-        `，共 ${result.total} 只，` +
-        `市场状态 ${result.marketState.marketStateLabel}` +
-        (result.skipped > 0 ? `（跳过 ${result.skipped} 只数据不足）` : "");
+        `评分完成：${result.tradeDate}，共 ${result.strategies?.length ?? 0} 个活跃策略` +
+        `（新算 ${result.saved} 条、复用 ${result.reused} 条、合计 ${result.total} 条，耗时 ${result.elapsed}）` +
+        (perStrategy ? `：${perStrategy}` : "");
+    }
+    if (failed.length > 0) {
+      planError.value = `以下策略刷新失败：${failed.map((s) => `${s.strategyLabel}（${s.error}）`).join("；")}`;
     }
   } catch (err) {
     planError.value = errorMessage(err);
@@ -863,6 +876,41 @@ onMounted(async () => {
 
             <p v-if="planError" class="text-destructive border-b px-4 py-2 text-xs">{{ planError }}</p>
             <p v-if="applyResult" class="text-up border-b px-4 py-2 text-xs">{{ applyResult }}</p>
+
+            <!-- 广度闸门明细 —— 「为什么没有建议」最直接的答案。
+                 回填范围小于全市场时，这个数会被系统性低估，
+                 闸门就会删光所有买入信号（表现为"没有任何建议"）。 -->
+            <div v-if="plan && plan.plan.breadth" class="border-b px-4 py-2 text-xs">
+              <span class="text-muted-foreground">市场广度 </span>
+              <span
+                :class="
+                  plan.plan.breadth.enabled && !plan.plan.entryAllowed
+                    ? 'text-destructive font-medium'
+                    : 'text-muted-foreground'
+                "
+              >
+                {{ plan.plan.breadth.readyCount }} / {{ plan.plan.breadth.minReadyCount }}
+                （评分≥{{ plan.plan.breadth.readyScore }} 分，全市场 {{ plan.plan.breadth.universeCount }} 只）
+              </span>
+              <span v-if="!plan.plan.breadth.enabled" class="text-muted-foreground">
+                · 样本不足 100 只，闸门未启用
+              </span>
+              <span v-else-if="!plan.plan.entryAllowed" class="text-destructive">
+                · 广度不足，已暂停开新仓 —— 扩大「评分只数」或回填范围后重试
+              </span>
+              <span v-else class="text-up">· 广度充足</span>
+            </div>
+
+            <!-- 「为什么没有调仓动作」—— 原实现 summary.no_action_reasons -->
+            <div
+              v-if="plan && plan.plan.noActionReasons && plan.plan.noActionReasons.length"
+              class="border-b px-4 py-2 text-xs"
+            >
+              <div class="text-muted-foreground mb-1">为什么没有调仓动作：</div>
+              <ul class="space-y-0.5 pl-4">
+                <li v-for="(reason, i) in plan.plan.noActionReasons" :key="i">· {{ reason }}</li>
+              </ul>
+            </div>
 
             <p
               v-if="!plan && !planError && !planLoading"

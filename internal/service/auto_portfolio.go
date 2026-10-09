@@ -110,7 +110,7 @@ func (s *PortfolioService) CreateAutoPortfolio(req AutoPortfolioRequest) (*AutoP
 		MaxStockCount:       intPtr(ctx.item.MaxStockCount),
 		TotalLayers:         ctx.item.TotalLayers,
 		ScopeType:           ctx.item.ScopeType,
-		ScopeValue:          portfolio.ParseScopeValue(ctx.item.ScopeValueJSON),
+		ScopeValue:          scopePtr(portfolio.ParseScopeValue(ctx.item.ScopeValueJSON)),
 		Notes:               ctx.item.Notes,
 	})
 	if err != nil {
@@ -183,7 +183,7 @@ func (s *PortfolioService) buildAutoCompose(req AutoPortfolioRequest) (*autoComp
 		MaxStockCount:       req.MaxStockCount,
 		TotalLayers:         req.TotalLayers,
 		ScopeType:           req.ScopeType,
-		ScopeValue:          req.ScopeValue,
+		ScopeValue:          scopePtr(req.ScopeValue),
 		Notes:               req.Notes,
 	})
 	if err != nil {
@@ -322,5 +322,9 @@ func atLeastOne(v int) int {
 
 // intPtr / floatPtr 造指针（`PortfolioInput` / `PositionInput` 用指针
 // 区分"未提供"与"显式传 0"）。
-func intPtr(v int) *int           { return &v }
+func intPtr(v int) *int { return &v }
+
+// scopePtr 让"显式提供了范围"在指针类型下可表达（区分"没传"与"传空"）。
+func scopePtr(v portfolio.ScopeValue) *portfolio.ScopeValue { return &v }
+
 func floatPtr(v float64) *float64 { return &v }

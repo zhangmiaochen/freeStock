@@ -100,4 +100,51 @@ func TestBacktestPhaseTiming(t *testing.T) {
 	t.Logf("③ 读回结果：%s（净值 %d 天，成交 %d 笔）",
 		readElapsed.Round(time.Millisecond), len(payload.Daily), len(payload.Trades))
 	t.Logf("指标：总收益 %.2f%%，成交 %d 笔", result.Metrics.TotalReturn, result.Metrics.TotalTrades)
+
+	// ---- 以下是**回归断言**，不只是计时 ----
+	//
+	// 用户报的"回测一笔成交都没有、净值一直等于初始资金"，
+	// 根因是**回填范围远小于全市场**导致广度闸门删光了买入信号。
+	// 所以这里在**大范围回填**（足以让广度闸门放行）的前提下，
+	// 明确断言"必须成交、净值必须会动"。
+	if limit < 100 {
+		t.Skipf("本次只回填了 %d 只（<100），广度闸门不会启用，不适合断言成交", limit)
+	}
+
+	// 广度闸门放行与否不用在这里断言 —— **"有成交"本身就是它放行的证明**：
+	// 闸门一旦判定"广度不足"，会把所有 add/replace_in 行删掉，绝不可能成交。
+	if result.Metrics.TotalTrades == 0 {
+		t.Errorf("回填了 %d 只却仍然零成交 —— 广度仍被误判，或还有别的闸门在拦", limit)
+	}
+	if len(payload.Trades) != result.Metrics.TotalTrades {
+		t.Errorf("成交笔数不一致：payload %d，metrics %d", len(payload.Trades), result.Metrics.TotalTrades)
+	}
+
+	// 净值曲线必须自洽：净值 = 现金 + 持仓市值
+	for _, d := range payload.Daily {
+		if diff := d.TotalValue - (d.Cash + d.PositionValue); diff > 0.01 || diff < -0.01 {
+			t.Errorf("%s 净值 %.2f ≠ 现金 %.2f + 市值 %.2f", d.TradeDate, d.TotalValue, d.Cash, d.PositionValue)
+		}
+	}
+	// 累计收益必须与净值对得上
+	last := payload.Daily[len(payload.Daily)-1]
+	initial := 100000.0
+	wantReturn := (last.TotalValue/initial - 1) * 100
+	if diff := wantReturn - last.CumulativeReturn; diff > 0.01 || diff < -0.01 {
+		t.Errorf("末日累计收益应为 %.4f%%，实际 %.4f%%", wantReturn, last.CumulativeReturn)
+	}
+	// 成交必须合法
+	for _, trade := range payload.Trades {
+		if trade.TradeDate < payload.Run.StartDate || trade.TradeDate > payload.Run.EndDate {
+			t.Errorf("成交日期 %s 落在区间外", trade.TradeDate)
+		}
+		if trade.Action != "buy" && trade.Action != "sell" {
+			t.Errorf("未知方向 %q", trade.Action)
+		}
+		if trade.Shares <= 0 {
+			t.Errorf("%s %s 股数应 > 0，实际 %d", trade.TradeDate, trade.Code, trade.Shares)
+		}
+	}
+	t.Logf("④ 断言通过：广度放行、成交 %d 笔、净值自洽（末值 %.2f，累计 %.2f%%）",
+		len(payload.Trades), last.TotalValue, last.CumulativeReturn)
 }

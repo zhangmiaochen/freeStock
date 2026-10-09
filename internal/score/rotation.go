@@ -545,6 +545,9 @@ type RotationPlan struct {
 	// 没有它的话界面只能显示一个空列表，用户无从判断是"数据没准备好"
 	// 还是"策略判断就是不需要动"。
 	NoActionReasons []string `json:"noActionReasons"`
+	// Breadth 是广度闸门的明细 —— 界面用它解释"为什么没有建议"。
+	// 原实现把这些放在 `policy`/`summary` 里（portfolio_rotation_logic.py:2679-2683）。
+	Breadth BreadthDetail `json:"breadth"`
 }
 
 // RotationInput 是轮动计划的输入。
@@ -1066,9 +1069,11 @@ func BuildRotationPlan(in RotationInput) RotationPlan {
 	}
 
 	// ---- 广度闸门（3.7）----
+	// 广度明细一并记下 —— 界面靠它解释「为什么没有建议」
+	plan.Breadth = BreadthOf(in.UniverseScores, strategyID)
 	plan.EntryAllowed = true
 	if !lowBuy {
-		plan.EntryAllowed = breadthEntryAllowed(in.UniverseScores, strategyID)
+		plan.EntryAllowed = plan.Breadth.Allowed()
 	}
 	if !plan.EntryAllowed {
 		plan.Rows = applyBreadthGate(plan.Rows, &plan)

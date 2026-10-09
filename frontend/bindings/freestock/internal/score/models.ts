@@ -6,6 +6,61 @@
 import { Create as $Create } from "@wailsio/runtime";
 
 /**
+ * breadthEntryAllowed 判断市场广度是否允许建仓。
+ * 
+ * universe < 100 时闸门**不启用**（直接放行）。
+ * 
+ * 分子分母都应当在**全量评分**上算（原实现 portfolio_rotation_logic.py:1772-1786
+ * `universe_count = len(scores)`、`ready_count = (scores >= ready_score).sum()`）。
+ * BreadthDetail 是广度闸门的明细（原实现 `policy`/`summary` 里的
+ * `market_breadth_ready_count` / `_min_ready_count` / `_universe_count` / `_entry_allowed`）。
+ * 
+ * **为什么要暴露出来**：用户看到"没有建议"时，界面此前只给了一句猜测性提示
+ * （"候选池为空说明当前市场状态下没有股票达到建仓质量门槛"）。
+ * 而真实原因往往是"广度不够"——回填范围小于全市场时尤其如此
+ * （广度判的是**全市场**里评分 ≥70 的只数）。
+ * 把这三个数字摆出来，用户一眼就能判断该不该扩大回填范围。
+ * ⚠ 必须带 json tag：Wails 按 tag 生成 TS 绑定，
+ * 没有 tag 时字段名会原样变成 PascalCase，与前端的 camelCase 约定不一致。
+ */
+export class BreadthDetail {
+    "enabled": boolean;
+    "readyCount": number;
+    "minReadyCount": number;
+    "universeCount": number;
+    "readyScore": number;
+
+    /** Creates a new BreadthDetail instance. */
+    constructor($$source: Partial<BreadthDetail> = {}) {
+        if (!("enabled" in $$source)) {
+            this["enabled"] = false;
+        }
+        if (!("readyCount" in $$source)) {
+            this["readyCount"] = 0;
+        }
+        if (!("minReadyCount" in $$source)) {
+            this["minReadyCount"] = 0;
+        }
+        if (!("universeCount" in $$source)) {
+            this["universeCount"] = 0;
+        }
+        if (!("readyScore" in $$source)) {
+            this["readyScore"] = 0;
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new BreadthDetail instance from a string or object.
+     */
+    static createFrom($$source: any = {}): BreadthDetail {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new BreadthDetail($$parsedSource as Partial<BreadthDetail>);
+    }
+}
+
+/**
  * MarketState 是判定结果。
  */
 export class MarketState {
@@ -162,6 +217,12 @@ export class RotationPlan {
      */
     "noActionReasons": string[];
 
+    /**
+     * Breadth 是广度闸门的明细 —— 界面用它解释"为什么没有建议"。
+     * 原实现把这些放在 `policy`/`summary` 里（portfolio_rotation_logic.py:2679-2683）。
+     */
+    "breadth": BreadthDetail;
+
     /** Creates a new RotationPlan instance. */
     constructor($$source: Partial<RotationPlan> = {}) {
         if (!("rows" in $$source)) {
@@ -188,6 +249,9 @@ export class RotationPlan {
         if (!("noActionReasons" in $$source)) {
             this["noActionReasons"] = [];
         }
+        if (!("breadth" in $$source)) {
+            this["breadth"] = (new BreadthDetail());
+        }
 
         Object.assign(this, $$source);
     }
@@ -201,6 +265,7 @@ export class RotationPlan {
         const $$createField2_0 = $$createType5;
         const $$createField6_0 = $$createType6;
         const $$createField7_0 = $$createType6;
+        const $$createField8_0 = $$createType7;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("rows" in $$parsedSource) {
             $$parsedSource["rows"] = $$createField0_0($$parsedSource["rows"]);
@@ -216,6 +281,9 @@ export class RotationPlan {
         }
         if ("noActionReasons" in $$parsedSource) {
             $$parsedSource["noActionReasons"] = $$createField7_0($$parsedSource["noActionReasons"]);
+        }
+        if ("breadth" in $$parsedSource) {
+            $$parsedSource["breadth"] = $$createField8_0($$parsedSource["breadth"]);
         }
         return new RotationPlan($$parsedSource as Partial<RotationPlan>);
     }
@@ -732,3 +800,4 @@ const $$createType3 = $Create.Array($$createType2);
 const $$createType4 = Row.createFrom;
 const $$createType5 = $Create.Array($$createType4);
 const $$createType6 = $Create.Array($Create.Any);
+const $$createType7 = BreadthDetail.createFrom;

@@ -129,6 +129,27 @@ const defaultBenchmark = DefaultBenchmark
 // 对应原实现 portfolio_service.py:201-207 的 `_normalize_ts_code`：
 // 大写、去空格；6 位纯数字按首位补交易所后缀。
 // 不补的话填 `000300` 会存成裸码，之后去行情/指数里取基准就取不到。
+// NormalizeBenchmarkCode 把 6 位裸码补上交易所后缀。
+//
+// ⚠ **与原实现有一处刻意不同**（原实现 `_normalize_ts_code`，
+// portfolio_service.py:57-62）：
+//
+//	if re.fullmatch(r"\d{6}", code):
+//	    return f"{code}.SH" if code.startswith("6") else f"{code}.SZ"
+//
+// 原版是"只有 6 开头给 .SH，**其余一律 .SZ**"。这里改成：
+//
+//	6 / 9 → .SH      （9 开头是沪市 B 股，原版判成 .SZ 是错的）
+//	0 / 3 → .SZ
+//	其余  → 保持裸码  （不认识的前缀不硬猜）
+//
+// **对实际用途没有影响**：基准用的都是指数代码，
+// `000300` / `000905` / `399006` 两边结果完全相同
+// （0/3 开头 → .SZ，6 开头 → .SH）。差异只出现在
+// `9xxxxx`（沪 B）与 `4xxxxx`/`8xxxxx`（北交所）这类**不会当基准**的代码上。
+//
+// 之所以不照抄：把沪 B 判成深市是明确的数据错误，
+// 而"硬猜 .SZ"会让北交所代码指向一个不存在的深市标的。
 func NormalizeBenchmarkCode(value string) string {
 	code := strings.ToUpper(strings.TrimSpace(value))
 	if code == "" || strings.Contains(code, ".") || len(code) != 6 {

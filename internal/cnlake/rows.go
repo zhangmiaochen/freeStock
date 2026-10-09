@@ -2,6 +2,7 @@ package cnlake
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -671,30 +672,34 @@ func (l *Lake) TopHolders(code string) ([]TopHolderRow, error) {
 	return rows, err
 }
 
-// LatestTradeDate 从 trading_calendar 找出最新交易日（YYYYMMDD）。
+// LatestTradeDate 返回**实际有行情数据**的最新交易日（YYYYMMDD）。
+//
+// ⚠ 这里**不能**用 `trading_calendar` 的最大日期。
+//
+// `trading_calendar` 是**预先排好的日历**，天然包含未来年份
+// （实测本机数据湖的日历分区到 2027，而 `daily_bars` 只到 2026-10-08）。
+// 早期版本取日历最大值，于是湖报告"最新交易日 = 2027-10-08" ——
+// 一个**没有任何数据**的未来日期，导致评分/回填/回测全部落在空区间上，
+// 整个「切到数据湖」功能等于不可用。
+//
+// 行情源的"最新交易日"语义应当是"最后一根 K 线的日期"，
+// 这也与 stockdb 那头（从真实行情取）一致。
 func (l *Lake) LatestTradeDate() (int64, error) {
 	return l.TradeDateAt(0)
 }
 
-// TradeDateAt 找出**不晚于** before 的最近交易日（YYYYMMDD）。
+// TradeDateAt 找出**不晚于** before 的、**实际有行情数据**的最近交易日（YYYYMMDD）。
 // before <= 0 时等价于 LatestTradeDate。
 //
 // 条件选股指定日期时用它：用户填的那天可能不是交易日，
-// 也可能当天数据还没同步，所以要落到该日或之前最近的一个交易日。
+// 也可能当天数据还没同步，所以要落到该日或之前最近一个**有数据**的交易日。
 func (l *Lake) TradeDateAt(before int64) (int64, error) {
-	type calendarRow struct {
-		TradeDate int32 `parquet:"trade_date,date"`
-		IsTrading bool  `parquet:"is_trading"`
-	}
-	rows, err := readTyped(l.DatasetFiles("trading_calendar"), func(row *calendarRow) bool {
-		return row.IsTrading
-	})
+	dates, err := l.BarPartitionDates()
 	if err != nil {
 		return 0, err
 	}
 	best := int64(0)
-	for _, row := range rows {
-		date := daysToDate(row.TradeDate)
+	for _, date := range dates {
 		if before > 0 && date > before {
 			continue
 		}
@@ -703,4 +708,88 @@ func (l *Lake) TradeDateAt(before int64) (int64, error) {
 		}
 	}
 	return best, nil
+}
+
+// BarPartitionDates 列出 `daily_bars` 代表的交易日（YYYYMMDD，升序）。
+//
+// 两条路径：
+//
+//  1. **分区名就是日期**（真实数据湖：`trade_date=2016-01-04`）——
+//     直接解析目录名，不必碰 parquet，2612 个分区也是毫秒级。
+//  2. **分区名不是日期**（部分数据集/测试数据按年分区：`trade_date=2026`）——
+//     回落到读每个分区里的实际 bar 日期。这条路径只会在分区数很少时走到
+//     （按年分区最多几十个），所以代价可控。
+func (l *Lake) BarPartitionDates() ([]int64, error) {
+	dir := l.DatasetDir("daily_bars")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("cnlake: 读取 daily_bars 分区失败：%w", err)
+	}
+
+	fromNames := make([]int64, 0, len(entries))
+	var others []string
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		const prefix = "trade_date="
+		if !strings.HasPrefix(name, prefix) {
+			continue
+		}
+		raw := strings.ReplaceAll(strings.TrimPrefix(name, prefix), "-", "")
+		if len(raw) == 8 {
+			if date, err := strconv.ParseInt(raw, 10, 64); err == nil && date > 0 {
+				fromNames = append(fromNames, date)
+				continue
+			}
+		}
+		others = append(others, name)
+	}
+	if len(fromNames) > 0 && len(others) == 0 {
+		sort.Slice(fromNames, func(i, j int) bool { return fromNames[i] < fromNames[j] })
+		return fromNames, nil
+	}
+
+	// 分区名不是日期 → 读实际内容
+	if err := l.ensureDailyBarDates(); err != nil {
+		return nil, err
+	}
+	l.barDatesMu.Lock()
+	defer l.barDatesMu.Unlock()
+	out := make([]int64, len(l.barDates))
+	copy(out, l.barDates)
+	return out, nil
+}
+
+// ensureDailyBarDates 从 parquet 内容里读出所有 bar 日期并缓存（只做一次）。
+func (l *Lake) ensureDailyBarDates() error {
+	l.barDatesMu.Lock()
+	if l.barDatesLoaded {
+		l.barDatesMu.Unlock()
+		return nil
+	}
+	l.barDatesMu.Unlock()
+
+	rows, err := readTyped[BarRow](l.DatasetFiles("daily_bars"), nil)
+	if err != nil {
+		return fmt.Errorf("cnlake: 读取 daily_bars 失败：%w", err)
+	}
+	seen := map[int64]bool{}
+	dates := make([]int64, 0, 4096)
+	for _, row := range rows {
+		date := row.Date()
+		if date <= 0 || seen[date] {
+			continue
+		}
+		seen[date] = true
+		dates = append(dates, date)
+	}
+	sort.Slice(dates, func(i, j int) bool { return dates[i] < dates[j] })
+
+	l.barDatesMu.Lock()
+	l.barDates = dates
+	l.barDatesLoaded = true
+	l.barDatesMu.Unlock()
+	return nil
 }
