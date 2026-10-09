@@ -152,7 +152,9 @@ func (s *StockService) financialStatements(code string, itemLimit int) Financial
 		}
 	}
 	if out.TableStatus["top_holders"] {
-		if rows, err := lake.TopHolders(bare); err == nil {
+		// 只用最新一期 → 用专门的方法：从最新年份分区往回读、拿到就停
+		//（`top_holders` 有 60MB，整份读要 707ms/只）
+		if rows, err := lake.TopHoldersLatest(bare); err == nil {
 			// 只取最新一期，历史各期留给后续做对比功能
 			for _, row := range rows {
 				if row.Date() > out.TopHolderDate {

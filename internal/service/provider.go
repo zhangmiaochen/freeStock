@@ -221,11 +221,26 @@ type lakeProvider struct {
 	// 数据集虽小（0.2MB），但 parquet 打开+解码是固定开销，
 	// 逐只调用时实测约 99ms/只 —— 比日线还慢。
 	// 一次读完建索引后，命中是 O(1)。
+	metaOnce sync.Once
+	metaErr  error
+
 	valMu      sync.Mutex
 	valuations map[string]map[int64]cnlake.ValuationRow
 	valLoaded  bool
 }
 
+// ⚠ **数据缺口（不是代码问题，也不补假数据）**：
+//
+// 本机数据湖的 `valuation_metrics` **只有一个分区 `trade_date=2026-10-08`**，
+// 也就是**只有最新一天**的 PE / PB / 总市值 / 流通市值。
+// （对比：`daily_bars` 有 2612 个日分区、`share_structure` 按年份分区。）
+//
+// 后果：**历史日期的这四项必然是空的** —— K 线页看历史某天时
+// 「股票信息显示不全」就是这个原因。
+//
+// 这里**不填 0 也不推算**：估值算错比留空危险得多。
+// 要补上得让同步侧把历史估值一并落进湖里（属于 cne 项目的事，本次不动）。
+//
 // valuationFor 取某只股票在 [start, end] 内的估值行（按日期）。
 func (p *lakeProvider) valuationFor(code string, start, end int) map[int64]cnlake.ValuationRow {
 	p.valMu.Lock()
@@ -270,7 +285,7 @@ func (p *lakeProvider) valuationFor(code string, start, end int) map[int64]cnlak
 // 上限的意义是**给内存封顶**：一天约 5500 只股票，
 // 400 个交易日约 220 万行。再长就会把整段历史读进内存
 // （K 线页可能一次要十年），所以那种情况仍走按代码读。
-const bulkMaxDays = 400
+const bulkMaxDays = 700
 
 // NewLakeProvider 用数据湖构造行情来源。
 func NewLakeProvider(lake *cnlake.Lake) Provider {
@@ -282,29 +297,34 @@ func (p *lakeProvider) Label() string { return "本地数据湖 " + p.lake.Root(
 
 // ensureMeta 载入并缓存标的名称与资产类型。
 func (p *lakeProvider) ensureMeta() error {
-	p.mu.Lock()
-	if p.names != nil {
+	// ⚠ 原来这里是"双重检查锁"，但**只保护了标志、没保护加载**：
+	// 并发进来时 N 个 worker 会同时看到 names == nil，然后**各读一遍** instruments。
+	// 条件选股/评分都是几十个 worker 一起进来，等于把一次读放大成几十次。
+	// 改用 sync.Once：只有一个 goroutine 真正加载，其余等待。
+	p.metaOnce.Do(func() {
+		rows, err := p.lake.Instruments()
+		if err != nil {
+			p.metaErr = err
+			return
+		}
+		names := make(map[string]string, len(rows))
+		assets := make(map[string]string, len(rows))
+		for _, row := range rows {
+			code := cnlake.BareSymbol(row.Symbol)
+			names[code] = row.Name
+			assets[code] = row.AssetType
+		}
+		p.mu.Lock()
+		p.names = names
+		p.assets = assets
 		p.mu.Unlock()
-		return nil
+	})
+	if p.metaErr != nil {
+		return p.metaErr
 	}
-	p.mu.Unlock()
-
-	rows, err := p.lake.Instruments()
-	if err != nil {
-		return err
+	if p.names == nil {
+		return fmt.Errorf("数据湖标的清单为空")
 	}
-	names := make(map[string]string, len(rows))
-	assets := make(map[string]string, len(rows))
-	for _, row := range rows {
-		code := cnlake.BareSymbol(row.Symbol)
-		names[code] = row.Name
-		assets[code] = row.AssetType
-	}
-
-	p.mu.Lock()
-	p.names = names
-	p.assets = assets
-	p.mu.Unlock()
 	return nil
 }
 
@@ -614,7 +634,12 @@ func (p *lakeProvider) bulkQuotes(codes []string, start, end int) (map[string]*s
 	}
 	startYear, endYear := start/10000, end/10000
 
-	bars, err := p.lake.DailyBarsMulti(codes, startYear, endYear)
+	// ⚠ 用**按交易日分区**的读法：只打开 [start, end] 内的日分区。
+	//
+	// `DailyBarsMulti(codes, startYear, endYear)` 会把**整年**的日文件全读一遍
+	// 再按代码过滤 —— 股票列表和条件选股每次都走这条路，一个"取最新价"
+	// 的请求要扫 250 个文件。而区间读只打开真正需要的那几个。
+	bars, err := p.lake.DailyBarsInRange(codes, int64(start), int64(end))
 	if err != nil {
 		return nil, nil, fmt.Errorf("读取数据湖 daily_bars 失败：%w", err)
 	}

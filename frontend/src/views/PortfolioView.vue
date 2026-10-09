@@ -98,11 +98,31 @@ const refreshLimit = ref(0);
  * 只刷了当前组合、或者以为没生效。
  */
 const activeStrategies = ref<string[]>([]);
+
+/** 策略 ID → 中文名（options 里带 label，取不到就退回 ID） */
+function strategyLabelOf(id: string): string {
+  const found = options.value?.strategies?.find(
+    (item) => (item as { value?: string }).value === id || (item as { id?: string }).id === id,
+  );
+  return found?.label ?? id;
+}
+
+/**
+ * 刷新范围提示。
+ *
+ * ⚠ 要说清"**按策略去重**"这件事：用户可能有多个组合但都用同一个策略，
+ * 这时只显示"1 个活跃策略"会让他以为漏了。原版 `_active_strategy_ids`
+ * 也是按策略去重的，所以这里把"几个组合共用几个策略"一并讲出来。
+ */
 const refreshScopeHint = computed(() => {
-  const names = activeStrategies.value;
+  const ids = activeStrategies.value;
   const scope = refreshLimit.value > 0 ? `前 ${refreshLimit.value} 只` : "全市场";
-  if (names.length === 0) return `刷新全部活跃策略（${scope}）`;
-  return `统一刷新 ${names.length} 个活跃策略：${names.join("、")}（${scope}）`;
+  if (ids.length === 0) return `统一刷新全部活跃组合用到的策略（${scope}）`;
+  const labels = ids.map(strategyLabelOf).join("、");
+  const active = (list.value ?? []).filter((item) => item.status !== "archived");
+  const shared =
+    active.length > ids.length ? `（${active.length} 个组合共用这 ${ids.length} 个策略）` : "";
+  return `统一刷新 ${labels}${shared}（${scope}）`;
 });
 
 /** 拉一次活跃策略列表（非归档组合用到的策略，去重） */

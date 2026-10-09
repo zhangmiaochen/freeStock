@@ -823,6 +823,59 @@ func (l *Lake) ShareholderCounts(code string) ([]ShareholderCountRow, error) {
 	return rows, err
 }
 
+// TopHoldersLatest 只读**最新一期**的十大股东。
+//
+// ⚠ 为什么需要它：`top_holders` 有 60MB（按 `record_date=年份` 分区），
+// 而 `TopHolders(code)` 会把**所有年份分区**读一遍再按代码过滤（实测 707ms/只）。
+// 但调用方（`financialStatements`）**只用最新一期**：
+//
+//	for _, row := range rows { if row.Date() != out.TopHolderDate { continue } }
+//
+// 所以从**最新年份往回读**、拿到该股票的行就停 —— 结果完全等价，
+// 但只碰 1~2 个分区。（没有缓存整份索引，是因为 60MB 展开到内存约 150MB。）
+func (l *Lake) TopHoldersLatest(code string) ([]TopHolderRow, error) {
+	bare := BareSymbol(code)
+	files := l.DatasetFiles("top_holders")
+	if len(files) == 0 {
+		return nil, nil
+	}
+
+	// 分区名形如 `<...>/record_date=2026/part-merged.parquet`，字典序即时间序
+	var rows []TopHolderRow
+	for i := len(files) - 1; i >= 0; i-- {
+		batch, err := readTyped[TopHolderRow](files[i:i+1], func(row *TopHolderRow) bool {
+			return BareSymbol(row.Symbol) == bare
+		})
+		if err != nil {
+			return nil, err
+		}
+		rows = append(rows, batch...)
+		if len(rows) > 0 {
+			// 更早的分区只会更旧，不必再读
+			break
+		}
+	}
+
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	// 只留最新一期
+	latest := int64(0)
+	for _, row := range rows {
+		if date := row.Date(); date > latest {
+			latest = date
+		}
+	}
+	out := rows[:0]
+	for _, row := range rows {
+		if row.Date() == latest {
+			out = append(out, row)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].HolderRank < out[j].HolderRank })
+	return out, nil
+}
+
 // TopHolders 读取十大股东，按报告期升序、名次升序。
 func (l *Lake) TopHolders(code string) ([]TopHolderRow, error) {
 	bare := BareSymbol(code)
@@ -892,6 +945,18 @@ func (l *Lake) BarPartitionDates() ([]int64, error) {
 		return nil, fmt.Errorf("cnlake: 读取 daily_bars 分区失败：%w", err)
 	}
 
+	// ⚠ **分区名是日期时也要缓存**：`bulkFillAllowed` 会**每只股票**调一次这个函数，
+	// 而 `os.ReadDir` 要遍历 2612 个目录。不缓存的话，条件选股 678 只
+	// 光是列目录就要几十秒，表现就是进度条卡在 0。
+	l.barDatesMu.Lock()
+	if l.barDatesLoaded && len(l.barDates) > 0 {
+		out := make([]int64, len(l.barDates))
+		copy(out, l.barDates)
+		l.barDatesMu.Unlock()
+		return out, nil
+	}
+	l.barDatesMu.Unlock()
+
 	fromNames := make([]int64, 0, len(entries))
 	var others []string
 	for _, entry := range entries {
@@ -914,6 +979,10 @@ func (l *Lake) BarPartitionDates() ([]int64, error) {
 	}
 	if len(fromNames) > 0 && len(others) == 0 {
 		sort.Slice(fromNames, func(i, j int) bool { return fromNames[i] < fromNames[j] })
+		l.barDatesMu.Lock()
+		l.barDates = fromNames
+		l.barDatesLoaded = true
+		l.barDatesMu.Unlock()
 		return fromNames, nil
 	}
 

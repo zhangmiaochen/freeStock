@@ -51,6 +51,10 @@ type Lake struct {
 	//
 	// 只有当分区名**不是**日期时才需要（真实湖是按日分区 `trade_date=2016-01-04`，
 	// 直接解析目录名即可；测试/部分数据集按年分区 `trade_date=2026`，才要读内容）。
+	statusMu    sync.Mutex
+	statusCache []DatasetStatus
+	statusAt    time.Time
+
 	barDatesMu     sync.Mutex
 	barDates       []int64
 	barDatesLoaded bool
@@ -209,13 +213,53 @@ type DatasetStatus struct {
 }
 
 // Status 汇总财务相关数据集的可用情况。
+// Status 返回财务相关数据集的状态。
+//
+// ⚠ **带缓存**。`DatasetStatus` 为了数行数会把数据集的**每个 parquet 文件
+// 都打开一次**读 footer（`financial_statement_items` 就是 102 个文件），
+// 而财务页**每次查询都会调 Status** —— 实测这一项占了财务查询约 1.7 秒
+// 里的一大部分，且它跟"查哪只股票"完全无关。
+//
+// 数据集状态只在重新同步后才会变，所以用 TTL 缓存；
+// 切换数据湖根目录时调 `InvalidateStatus` 主动失效。
 func (l *Lake) Status(ctx context.Context) []DatasetStatus {
-	out := make([]DatasetStatus, 0, len(financeDatasets))
-	for _, name := range financeDatasets {
-		out = append(out, l.DatasetStatus(name))
+	l.statusMu.Lock()
+	defer l.statusMu.Unlock()
+	if l.statusCache != nil && time.Since(l.statusAt) < statusTTL {
+		out := make([]DatasetStatus, len(l.statusCache))
+		copy(out, l.statusCache)
+		return out
 	}
-	return out
+
+	// 各数据集之间互不依赖 —— 并行算，别一个个排队
+	out := make([]DatasetStatus, len(financeDatasets))
+	var wg sync.WaitGroup
+	for i, name := range financeDatasets {
+		wg.Add(1)
+		go func(i int, name string) {
+			defer wg.Done()
+			out[i] = l.DatasetStatus(name)
+		}(i, name)
+	}
+	wg.Wait()
+
+	l.statusCache = out
+	l.statusAt = time.Now()
+	cached := make([]DatasetStatus, len(out))
+	copy(cached, out)
+	return cached
 }
+
+// InvalidateStatus 让状态缓存失效（数据湖根目录变了、或刚同步完时调用）。
+func (l *Lake) InvalidateStatus() {
+	l.statusMu.Lock()
+	l.statusCache = nil
+	l.statusAt = time.Time{}
+	l.statusMu.Unlock()
+}
+
+// statusTTL 是数据集状态缓存的存活时间。
+const statusTTL = 60 * time.Second
 
 // DatasetStatus 统计单个数据集：文件数、总行数、分区、最新的日期列值。
 func (l *Lake) DatasetStatus(name string) DatasetStatus {
@@ -393,15 +437,45 @@ func (l *Lake) StatementItems(ctx context.Context, symbol string, limit int) ([]
 		return nil, nil
 	}
 
-	rows, err := readTyped[financeStatementRow](files, func(row *financeStatementRow) bool {
+	match := func(row *financeStatementRow) bool {
 		if ctx != nil && ctx.Err() != nil {
 			return false
 		}
 		code := strings.SplitN(strings.ToUpper(row.Symbol), ".", 2)[0]
 		return code == bare
-	})
-	if err != nil {
-		return nil, err
+	}
+
+	// ⚠ **limit > 0 时从最新分区往回读**。
+	//
+	// 原来是从 `report_period=2001Q1` 往新读、凑够 limit 就停 ——
+	// 于是"最新 200 条"实际拿到的是 **2001Q2~2003Q2**（实测），
+	// 界面上根本看不到近期财报。
+	//
+	// 而且限流也没省下时间：读 200 条 2.2s、读全部 2801 条 3.0s（只差 1.4 倍），
+	// 说明耗时几乎全花在"打开并扫描分区文件"的固定开销上，与数据量无关。
+	//
+	// 反过来读：只碰最新几个分区，**既快又对**。
+	var rows []financeStatementRow
+	if limit > 0 {
+		for start := len(files) - 1; start >= 0 && len(rows) < limit; start -= 8 {
+			stop := start - 8
+			if stop < 0 {
+				stop = 0
+			}
+			batch, err := readTyped[financeStatementRow](files[stop:start+1], match)
+			if err != nil {
+				return nil, err
+			}
+			rows = append(rows, batch...)
+		}
+		// 与原来一样按期间**升序**输出（调用方按顺序展示）
+		sort.SliceStable(rows, func(i, j int) bool { return rows[i].ReportPeriod < rows[j].ReportPeriod })
+	} else {
+		var err error
+		rows, err = readTyped[financeStatementRow](files, match)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if ctx != nil && ctx.Err() != nil {
 		return nil, ctx.Err()
