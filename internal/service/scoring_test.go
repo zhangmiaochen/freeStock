@@ -126,7 +126,7 @@ func TestScoreStocksRealData(t *testing.T) {
 	requireLocalServer(t, svc)
 
 	scoring := NewScoringService(svc)
-	result, err := scoring.ScoreStocks([]string{"600519", "000001", "300750", "601318"}, 0, 0)
+	result, err := scoring.ScoreStocks([]string{"600519", "000001", "300750", "601318"}, 0, 0, "")
 	if err != nil {
 		t.Fatalf("评分失败: %v", err)
 	}
@@ -216,7 +216,7 @@ func TestScoreStocksSkipsUnknownCodes(t *testing.T) {
 	requireLocalServer(t, svc)
 
 	scoring := NewScoringService(svc)
-	result, err := scoring.ScoreStocks([]string{"600519", "999999", "000000"}, 0, 0)
+	result, err := scoring.ScoreStocks([]string{"600519", "999999", "000000"}, 0, 0, "")
 	if err != nil {
 		t.Fatalf("不该因为有不存在的代码就报错: %v", err)
 	}
@@ -235,7 +235,7 @@ func TestScoreStocksHistoricalDate(t *testing.T) {
 	requireLocalServer(t, svc)
 
 	scoring := NewScoringService(svc)
-	result, err := scoring.ScoreStocks([]string{"600519", "000001"}, 20260630, 0)
+	result, err := scoring.ScoreStocks([]string{"600519", "000001"}, 20260630, 0, "")
 	if err != nil {
 		t.Fatalf("历史日期评分不该报错: %v", err)
 	}
@@ -251,7 +251,7 @@ func TestScoreStocksEmpty(t *testing.T) {
 	requireLocalServer(t, svc)
 
 	scoring := NewScoringService(svc)
-	result, err := scoring.ScoreStocks([]string{}, 0, 30)
+	result, err := scoring.ScoreStocks([]string{}, 0, 30, "")
 	if err != nil {
 		t.Fatalf("空输入不该报错: %v", err)
 	}

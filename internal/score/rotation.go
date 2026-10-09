@@ -1,6 +1,9 @@
 package score
 
-import "math"
+import (
+	"math"
+	"sort"
+)
 
 // ---------------------------------------------------------------------------
 // 轮动决策
@@ -47,7 +50,19 @@ const (
 	StateReboundObserve         = "rebound_observe"
 	StateScoreObserve           = "score_observe"
 	StateKeep                   = "keep"
+	// StateCandidateEntry 是建仓/换入行的决策状态（原实现写 "candidate_entry"）
+	StateCandidateEntry = "candidate_entry"
+	// StateBreadthGateHold / StateBreadthGateExit 是广度闸门改写后的状态
+	// （原实现 portfolio_rotation_logic.py:1806-1821）
+	StateBreadthGateHold = "breadth_gate_hold"
+	StateBreadthGateExit = "breadth_gate_exit"
+	// StateRepairAddSecondLayer 是加层行的决策状态（原实现写 "repair_add_second_layer"）
+	StateRepairAddSecondLayer = "repair_add_second_layer"
 )
+
+// defaultTotalLayers 与 portfolio 包的 DefaultTotalLayers 同值
+// （score 包不反向依赖 portfolio，所以这里单独定义）。
+const defaultTotalLayers = 10
 
 // 原项目的模块级阈值常量。
 const (
@@ -87,8 +102,8 @@ var actionLabels = map[string]string{
 	ActionObserve:           "观察",
 	ActionReduce:            "减仓",
 	ActionClear:             "清仓",
-	ActionAdd:               "建仓",
-	ActionAddLayer:          "加仓",
+	ActionAdd:               "新增建仓",
+	ActionAddLayer:          "加1层",
 	ActionReplaceIn:         "换入",
 	ActionReplaceOut:        "换出",
 	StateHoldForReboundExit: "等待反弹后处理", // 遗留映射
@@ -112,6 +127,9 @@ func ActionLabel(action string) string {
 type Row struct {
 	Code string `json:"tsCode"`
 	Name string `json:"name"`
+	// Market 是个股所属市场（main/gem/star），用于按档设分数门槛。
+	// 原实现按市场分档设门槛，没有这个字段就只能取一个统一值。
+	Market string `json:"market"`
 
 	// 评分
 	TotalScore         float64 `json:"totalScore"`
@@ -126,6 +144,8 @@ type Row struct {
 
 	// 均线与价格
 	Close  float64 `json:"closePrice"`
+	High   float64 `json:"highPrice"`
+	Low    float64 `json:"lowPrice"`
 	Open   float64 `json:"openPrice"`
 	Ma5    float64 `json:"ma5Price"`
 	Ma20   float64 `json:"ma20Price"`
@@ -140,9 +160,20 @@ type Row struct {
 	DrawdownFromHigh120 float64 `json:"drawdownFromHigh120"`
 	DrawdownFromHigh20  float64 `json:"drawdownFromHigh20"`
 	ReboundFromLow60    float64 `json:"reboundFromLow60"`
+	StockReturn3D       float64 `json:"stockReturn3d"`
 	StockReturn5D       float64 `json:"stockReturn5d"`
 	StockReturn10D      float64 `json:"stockReturn10d"`
+	StockReturn20D      float64 `json:"stockReturn20d"`
 	VolumeRatio20       float64 `json:"volumeRatio20"`
+	VolumeRatio520      float64 `json:"volumeRatio520"`
+	// Ma5Prev / Ma250Prev 用于低吸候选的"均线上翘"判定（F21）
+	Ma5Prev   float64 `json:"ma5PrevPrice"`
+	Ma250Prev float64 `json:"ma250PrevPrice"`
+	// IndustryReturn20D / BenchmarkReturn20D 用于算 industry_edge
+	//（原实现 `industry_return_20d - benchmark_return_20d`），
+	// 高手的"主线门槛"要用它
+	IndustryReturn20D  float64 `json:"industryReturn20d"`
+	BenchmarkReturn20D float64 `json:"benchmarkReturn20d"`
 
 	// 持仓专属
 	PositionLayers   int     `json:"positionLayers"`
@@ -190,12 +221,12 @@ func IsStructureBroken(row Row, strategyID, marketState string, protectStart, pr
 	if row.TrendScore <= 10 && row.RelativeStrength20D <= -8 && row.DrawdownFromHigh120 <= -12 {
 		return true
 	}
-	// 4) 跌破 MA120 且结构弱（MA120 > 0 才判）
-	if row.Ma120 > 0 && row.Close < row.Ma120*0.965 && row.StructureScore <= 6 {
+	// 4) 跌破 MA120 且结构弱（原实现要求 close_price > 0 且 ma120 > 0，:430）
+	if row.Close > 0 && row.Ma120 > 0 && row.Close < row.Ma120*0.965 && row.StructureScore <= 6 {
 		return true
 	}
-	// 5) 跌破 MA60 且深回撤
-	if row.Ma60 > 0 && row.Close < row.Ma60*0.94 && row.DrawdownFromHigh120 <= -18 {
+	// 5) 跌破 MA60 且深回撤（原实现要求 close_price > 0，:432）
+	if row.Close > 0 && row.Ma60 > 0 && row.Close < row.Ma60*0.94 && row.DrawdownFromHigh120 <= -18 {
 		return true
 	}
 	// 6) 熊市里三者皆弱
@@ -221,43 +252,61 @@ func IsFailedOversoldReboundHolding(row Row, marketState string) bool {
 	if marketState != StateBull && row.ProfitLossPct <= -3.5 && row.TotalScore < 58 {
 		return true
 	}
-	if row.Ma30 > 0 && row.Close < row.Ma30*0.94 && row.TotalScore < 58 {
+	// 原实现 :959/961 都带 close_price > 0 守卫
+	if row.Close > 0 && row.Ma30 > 0 && row.Close < row.Ma30*0.94 && row.TotalScore < 58 {
 		return true
 	}
-	if row.Ma20 > 0 && row.Close < row.Ma20*0.94 && row.PctChg < 0 && row.RelativeStrength20D < -2 {
+	if row.Close > 0 && row.Ma20 > 0 && row.Close < row.Ma20*0.94 && row.PctChg < 0 && row.RelativeStrength20D < -2 {
 		return true
 	}
 	return false
 }
 
 // CanHoldStrategyRepairPullback 判定是否可豁免结构破坏（仅趋势成长 / 高手模拟）。
+//
+// 逐条对照 portfolio_rotation_logic.py:966-1007。注意边界是 **`profit_pct <= -6.0`
+// 就拒绝**（即只接受严格大于 -6.0 的），写成 `>= -6` 会在恰好等于时判反。
 func CanHoldStrategyRepairPullback(row Row, strategyID, marketState string) bool {
 	switch strategyID {
 	case StrategyTrendGrowth:
-		if !(row.ProfitLossPct >= -6 && row.TotalScore >= 68 && row.TrendScore >= 19 &&
-			row.StructureScore >= 9 && row.RSScore >= 7 &&
-			row.RelativeStrength20D >= -2 && row.DrawdownFromHigh120 >= -28) {
+		if row.ProfitLossPct <= -6.0 {
 			return false
 		}
-		if row.Ma120 > 0 && row.Close < row.Ma120*0.95 {
+		if row.TotalScore < 68.0 || row.TrendScore < 19.0 ||
+			row.StructureScore < 9.0 || row.RSScore < 7.0 {
 			return false
 		}
-		if row.Ma60 > 0 && row.Close < row.Ma60*0.955 {
+		if row.RelativeStrength20D < -2.0 || row.DrawdownFromHigh120 < -28.0 {
+			return false
+		}
+		if row.Close > 0 && row.Ma120 > 0 && row.Close < row.Ma120*0.95 {
+			return false
+		}
+		if row.Close > 0 && row.Ma60 > 0 && row.Close < row.Ma60*0.955 {
 			return false
 		}
 		return true
+
 	case StrategyExpert:
-		if !(row.ProfitLossPct >= -8 && row.TotalScore >= 62 && row.TrendScore >= 16 &&
-			row.StructureScore >= 6 && row.RSScore >= 5 && row.DrawdownFromHigh120 >= -30) {
+		if row.ProfitLossPct <= -8.0 {
 			return false
 		}
-		if marketState != StateBear && row.RelativeStrength20D < -8 {
+		if row.TotalScore < 62.0 {
 			return false
 		}
-		if row.Ma120 > 0 && row.Close < row.Ma120*0.94 {
+		if row.TrendScore < 16.0 || row.StructureScore < 6.0 || row.RSScore < 5.0 {
 			return false
 		}
-		if row.Ma60 > 0 && row.Close < row.Ma60*0.945 {
+		if marketState != StateBear && row.RelativeStrength20D < -8.0 {
+			return false
+		}
+		if row.DrawdownFromHigh120 < -30.0 {
+			return false
+		}
+		if row.Close > 0 && row.Ma120 > 0 && row.Close < row.Ma120*0.94 {
+			return false
+		}
+		if row.Close > 0 && row.Ma60 > 0 && row.Close < row.Ma60*0.945 {
 			return false
 		}
 		return true
@@ -407,21 +456,24 @@ func ftoa(v float64, digits int) string {
 // ---------------------------------------------------------------------------
 
 // ReplacementPair 是一次换股配对。
+//
+// 必须带 json tag：Wails 按 tag 生成 TS 绑定，没有 tag 时字段名会原样变成
+// PascalCase，与前端其它类型的 camelCase 约定不一致。
 type ReplacementPair struct {
-	HoldingCode   string
-	HoldingName   string
-	CandidateCode string
-	CandidateName string
-	Mode          string // partial_rotate / full_replace
+	HoldingCode   string `json:"holdingTsCode"`
+	HoldingName   string `json:"holdingName"`
+	CandidateCode string `json:"candidateTsCode"`
+	CandidateName string `json:"candidateName"`
+	Mode          string `json:"mode"` // partial_rotate / full_replace
 	// 对比数据
-	HoldingScore   float64
-	CandidateScore float64
-	TotalScoreGap  float64
-	RSScoreGap     float64
-	RepairScoreGap float64
-	MainReason     string
-	ExpectedUplift float64
-	RankNo         int
+	HoldingScore   float64 `json:"holdingScore"`
+	CandidateScore float64 `json:"candidateScore"`
+	TotalScoreGap  float64 `json:"totalScoreGap"`
+	RSScoreGap     float64 `json:"rsScoreGap"`
+	RepairScoreGap float64 `json:"repairScoreGap"`
+	MainReason     string  `json:"mainReason"`
+	ExpectedUplift float64 `json:"expectedPortfolioUplift"`
+	RankNo         int     `json:"rankNo"`
 }
 
 // RotationRow 是一条调仓动作。
@@ -439,8 +491,13 @@ type RotationRow struct {
 	CandidateScore      float64 `json:"candidateScore"`
 	ExpectedImprovement float64 `json:"expectedImprovement"`
 
-	Reason        string `json:"reason"`
-	SourceType    string `json:"sourceType"`
+	Reason     string `json:"reason"`
+	SourceType string `json:"sourceType"`
+	// FromPair 标记这一行是**换股配对产生**的（换入行）。
+	//
+	// 需要它是因为 partial_rotate 的换入行动作名是 `add`（原实现 :2418），
+	// 与真正的"新建仓"同名 —— 光看 action 区分不了，会影响额度统计与展示。
+	FromPair      bool   `json:"fromPair"`
 	CurrentLayers int    `json:"currentLayers"`
 	TargetLayers  int    `json:"targetLayers"`
 	LayersDelta   int    `json:"layersDelta"`
@@ -475,6 +532,16 @@ type RotationInput struct {
 	MaxStockLimit int
 	// LowBuyBreadthReadyCount 是低吸广度就绪数
 	LowBuyBreadthReadyCount int
+	// LowBuyIndex 是低吸的**指数闸门**数据（创业板指 + 沪深300）。
+	// 原实现是 `market_breadth_status` 的 `index_entry_allowed`
+	//（portfolio_rotation_logic.py:1754-1760）。
+	LowBuyIndex LowBuyIndexGate
+	// UniverseScores 是**当日该策略的全部评分**（范围过滤前）。
+	//
+	// 广度闸门要在全量评分帧上数（原实现 `universe_count = len(scores)`），
+	// 不能拿候选池数 —— 候选池已经被 head(max(80,target*12)) 截断，
+	// 用它做分母会让 `universe_count >= 100` 恒不成立、闸门永不启用。
+	UniverseScores []float64
 }
 
 // BuildRotationPlan 生成轮动计划。
@@ -637,10 +704,21 @@ func BuildRotationPlan(in RotationInput) RotationPlan {
 	}
 
 	// ---- 换入行（与换出行同号，保证同组排序相邻）----
+	//
+	// 动作名由 pair_mode 决定（原实现 :2418）：
+	//   `"action": "replace_in" if pair_mode == "full_replace" else "add"`
+	//
+	// 也就是说 **partial_rotate（释放一层轮动）在原文里显示为"新增建仓"**，
+	// 不是"换入"。两者的展示次序也不同（SQL CASE：replace_in=2 < add=3）。
 	for _, pair := range pairs {
+		action := ActionReplaceIn
+		if pair.Mode != "full_replace" {
+			action = ActionAdd
+		}
+		target := pair.LayersForCandidate()
 		plan.Rows = append(plan.Rows, RotationRow{
 			Code: pair.CandidateCode, Name: pair.CandidateName,
-			Action: ActionReplaceIn, ActionLabel: ActionLabel(ActionReplaceIn),
+			Action: action, ActionLabel: ActionLabel(action),
 			Score:               pair.CandidateScore,
 			ScoreGap:            pair.TotalScoreGap,
 			RankNo:              pair.RankNo,
@@ -650,41 +728,208 @@ func BuildRotationPlan(in RotationInput) RotationPlan {
 			ExpectedImprovement: pair.ExpectedUplift,
 			Reason:              "换入更强标的",
 			SourceType:          "candidate",
+			FromPair:            true,
 			CurrentLayers:       0,
-			TargetLayers:        pair.LayersForCandidate(),
-			DecisionState:       StateFullReplace,
+			TargetLayers:        target,
+			// 层数变化 = 目标层数（原实现 :2432 `"layers_delta": int(entry_layers)`）
+			LayersDelta: target,
+			// 原实现 :2433 写 "candidate_entry"
+			DecisionState: StateCandidateEntry,
 		})
 	}
 
 	// ---- 建仓（候选池里没被换股用掉的）----
+	//
+	// ⚠ **必须受额度控制**（见下）。少了它，候选池里每个过质量门槛的票都会生成
+	// 一条 add —— target=5 时可能出 80 条，「一键应用」会真的建出几十个持仓。
+	//
+	// 对应 Python portfolio_rotation_logic.py:2439-2520。
 	sortCandidates(in.Candidates)
-	for _, candidate := range in.Candidates {
-		if usedCandidate[candidate.Code] {
-			continue
+
+	// 换股/清仓之后还剩下几只、几层
+	plannedCount, plannedLayers := 0, 0
+	for _, row := range plan.Rows {
+		if row.SourceType != "holding" && row.CurrentLayers <= 0 {
+			continue // 换入行由候选择，不计入"已有持仓"
 		}
-		ok, reason := CandidateQualityOK(candidate, cfg, state, false)
-		if !ok {
-			continue
+		if row.TargetLayers > 0 {
+			plannedCount++
+			plannedLayers += row.TargetLayers
 		}
-		target := initialEntryLayers(candidate, cfg, 0)
-		plan.Rows = append(plan.Rows, RotationRow{
-			Code: candidate.Code, Name: candidate.Name,
-			Action: ActionAdd, ActionLabel: ActionLabel(ActionAdd),
-			Score:         candidate.TotalScore,
-			RankNo:        nextRank,
-			Reason:        reason,
-			SourceType:    "candidate",
-			CurrentLayers: 0,
-			TargetLayers:  target,
-			DecisionState: "new_entry",
-		})
-		nextRank++
+	}
+	// 换入行也算占一个名额（它们本来就是补位的）
+	for _, row := range plan.Rows {
+		if row.FromPair {
+			plannedCount++
+			plannedLayers += row.TargetLayers
+		}
+	}
+
+	// 目标只数：低吸用**动态目标数**（原实现 `_low_buy_dynamic_target_count`，:2041），
+	// 其余策略用配置里的固定值。
+	desiredCount := cfg.TargetCount
+	if lowBuy {
+		desiredCount = LowBuyDynamicTargetCount(
+			in.LowBuyBreadthReadyCount, cfg.TargetCount, in.MaxStockLimit, cfg.LowBuyPositionMode)
+	}
+	if desiredCount < 0 {
+		desiredCount = 0
+	}
+	// 非低吸强制至少 1（低吸允许为 0 = 广度不足时不开新仓）
+	if desiredCount < 1 && !lowBuy {
+		desiredCount = 1
+	}
+	desiredLayers := cfg.TotalLayers
+	if desiredLayers < 1 {
+		desiredLayers = defaultTotalLayers
+	}
+	addNeed := desiredCount - plannedCount
+	if addNeed < 0 {
+		addNeed = 0
+	}
+	freeLayers := desiredLayers - plannedLayers
+	if freeLayers < 0 {
+		freeLayers = 0
+	}
+
+	// 加新仓的总闸（原实现 :2459
+	// `can_add_new_position = allow_new_adds and (not low_buy or low_buy_new_entry_allowed)`）
+	//
+	// 低吸的 `entry_allowed` 本身又是两个条件的 AND
+	//（portfolio_rotation_logic.py:1759 `ready_count >= min_ready_count and index_entry_allowed`）：
+	//   ① 广度就绪数达到第一档阈值
+	//   ② 指数闸门（创业板指站上 20/60 日线，且不是"弱周期假热度"）
+	canAddNewPosition := cfg.AllowNewAdds
+	if lowBuy {
+		breadthOK := LowBuyBreadthEntryAllowed(in.LowBuyBreadthReadyCount, cfg.LowBuyPositionMode)
+		indexOK := LowBuyIndexEntryAllowed(in.LowBuyIndex, in.LowBuyBreadthReadyCount)
+		canAddNewPosition = canAddNewPosition && breadthOK && indexOK
+	}
+
+	if canAddNewPosition && addNeed > 0 && freeLayers > 0 {
+		added := 0
+		for _, candidate := range in.Candidates {
+			if added >= addNeed || freeLayers <= 0 {
+				break
+			}
+			if usedCandidate[candidate.Code] {
+				continue
+			}
+			ok, reason := CandidateQualityOK(candidate, cfg, state, false)
+			if !ok {
+				continue
+			}
+			target := initialEntryLayers(candidate, cfg, freeLayers)
+			// 不能超出剩余层数额度
+			if target > freeLayers {
+				target = freeLayers
+			}
+			if target < 1 {
+				break
+			}
+			plan.Rows = append(plan.Rows, RotationRow{
+				Code: candidate.Code, Name: candidate.Name,
+				Action: ActionAdd, ActionLabel: ActionLabel(ActionAdd),
+				Score:         candidate.TotalScore,
+				RankNo:        nextRank,
+				Reason:        reason,
+				SourceType:    "candidate",
+				CurrentLayers: 0,
+				TargetLayers:  target,
+				LayersDelta:   target,
+				DecisionState: StateCandidateEntry,
+			})
+			nextRank++
+			added++
+			freeLayers -= target
+		}
+	}
+
+	// ---- 加第二层（add_layer）----
+	//
+	// 原实现 portfolio_rotation_logic.py:2527-2573。
+	// **此前整段缺失** —— Go 永远不会给出「加1层」的建议。
+	//
+	// 只把已经是 `keep` 的持仓行改写成 add_layer，且受"剩余层数额度"限制。
+	if !lowBuy {
+		plannedLayersAfterAdd := 0
+		for _, row := range plan.Rows {
+			if row.SourceType == "holding" && row.TargetLayers > 0 {
+				plannedLayersAfterAdd += row.TargetLayers
+			}
+		}
+		for _, row := range plan.Rows {
+			if row.SourceType == "candidate" && row.LayersDelta > 0 {
+				plannedLayersAfterAdd += row.LayersDelta
+			}
+		}
+		layerRoom := cfg.TotalLayers - plannedLayersAfterAdd
+		if layerRoom > 0 {
+			type layeringCandidate struct {
+				idx  int
+				hold Row
+			}
+			var candidates []layeringCandidate
+			for i := range plan.Rows {
+				row := &plan.Rows[i]
+				if row.Action != ActionKeep || row.SourceType != "holding" {
+					continue
+				}
+				hold, ok := holdingByCode(in.Holdings, row.Code)
+				if !ok {
+					continue
+				}
+				if canAddSecondLayer(hold, cfg) {
+					candidates = append(candidates, layeringCandidate{i, hold})
+				}
+			}
+			// 排序：总分↓ → 结构分↓ → 修复分↓ → 代码↑（原实现 :2543-2551）
+			sort.SliceStable(candidates, func(a, b int) bool {
+				x, y := candidates[a].hold, candidates[b].hold
+				if x.TotalScore != y.TotalScore {
+					return x.TotalScore > y.TotalScore
+				}
+				if x.StructureScore != y.StructureScore {
+					return x.StructureScore > y.StructureScore
+				}
+				if x.RepairScore != y.RepairScore {
+					return x.RepairScore > y.RepairScore
+				}
+				return x.Code < y.Code
+			})
+			for _, item := range candidates {
+				if layerRoom <= 0 {
+					break
+				}
+				current := item.hold.PositionLayers
+				if current < 1 {
+					current = 1
+				}
+				target := cfg.MaxLayersPerStock
+				if current+1 < target {
+					target = current + 1
+				}
+				if target <= current {
+					continue
+				}
+				delta := target - current
+				row := &plan.Rows[item.idx]
+				row.Action = ActionAddLayer
+				row.Reason = "结构未破，回踩关键均线后企稳，加1层"
+				row.RankNo = nextRank
+				row.TargetLayers = target
+				row.LayersDelta = delta
+				row.DecisionState = StateRepairAddSecondLayer
+				nextRank++
+				layerRoom -= delta
+			}
+		}
 	}
 
 	// ---- 广度闸门（3.7）----
 	plan.EntryAllowed = true
-	if !lowBuy && len(in.Candidates) > 0 {
-		plan.EntryAllowed = breadthEntryAllowed(in.Candidates, strategyID, len(in.Candidates))
+	if !lowBuy {
+		plan.EntryAllowed = breadthEntryAllowed(in.UniverseScores, strategyID)
 	}
 	if !plan.EntryAllowed {
 		plan.Rows = applyBreadthGate(plan.Rows, &plan)
@@ -700,27 +945,45 @@ func BuildRotationPlan(in RotationInput) RotationPlan {
 // LayersForCandidate 返回换入时应该给几层。
 func (p ReplacementPair) LayersForCandidate() int { return 1 }
 
+// holdingByCode 在持仓行里按代码找原始 Row。
+func holdingByCode(holdings []Row, code string) (Row, bool) {
+	for _, row := range holdings {
+		if row.Code == code {
+			return row, true
+		}
+	}
+	return Row{}, false
+}
+
 // severeBreak 对应优先级 5 的 severe_break。
+//
+// 原实现（portfolio_rotation_logic.py:2306-2309）：
+//
+//	severe_break = False if low_buy_strategy else (
+//	    (is_structure_broken(row, state) and not can_hold_strategy_repair_pullback(row, state))
+//	    or oversold_failed)
+//
+// ⚠ 关键：`can_hold_strategy_repair_pullback` **只认 trend_growth / expert_simulation**
+// （:966-969），对超跌反弹**恒返回 False**。所以超跌的 severe_break 是
+// `is_structure_broken(row) **or** oversold_failed` —— 结构破坏那一支不能丢。
 func severeBreak(row Row, strategyID, state string, protectStart, protectRetrace float64) bool {
 	if isLowBuyStrategy(strategyID) {
 		// 低吸的严重破坏由低吸自己的退出逻辑负责（优先级 3/4）
 		return false
 	}
-	if strategyID == StrategyOversold {
-		// 超跌反弹：只有"反弹失败"才算严重破坏
-		return IsFailedOversoldReboundHolding(row, state)
-	}
 	broken := IsStructureBroken(row, strategyID, state, protectStart, protectRetrace)
+
+	if strategyID == StrategyOversold {
+		// 超跌：可修复回踩豁免对它不适用（原实现恒 False），所以结构破坏直接算数；
+		// 再加"反弹失败"那一支
+		return broken || IsFailedOversoldReboundHolding(row, state)
+	}
+
 	if !broken {
 		return false
 	}
-	// 结构破坏但满足"可修复回踩"条件时豁免
-	return !CanHoldStrategyRepairRepair(row, strategyID, state)
-}
-
-// CanHoldStrategyRepairRepair 是内部包装（名称避免与公开函数混淆）。
-func CanHoldStrategyRepairRepair(row Row, strategyID, state string) bool {
-	return CanHoldStrategyRepairPullback(row, strategyID, state)
+	// 结构破坏但满足"可修复回踩"条件时豁免（仅趋势成长 / 高手模拟）
+	return !CanHoldStrategyRepairPullback(row, strategyID, state)
 }
 
 // buildNotes 生成计划说明（对应原项目的 note/notes）。

@@ -104,24 +104,52 @@ func (s *PortfolioService) GetDatabasePath() string { return s.dbPath() }
 // 现价来源
 // ---------------------------------------------------------------------------
 
-// LatestClose 实现 portfolio.PriceSource：返回这批股票的最新收盘价。
+// LatestClose 实现 portfolio.PriceSource。
 //
-// 原项目是从"最新评分日"的 stock_strength_history.close_price 取现价。
-// 本项目阶段一没有评分表，改为取**最新交易日的日 K 收盘价** ——
-// 语义一致（都是最近一个有数据的交易日的收盘价）。
+// **优先取"该策略最新评分日"的收盘价**（原实现 portfolio_service.py:3199），
+// 与建议页同源 —— 两处取不同来源会让用户看到"详情页 +8%、系统按 +3% 判定"。
 //
-// 走股票列表的缓存，所以不会为几只持仓单独发请求。
-func (s *PortfolioService) LatestClose(codes []string) (map[string]portfolio.PricePoint, error) {
+// 评分表里没有该股时**不返回**（调用方按 0 处理，与原实现的左连接落空一致）。
+//
+// 唯一的偏离：该策略**完全没有评分数据**时退回到最新交易日收盘价。
+// 否则详情页在首次刷新评分之前一个价格都显示不出来（原实现会显示 0）。
+func (s *PortfolioService) LatestClose(codes []string, strategyID string) (map[string]portfolio.PricePoint, error) {
 	out := make(map[string]portfolio.PricePoint, len(codes))
-	if len(codes) == 0 || s.stock == nil {
+	if len(codes) == 0 {
 		return out, nil
 	}
+	if strategyID == "" {
+		strategyID = portfolio.StrategyTrendGrowth
+	}
 
+	// 1) 评分日收盘价（首选，与建议页同源）
+	if store, err := s.db(); err == nil {
+		if date, err := store.LatestStrengthDate(strategyID); err == nil && date > 0 {
+			rows, err := store.LoadStrengthForCodes(date, strategyID, codes)
+			if err == nil {
+				for code, row := range rows {
+					if row.Close > 0 {
+						out[code] = portfolio.PricePoint{
+							Close: row.Close,
+							Date:  fmt.Sprintf("%d", date),
+						}
+					}
+				}
+				if len(out) > 0 {
+					return out, nil
+				}
+			}
+		}
+	}
+
+	// 2) 兜底：该策略还没有评分数据时用最新交易日收盘价
+	if s.stock == nil {
+		return out, nil
+	}
 	universe, err := s.stock.GetStockUniverse(false)
 	if err != nil {
 		return out, fmt.Errorf("取行情失败：%w", err)
 	}
-
 	want := make(map[string]bool, len(codes))
 	for _, code := range codes {
 		want[code] = true
@@ -234,16 +262,35 @@ func (s *PortfolioService) AddPosition(portfolioID string, in portfolio.Position
 	if err != nil {
 		return nil, err
 	}
+
+	code := portfolio.BareCode(in.Code)
 	// 名称留空时从股票列表补全（原项目界面也有这个"自动补全"行为）
 	if in.Name == "" && s.stock != nil {
 		if universe, err := s.stock.GetStockUniverse(false); err == nil {
-			code := portfolio.BareCode(in.Code)
 			for _, item := range universe.Stocks {
 				if item.Code == code {
 					in.Name = item.Name
 					break
 				}
 			}
+		}
+	}
+
+	// 建仓价没给时用最新收盘价补（对应 Python `entry_price <= 0` 时取当日 close_price）。
+	// 仍取不到就让 store 层报错 —— 0 成本会让浮盈保护永不触发。
+	if in.EntryPrice <= 0 && code != "" && s.stock != nil {
+		if prices, err := s.LatestClose([]string{code}, ""); err == nil {
+			if point, ok := prices[code]; ok && point.Close > 0 {
+				in.EntryPrice = point.Close
+				slog.Info("建仓价缺省，已用最新收盘价补", "code", code, "price", point.Close)
+			}
+		}
+	}
+	// 建仓日期没给时用最新交易日补（对应 Python `entry_date or latest_trade_date`），
+	// 而不是"今天" —— 周末/盘前新增会算错持有交易日数
+	if in.EntryDate == "" && s.stock != nil {
+		if universe, err := s.stock.GetStockUniverse(false); err == nil && universe.TradeDate > 0 {
+			in.EntryDate = fmt.Sprintf("%d", universe.TradeDate)
 		}
 	}
 

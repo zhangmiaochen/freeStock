@@ -6,6 +6,58 @@
 import { Create as $Create } from "@wailsio/runtime";
 
 /**
+ * ApplyResult 是一次应用的结果。
+ */
+export class ApplyResult {
+    "positionCount": number;
+    "added": number;
+    "reduced": number;
+    "cleared": number;
+    "unchanged": number;
+
+    /**
+     * Skipped 列出被跳过的动作及原因
+     */
+    "skipped": string[];
+
+    /** Creates a new ApplyResult instance. */
+    constructor($$source: Partial<ApplyResult> = {}) {
+        if (!("positionCount" in $$source)) {
+            this["positionCount"] = 0;
+        }
+        if (!("added" in $$source)) {
+            this["added"] = 0;
+        }
+        if (!("reduced" in $$source)) {
+            this["reduced"] = 0;
+        }
+        if (!("cleared" in $$source)) {
+            this["cleared"] = 0;
+        }
+        if (!("unchanged" in $$source)) {
+            this["unchanged"] = 0;
+        }
+        if (!("skipped" in $$source)) {
+            this["skipped"] = [];
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new ApplyResult instance from a string or object.
+     */
+    static createFrom($$source: any = {}): ApplyResult {
+        const $$createField5_0 = $$createType0;
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        if ("skipped" in $$parsedSource) {
+            $$parsedSource["skipped"] = $$createField5_0($$parsedSource["skipped"]);
+        }
+        return new ApplyResult($$parsedSource as Partial<ApplyResult>);
+    }
+}
+
+/**
  * Detail 是组合详情（组合 + 持仓 + 汇总），一次查询返回。
  */
 export class Detail {
@@ -36,10 +88,10 @@ export class Detail {
      * Creates a new Detail instance from a string or object.
      */
     static createFrom($$source: any = {}): Detail {
-        const $$createField0_0 = $$createType0;
-        const $$createField1_0 = $$createType2;
-        const $$createField2_0 = $$createType4;
-        const $$createField3_0 = $$createType5;
+        const $$createField0_0 = $$createType1;
+        const $$createField1_0 = $$createType3;
+        const $$createField2_0 = $$createType5;
+        const $$createField3_0 = $$createType6;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("portfolio" in $$parsedSource) {
             $$parsedSource["portfolio"] = $$createField0_0($$parsedSource["portfolio"]);
@@ -121,6 +173,7 @@ export class Portfolio {
      * active / paused / archived
      */
     "status": string;
+    "statusLabel": string;
     "targetPositionCount": number;
     "maxStockCount": number;
 
@@ -193,6 +246,9 @@ export class Portfolio {
         }
         if (!("status" in $$source)) {
             this["status"] = "";
+        }
+        if (!("statusLabel" in $$source)) {
+            this["statusLabel"] = "";
         }
         if (!("targetPositionCount" in $$source)) {
             this["targetPositionCount"] = 0;
@@ -323,7 +379,7 @@ export class PortfolioInput {
      * Creates a new PortfolioInput instance from a string or object.
      */
     static createFrom($$source: any = {}): PortfolioInput {
-        const $$createField9_0 = $$createType6;
+        const $$createField9_0 = $$createType7;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("scopeValue" in $$parsedSource) {
             $$parsedSource["scopeValue"] = $$createField9_0($$parsedSource["scopeValue"]);
@@ -458,20 +514,31 @@ export class Position {
 
 /**
  * PositionInput 是新增持仓的入参。
+ * 
+ * Layers / Weight 用指针是为了区分"**未提供**"与"**显式传 0**" ——
+ * 原实现（portfolio_service.py:534-535）这两者的语义不同：
+ * 
+ * 	position_layers: min(2, max(1, _safe_int(payload.get("position_layers"), default_layers)))
+ * 	  → 未提供 = default_layers；显式 0 → clamp 到 1
+ * 	position_weight: max(0.0, _safe_float(payload.get("position_weight"), _weight_from_layers(...)))
+ * 	  → 未提供 = 按层数换算；显式 0 → 存 0
  */
 export class PositionInput {
     "code": string;
     "name": string;
     "entryPrice": number;
     "entryDate": string;
-    "layers": number;
-
-    /**
-     * 百分数；0 表示由层数换算
-     */
-    "weight": number;
+    "layers": number | null;
+    "weight": number | null;
     "holdingType": string;
     "strategyTag": string;
+
+    /**
+     * SourceType / LastAction 可入参指定（原实现支持覆盖），
+     * 留空时分别是 manual / manual_add
+     */
+    "sourceType": string;
+    "lastAction": string;
 
     /** Creates a new PositionInput instance. */
     constructor($$source: Partial<PositionInput> = {}) {
@@ -488,16 +555,22 @@ export class PositionInput {
             this["entryDate"] = "";
         }
         if (!("layers" in $$source)) {
-            this["layers"] = 0;
+            this["layers"] = null;
         }
         if (!("weight" in $$source)) {
-            this["weight"] = 0;
+            this["weight"] = null;
         }
         if (!("holdingType" in $$source)) {
             this["holdingType"] = "";
         }
         if (!("strategyTag" in $$source)) {
             this["strategyTag"] = "";
+        }
+        if (!("sourceType" in $$source)) {
+            this["sourceType"] = "";
+        }
+        if (!("lastAction" in $$source)) {
+            this["lastAction"] = "";
         }
 
         Object.assign(this, $$source);
@@ -573,9 +646,9 @@ export class ScopeValue {
      * Creates a new ScopeValue instance from a string or object.
      */
     static createFrom($$source: any = {}): ScopeValue {
-        const $$createField0_0 = $$createType7;
-        const $$createField1_0 = $$createType7;
-        const $$createField2_0 = $$createType7;
+        const $$createField0_0 = $$createType0;
+        const $$createField1_0 = $$createType0;
+        const $$createField2_0 = $$createType0;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("codes" in $$parsedSource) {
             $$parsedSource["codes"] = $$createField0_0($$parsedSource["codes"]);
@@ -734,11 +807,11 @@ export class Transaction {
 }
 
 // Private type creation functions
-const $$createType0 = Portfolio.createFrom;
-const $$createType1 = Position.createFrom;
-const $$createType2 = $Create.Array($$createType1);
-const $$createType3 = Transaction.createFrom;
-const $$createType4 = $Create.Array($$createType3);
-const $$createType5 = Summary.createFrom;
-const $$createType6 = ScopeValue.createFrom;
-const $$createType7 = $Create.Array($Create.Any);
+const $$createType0 = $Create.Array($Create.Any);
+const $$createType1 = Portfolio.createFrom;
+const $$createType2 = Position.createFrom;
+const $$createType3 = $Create.Array($$createType2);
+const $$createType4 = Transaction.createFrom;
+const $$createType5 = $Create.Array($$createType4);
+const $$createType6 = Summary.createFrom;
+const $$createType7 = ScopeValue.createFrom;

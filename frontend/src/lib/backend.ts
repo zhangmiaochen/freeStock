@@ -49,12 +49,31 @@ import type {
   Summary as PortfolioSummary,
   Transaction as PortfolioTransaction,
 } from "../../bindings/freestock/internal/portfolio/models";
+import type {
+  AppliedChange,
+  ApplyResult,
+  PlanResult,
+  RefreshResult,
+  StrengthSummary,
+} from "../../bindings/freestock/internal/service/models";
+import type {
+  MarketState,
+  ReplacementPair,
+  RotationPlan,
+  RotationRow,
+  Row as ScoreRow,
+  StrategyConfig,
+} from "../../bindings/freestock/internal/score/models";
 import type { PortfolioOptions } from "../../bindings/freestock/internal/service/models";
 import * as StockService from "../../bindings/freestock/internal/service/stockservice";
 import * as PortfolioService from "../../bindings/freestock/internal/service/portfolioservice";
 
 export type { BollPrefs, KlinePrefs, MaPrefs, MacdPrefs };
 export type {
+  AppliedChange,
+  ApplyResult,
+  MarketState,
+  PlanResult,
   Portfolio,
   PortfolioDetail,
   PortfolioInput,
@@ -64,7 +83,14 @@ export type {
   PortfolioTransaction,
   Position,
   PositionInput,
+  RefreshResult,
+  ReplacementPair,
+  RotationPlan,
+  RotationRow,
   ScopeValue,
+  ScoreRow,
+  StrategyConfig,
+  StrengthSummary,
 };
 
 export type {
@@ -199,5 +225,18 @@ export const api = {
       PortfolioService.AddPosition(portfolioID, input) as Promise<Position>,
     removePosition: (portfolioID: string, code: string) =>
       PortfolioService.DeletePosition(portfolioID, code) as Promise<void>,
+
+    // ---- 阶段二：评分与轮动建议 ----
+    /** 刷新某策略的全市场评分（物化到组合库，耗时较长） */
+    refreshStrength: (strategyId: string, limit: number) =>
+      PortfolioService.RefreshStrength(strategyId, limit) as Promise<RefreshResult>,
+    getStrengthSummary: (strategyId: string) =>
+      PortfolioService.GetStrengthSummary(strategyId) as Promise<StrengthSummary>,
+    /** 生成调仓建议 */
+    buildPlan: (portfolioID: string) =>
+      PortfolioService.BuildPlan(portfolioID) as Promise<PlanResult>,
+    /** 一键应用建议（手动组合会被拒绝） */
+    applyRotation: (portfolioID: string) =>
+      PortfolioService.ApplyRotation(portfolioID) as Promise<ApplyResult>,
   },
 };

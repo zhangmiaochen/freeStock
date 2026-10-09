@@ -36,14 +36,27 @@ func buildReplacementPairs(in RotationInput, protectStart, protectRetrace float6
 		return nil, used
 	}
 
-	// 持仓按总分升序（最弱优先）
+	// 持仓排序（原实现 :2161-2164）：
+	//   sort_values(["total_score","relative_strength_20d","repair_score","position_layers","ts_code"],
+	//               ascending=[True, True, True, False, True])
+	// 即总分升序（最弱优先）→ RS 升序 → 修复分升序 → **层数降序** → 代码升序。
 	holdings := make([]Row, len(in.Holdings))
 	copy(holdings, in.Holdings)
 	sort.SliceStable(holdings, func(i, j int) bool {
-		if holdings[i].TotalScore != holdings[j].TotalScore {
-			return holdings[i].TotalScore < holdings[j].TotalScore
+		a, b := holdings[i], holdings[j]
+		if a.TotalScore != b.TotalScore {
+			return a.TotalScore < b.TotalScore
 		}
-		return holdings[i].Code < holdings[j].Code
+		if a.RelativeStrength20D != b.RelativeStrength20D {
+			return a.RelativeStrength20D < b.RelativeStrength20D
+		}
+		if a.RepairScore != b.RepairScore {
+			return a.RepairScore < b.RepairScore
+		}
+		if a.PositionLayers != b.PositionLayers {
+			return a.PositionLayers > b.PositionLayers
+		}
+		return a.Code < b.Code
 	})
 
 	plannedNames := len(in.Holdings)
@@ -61,10 +74,26 @@ func buildReplacementPairs(in RotationInput, protectStart, protectRetrace float6
 
 		broken := IsStructureBroken(hold, cfg.StrategyID, state, protectStart, protectRetrace)
 		repairable := CanHoldStrategyRepairPullback(hold, cfg.StrategyID, state)
-		// force_clear：结构破坏且不可修复 → 换股时免分差
-		forceClear := broken && !repairable
-		// rebound_ready：跌破 MA30 的反弹窗口内也免分差
-		reboundReady := hold.Ma30 > 0 && hold.Close < hold.Ma30*(1-MaBreakTolerance)
+		// oversold_failed 也要计入 force_clear（原实现 :2203-2204
+		// `force_clear = force_clear or oversold_failed`）
+		oversoldFailed := strategyIsOversold(cfg.StrategyID) &&
+			IsFailedOversoldReboundHolding(hold, state)
+		// force_clear：结构破坏且不可修复（或超跌反弹失败）→ 换股时免分差
+		forceClear := (broken && !repairable) || oversoldFailed
+
+		// 急涨兑现的持仓不参与配对（原实现 :2205-2206
+		// `if quick_profit_take or repair_hold: continue`）——
+		// 否则会产生"有换入、无对应换出"的悬空行
+		if ShouldQuickProfitTake(hold, state) {
+			continue
+		}
+
+		// rebound_ready 的**正确定义**（原实现 :2193-2194）：
+		//   rebound_wait = needs_rebound_exit(row, state)   ← 非低吸 + **未结构破坏** + close<ma30*0.995
+		//   rebound_ready = rebound_wait and _is_big_rebound_candle(row)
+		// ⚠ 它**不免分差**（分差校验对非 force_clear 的所有分支都执行）
+		reboundReady := NeedsReboundExit(hold, cfg.StrategyID, state, protectStart, protectRetrace) &&
+			IsBigReboundCandle(hold)
 
 		found := false
 		for _, cand := range in.Candidates {
@@ -77,20 +106,31 @@ func buildReplacementPairs(in RotationInput, protectStart, protectRetrace float6
 			}
 			gap := cand.TotalScore - hold.TotalScore
 
-			needGap := requiredGap
-			if forceClear || reboundReady {
-				needGap = cfg.ReadyScore - hold.TotalScore // 只要求候选达标即可
+			// 只有 force_clear 免分差；rebound_ready **不免**
+			if forceClear {
 				if cand.TotalScore < cfg.ReadyScore {
 					continue
 				}
-			} else if gap < needGap {
+			} else if gap < requiredGap {
 				continue
 			}
 
-			// 换股模式：持仓有多层、且还有空位、且不是牛市 → 部分换（减一层）
+			// pair_mode 按分支决定（原实现 :2222 / :2231 / :2237-2241 三处规则不同）
 			mode := "full_replace"
-			if hold.PositionLayers >= 2 && plannedNames < in.MaxStockLimit && state != StateBull {
-				mode = "partial_rotate"
+			switch {
+			case forceClear:
+				// :2222 硬编码 full_replace（不看层数、不看空位）
+				mode = "full_replace"
+			case reboundReady:
+				// :2231 `full_replace if hold_layers<=1 or bull else partial_rotate`
+				// —— **不看**计划只数是否已满
+				if hold.PositionLayers > 1 && state != StateBull {
+					mode = "partial_rotate"
+				}
+			default:
+				if hold.PositionLayers >= 2 && plannedNames < in.MaxStockLimit && state != StateBull {
+					mode = "partial_rotate"
+				}
 			}
 
 			reason := "换入更强标的（分差 " + ftoa(gap, 1) + "）"
@@ -118,13 +158,21 @@ func buildReplacementPairs(in RotationInput, protectStart, protectRetrace float6
 			})
 			used[cand.Code] = true
 			found = true
+			// 计划只数只在**正常分支选中 partial_rotate** 时递增
+			// （原实现 :2239；force_clear / rebound_ready 分支不递增）
+			if mode == "partial_rotate" && !forceClear && !reboundReady {
+				plannedNames++
+			}
 			break
 		}
-		if found {
-			plannedNames++ // partial_rotate 不减少持仓只数，但保险起见递增
-		}
+		_ = found
 	}
 	return pairs, used
+}
+
+// strategyIsOversold 判断是否超跌反弹策略。
+func strategyIsOversold(strategyID string) bool {
+	return strategyID == StrategyOversold
 }
 
 // ---------------------------------------------------------------------------
@@ -138,7 +186,7 @@ func buildReplacementPairs(in RotationInput, protectStart, protectRetrace float6
 // 低吸策略走自己的结构条件（is_trend_pullback_low_buy_candidate）。
 func CandidateQualityOK(row Row, cfg StrategyConfig, marketState string, replacementMode bool) (bool, string) {
 	if isLowBuyStrategy(cfg.StrategyID) {
-		ok := isLowBuyCandidate(row, cfg, 0)
+		ok := isLowBuyCandidate(row, cfg, cfg.LowBuyBreadthReadyCount)
 		if !ok {
 			return false, "低吸结构条件不满足"
 		}
@@ -148,6 +196,12 @@ func CandidateQualityOK(row Row, cfg StrategyConfig, marketState string, replace
 	// 公共前置：分数下限
 	if row.TotalScore < cfg.ReadyScore {
 		return false, "总分低于建仓线"
+	}
+
+	// 公共前置：5 个质量过滤（原实现 :1131-1140）——
+	// 缺了它们会放进过热票、拥挤票、下跌中继票
+	if ok, reason := passesCandidatePrefilters(row, cfg.StrategyID, marketState); !ok {
+		return false, reason
 	}
 
 	// 均线位置门槛（各策略不同）
@@ -211,8 +265,8 @@ func CandidateQualityOK(row Row, cfg StrategyConfig, marketState string, replace
 		minScore += 1.0
 	}
 
-	// 市场档位的分数下限
-	floor := marketScopeFloor(cfg.StrategyID, marketState)
+	// 市场档位的分数下限（按组合范围 + 个股所属市场分档）
+	floor := marketScopeFloor(cfg.StrategyID, cfg.MarketScopeKey, row.Market)
 	if row.TotalScore < math.Max(minScore, floor) {
 		return false, "总分未达门槛"
 	}
@@ -254,7 +308,12 @@ func CandidateQualityOK(row Row, cfg StrategyConfig, marketState string, replace
 			return false, "修复分不足"
 		}
 	case StrategyExpert:
-		industryEdge := 0.0
+		// `industry_edge = industry_return_20d - benchmark_return_20d`
+		//（原实现 :1121-1126）。
+		// ⚠ `mainline_score = max(mainline_board_score, industry_board_score,
+		// board_research_score)` 依赖**板块研究分** —— 本项目没有那个数据源，
+		// 所以 `row.MainlineScore` 恒为 0。`industry_edge` 这一支是真的。
+		industryEdge := row.IndustryReturn20D - row.BenchmarkReturn20D
 		if row.MainlineScore < 28 && industryEdge < 2 &&
 			!(row.TrendScore >= 20 && row.RSScore >= 9) {
 			return false, "主线强度不足"
@@ -285,57 +344,132 @@ func CandidateQualityOK(row Row, cfg StrategyConfig, marketState string, replace
 	return true, "符合建仓条件"
 }
 
-// marketScopeFloor 是市场档位的分数下限。
+// StockMarketOf 把本项目的市场 key 映射成原实现的词汇（main/gem/star）。
 //
-// 原实现把主板/创业板分开设门槛（主板 80、创业板 82）。
-// 这里因为拿不到个股所属市场，统一取**更严的**那个 —— 偏保守，
-// 不会放进不该进的票。调用方若有市场信息应当自行加严。
-func marketScopeFloor(strategyID, marketState string) float64 {
-	_ = marketState
-	switch strategyID {
-	case StrategyOversold:
-		return 74 // 创业板 74 / 科创板 90，取低值以免过度过滤
-	default:
-		return 80
+// ⚠ 这两个词汇表**不一样**：本项目 `market.KeyOf` 返回 `sh-main` / `sz-main` /
+// `chinext` / `star` / `bse`，而原实现用 主板 / 创业板 / 科创板。
+// 直接比较会导致分支永远不命中（这个坑踩过一次）。
+func StockMarketOf(key string) string {
+	switch key {
+	case "sh-main", "sz-main", "main":
+		return "main"
+	case "chinext", "gem":
+		return "gem"
+	case "star":
+		return "star"
 	}
+	return ""
 }
 
-// isLowBuyCandidate 低吸入场条件（3.4）。
+// marketScopeFloor 是市场档位的分数下限。
 //
-//	ma120 > ma250 > ma250_prev、ma30 > ma60、ma20 > ma30
+// 原实现只有**两个**策略有这张表（`trend_growth_market_scope_score_floor` 与
+// `oversold_rebound_market_scope_score_floor`），且策略不匹配时返回 **0**；
+// 最后取两者的 `max`。其余策略一律 0。
+//
+//	trend_growth:  main→主板80 ; gem→创业板80 ; main_gem→主板80/创业板82 ;
+//	               gem_star|all→创业板82
+//	oversold:      创业板 74 ; 科创板 90
+//
+// 表里没写到的组合返回 0（不额外设门槛）—— 不臆造原实现没有的阈值。
+//
+// stockMarket 是本项目的市场 key（sh-main/chinext/star/...），内部会做映射。
+func marketScopeFloor(strategyID, scopeKey, stockMarket string) float64 {
+	market := StockMarketOf(stockMarket)
+	if market == "" {
+		return 0
+	}
+
+	switch strategyID {
+	case StrategyOversold:
+		switch market {
+		case "gem":
+			return 74
+		case "star":
+			return 90
+		}
+		return 0
+
+	case StrategyTrendGrowth:
+		switch scopeKey {
+		case "main":
+			if market == "main" {
+				return 80
+			}
+		case "gem":
+			if market == "gem" {
+				return 80
+			}
+		case "main_gem":
+			switch market {
+			case "main":
+				return 80
+			case "gem":
+				return 82
+			}
+		case "gem_star", "all":
+			if market == "gem" {
+				return 82
+			}
+		}
+		return 0
+	}
+	// 高手模拟、低吸：原实现没有这张表
+	return 0
+}
+
+// isLowBuyCandidate 低吸入场条件。
+//
+// 逐条对照 portfolio_rotation_logic.py:550-586：
+//
+//	min(open, close, ma5, ma20, ma30, ma60, ma120, ma250, ma5_prev, ma250_prev) <= 0 → False
+//	ma120 > ma250 且 **ma250 > ma250_prev** 且 ma30 > ma60 且 ma20 > ma30
 //	ma30*0.975 <= close <= ma20*1.04
-//	ma5 < ma30 且 ma5 > ma5_prev
-//	阳线、ret20 <= 25
+//	ma5 < ma30 且 **ma5 > ma5_prev**
+//	close > open（阳线）
+//	ret20 = **stock_return_20d** <= 25
 //	dd20 落在 ready_count 决定的两档区间内
+//
+// ⚠ 三处曾实现错：漏 `ma250 > ma250_prev`、漏 `ma5 > ma5_prev`、
+// 用 `relative_strength_20d` 代替了 `stock_return_20d`（大盘涨跌时判定会相反）。
 func isLowBuyCandidate(row Row, cfg StrategyConfig, breadthReadyCount int) bool {
-	if row.Ma120 <= 0 || row.Ma250 <= 0 || row.Ma30 <= 0 || row.Ma60 <= 0 || row.Ma20 <= 0 {
+	// 0 值前置校验（原实现是 min(...) <= 0 一次性拒绝）
+	if row.Open <= 0 || row.Close <= 0 || row.Ma5 <= 0 || row.Ma20 <= 0 ||
+		row.Ma30 <= 0 || row.Ma60 <= 0 || row.Ma120 <= 0 || row.Ma250 <= 0 ||
+		row.Ma5Prev <= 0 || row.Ma250Prev <= 0 {
 		return false
 	}
-	if !(row.Ma120 > row.Ma250 && row.Ma30 > row.Ma60 && row.Ma20 > row.Ma30) {
+	if !(row.Ma120 > row.Ma250 && row.Ma250 > row.Ma250Prev &&
+		row.Ma30 > row.Ma60 && row.Ma20 > row.Ma30) {
 		return false
 	}
 	if row.Close < row.Ma30*0.975 || row.Close > row.Ma20*1.04 {
 		return false
 	}
-	// ma5 < ma30 且 ma5 在上翘（这里 ma5_prev 拿不到，用当日收盘/MA5 关系近似不了，
-	// 因此只校验 ma5 < ma30；上翘条件由调用方在有 ma5_prev 时补充）
-	if row.Ma5 > 0 && row.Ma5 >= row.Ma30 {
+	if !(row.Ma5 < row.Ma30 && row.Ma5 > row.Ma5Prev) {
 		return false
 	}
 	if row.Close <= row.Open {
 		return false
 	}
-	if row.RelativeStrength20D > 25 {
+	if row.StockReturn20D > 25.0 {
 		return false
 	}
-	low, high := -28.0, -3.0
-	if breadthReadyCount >= 1200 {
-		low, high = -18.0, -1.5
-	}
+	low, high := lowBuyDrawdownBounds(breadthReadyCount)
 	if row.DrawdownFromHigh20 < low || row.DrawdownFromHigh20 > high {
 		return false
 	}
 	return true
+}
+
+// lowBuyDrawdownBounds 按广度就绪数给出 dd20 的允许区间。
+//
+// 对应原实现 `_low_buy_drawdown_bounds`：>=1200 用紧档 (-18,-1.5)，否则 (-28,-3)。
+func lowBuyDrawdownBounds(breadthReadyCount int) (float64, float64) {
+	if breadthReadyCount >= 1200 {
+		return -18.0, -1.5
+	}
+	return -28.0, -3.0
 }
 
 // sortCandidates 按候选池排序规则排序（4.2）。
@@ -423,14 +557,18 @@ func breadthThresholds(strategyID string) (readyScore float64, minReadyCount int
 // breadthEntryAllowed 判断市场广度是否允许建仓。
 //
 // universe < 100 时闸门**不启用**（直接放行）。
-func breadthEntryAllowed(candidates []Row, strategyID string, universeCount int) bool {
+//
+// 分子分母都应当在**全量评分**上算（原实现 portfolio_rotation_logic.py:1772-1786
+// `universe_count = len(scores)`、`ready_count = (scores >= ready_score).sum()`）。
+func breadthEntryAllowed(universeScores []float64, strategyID string) bool {
+	universeCount := len(universeScores)
 	if universeCount < 100 {
 		return true
 	}
 	readyScore, minReadyCount := breadthThresholds(strategyID)
 	readyCount := 0
-	for _, row := range candidates {
-		if row.TotalScore >= readyScore {
+	for _, score := range universeScores {
+		if score >= readyScore {
 			readyCount++
 		}
 	}
@@ -451,13 +589,13 @@ func applyBreadthGate(rows []RotationRow, plan *RotationPlan) []RotationRow {
 			continue // 直接删除
 		case ActionAddLayer:
 			row.Action = ActionKeep
-			row.DecisionState = StateKeep
+			row.DecisionState = StateBreadthGateHold
 			row.Reason = "市场广度不足，暂停加仓"
 			row.TargetLayers = row.CurrentLayers
 			row.LayersDelta = 0
 		case ActionReplaceOut:
 			row.Action = ActionClear
-			row.DecisionState = StateTrendBreakExit
+			row.DecisionState = StateBreadthGateExit
 			row.Reason = "市场广度不足，换股改为清仓"
 			row.CandidateCode = ""
 			row.CandidateName = ""

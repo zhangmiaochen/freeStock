@@ -9,6 +9,8 @@ export {
 };
 
 export {
+    AppliedChange,
+    ApplyResult,
     BoardCategoryInfo,
     BoardFilter,
     BoardInfo,
@@ -30,8 +32,10 @@ export {
     MarketInfo,
     MoneyFlowPoint,
     MoneyFlowSummary,
+    PlanResult,
     PortfolioOption,
     PortfolioOptions,
+    RefreshResult,
     ScreenCondition,
     ScreenConditionInfo,
     ScreenItem,
@@ -44,5 +48,6 @@ export {
     StockProfile,
     StockSearchItem,
     StockUniverse,
+    StrengthSummary,
     TopHolderItem
 } from "./models.js";

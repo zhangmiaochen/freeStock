@@ -50,7 +50,9 @@ type MarketState struct {
 	BullScore  float64 `json:"bullScore"`
 	BearScore  float64 `json:"bearScore"`
 	ProxyRet20 float64 `json:"proxyRet20"`
-	Days       int     `json:"days"`
+	// AmountGrowth 是成交额增速（近 5 日 vs 前一段窗口最后 5 日）
+	AmountGrowth float64 `json:"amountGrowth"`
+	Days         int     `json:"days"`
 }
 
 // BuildMarketState 用全市场聚合数据判定市场状态。
@@ -83,7 +85,25 @@ func BuildMarketState(days []MarketDay) MarketState {
 	last := proxy[len(proxy)-1]
 	previous := proxy[len(proxy)-recent]
 
-	// 后 20 日 vs 前 20 日的高低点结构
+	// 前一段窗口（原实现 volume_price_market_state.py:279-290 与 :286-291）：
+	//
+	//	if len(grouped) >= 40: prev = grouped.iloc[-40:-20]
+	//	else:                  prev = grouped.head(max(1, len(grouped) - 20))
+	//
+	// ⚠ 两个边界要点：
+	//  1. `len < 40` 时取的是**开头** `max(1, len-20)` 行，不是"跳过前 20 行"
+	//  2. **恰好 20 天时 `head(max(1, 0))` = `head(1)` = 第 1 行** ——
+	//     此前我的循环区间为空，会退化成"前段 = 近段"，`higher`/`lower` 恒为 false
+	prevStart, prevEnd := 0, 0
+	if len(proxy) >= 2*recent {
+		prevStart, prevEnd = len(proxy)-2*recent, len(proxy)-recent
+	} else {
+		prevEnd = len(proxy) - recent
+		if prevEnd < 1 {
+			prevEnd = 1
+		}
+	}
+
 	recentHigh := -math.MaxFloat64
 	recentLow := math.MaxFloat64
 	previousHigh := -math.MaxFloat64
@@ -92,14 +112,11 @@ func BuildMarketState(days []MarketDay) MarketState {
 		recentHigh = math.Max(recentHigh, proxy[i])
 		recentLow = math.Min(recentLow, proxy[i])
 	}
-	for i := len(proxy) - 2*recent; i < len(proxy)-recent; i++ {
-		if i < 0 {
-			continue
-		}
+	for i := prevStart; i < prevEnd && i < len(proxy); i++ {
 		previousHigh = math.Max(previousHigh, proxy[i])
 		previousLow = math.Min(previousLow, proxy[i])
 	}
-	// 前一段不足时退化为整段
+	// 仍然为空（理论上到不了）时退化为整段
 	if previousHigh == -math.MaxFloat64 {
 		previousHigh, previousLow = recentHigh, recentLow
 	}
@@ -122,17 +139,31 @@ func BuildMarketState(days []MarketDay) MarketState {
 	up5 := mean(ratioOf(window, func(d MarketDay) float64 { return d.UpRatio }), len(window)-short, len(window))
 	down5 := mean(ratioOf(window, func(d MarketDay) float64 { return d.DownRatio }), len(window)-short, len(window))
 
-	// 成交额增速（近 5 日 vs 前 5 日）
+	// 成交额增速（近 5 日 vs **前一段窗口的最后 5 日**）
+	//
+	// 原实现（volume_price_market_state.py:292-294）：
+	//   amount_recent = recent["amount"].tail(5).mean()
+	//   amount_prev   = prev["amount"].tail(5).mean()      ← prev 就是上面那个窗口
+	//
+	// 注意 `prev` 的**最后 5 天**在 len>=40 时是第 -25..-21 日，
+	// 而 len<40 时会落在开头那段里 —— 必须复用同一个 prevStart/prevEnd。
 	amounts := ratioOf(window, func(d MarketDay) float64 { return d.TotalAmount })
 	amtGrowth := 0.0
-	if len(amounts) >= 2*short {
+	if len(amounts) > 0 {
 		recentAmt := mean(amounts, len(amounts)-short, len(amounts))
-		prevAmt := mean(amounts, len(amounts)-2*short, len(amounts)-short)
-		if prevAmt > 0 {
-			amtGrowth = (recentAmt/prevAmt - 1) * 100
+		amtFrom := prevEnd - 5
+		if amtFrom < 0 {
+			amtFrom = 0
+		}
+		if amtFrom < prevEnd {
+			prevAmt := mean(amounts, amtFrom, prevEnd)
+			if prevAmt > 0 {
+				amtGrowth = (recentAmt/prevAmt - 1) * 100
+			}
 		}
 	}
 
+	out.AmountGrowth = round(amtGrowth, 4)
 	bull := 45 + 25*higher + 15*boolToFloat(up5 >= 0.55) + 10*boolToFloat(amtGrowth >= 5)
 	if ret20 >= 5 {
 		bull += 20
@@ -196,6 +227,12 @@ type StrategyConfig struct {
 	MaxLayersPerStock      int     `json:"maxLayersPerStock"`
 	AllowNewAdds           bool    `json:"allowNewAdds"`
 	RequireCandidateSignal bool    `json:"requireCandidateSignal"`
+	// MarketScopeKey 是**组合**的市场范围（main/gem/main_gem/gem_star/all/...）。
+	// 所有策略都会用到 —— 它和个股所属市场一起决定候选的分数门槛。
+	MarketScopeKey string `json:"marketScopeKey"`
+	// LowBuyBreadthReadyCount 是低吸广度就绪数，决定低吸候选的 dd20 用紧档还是宽档。
+	// 由调用方（service 层）从物化评分表统计后填入。
+	LowBuyBreadthReadyCount int `json:"lowBuyBreadthReadyCount"`
 
 	// 以下三态同值（原项目如此）
 	ReplaceScoreGap float64 `json:"replaceScoreGap"`
@@ -247,14 +284,17 @@ type lowBuyProfile struct {
 
 // lowBuyProfiles 对应原项目的 LOW_BUY_PROFILES。
 // 按 market_scope 选档：main / all / main_star / gem / gem_star / star / main_gem(默认)。
+//
+// ⚠ exit_ma30_ratio **只有 main_gem 是 0.96**，其余（含 gem / star / gem_star）都是 0.94
+// （原实现 portfolio_strategy.py:106-114）。写成 0.96 会让止损线提前、更早清仓。
 var lowBuyProfiles = map[string]lowBuyProfile{
 	"main":      {SortMode: "amount_entry", PositionMode: "slow1000", ExitMa30Ratio: 0.94},
 	"all":       {SortMode: "amount_entry", PositionMode: "slow1000", ExitMa30Ratio: 0.94},
 	"main_star": {SortMode: "amount_entry", PositionMode: "slow1000", ExitMa30Ratio: 0.94},
 	"main_gem":  {SortMode: "amount_entry", PositionMode: "slow1000", ExitMa30Ratio: 0.96},
-	"gem":       {SortMode: "deep_amount", PositionMode: "slow1000", ExitMa30Ratio: 0.96},
-	"star":      {SortMode: "board_norm_amount", PositionMode: "conservative1200", ExitMa30Ratio: 0.96},
-	"gem_star": {SortMode: "deep_amount", PositionMode: "slow1000", ExitMa30Ratio: 0.96,
+	"gem":       {SortMode: "deep_amount", PositionMode: "slow1000", ExitMa30Ratio: 0.94},
+	"star":      {SortMode: "board_norm_amount", PositionMode: "conservative1200", ExitMa30Ratio: 0.94},
+	"gem_star": {SortMode: "deep_amount", PositionMode: "slow1000", ExitMa30Ratio: 0.94,
 		ProtectStartPct: 30, ProtectRetrace: 10},
 }
 
@@ -276,10 +316,11 @@ func BuildStrategyConfig(strategyID, marketState string, targetCount, totalLayer
 		marketState = StateRange
 	}
 	if targetCount < 1 {
-		targetCount = 5
+		// 原实现 `max(1, int(target_position_count or 1))` —— 传 0/负数都归到 **1**，不是 5
+		targetCount = 1
 	}
 	if totalLayers < 1 {
-		totalLayers = 10
+		totalLayers = 1
 	}
 
 	cfg := StrategyConfig{
@@ -296,6 +337,12 @@ func BuildStrategyConfig(strategyID, marketState string, targetCount, totalLayer
 		ReduceScore:            45,
 		ClearScore:             35,
 		RequireCandidateSignal: false,
+	}
+	// 市场范围：空串按 main_gem（低吸的默认档，也是原项目的默认范围）
+	// 市场范围：空串按 **all**（原实现 `resolve_strategy_market_scope_key("")` → "all"）
+	cfg.MarketScopeKey = marketScope
+	if cfg.MarketScopeKey == "" {
+		cfg.MarketScopeKey = "all"
 	}
 	cfg.MaxReplaceCount = maxReplaceCount(targetCount)
 
@@ -400,23 +447,70 @@ func BuildRotationPolicy(marketState string, targetCount int) RotationPolicy {
 	}
 }
 
+// lowBuyPositionThresholds 返回某仓位档的阈值表（阈值, 目标数）。
+//
+// 原实现 `_low_buy_position_thresholds`。
+func lowBuyPositionThresholds(mode string) [][2]int {
+	switch mode {
+	case "conservative1200":
+		return [][2]int{{1200, 1}, {1800, 2}, {2400, 3}, {3200, 5}}
+	default: // slow1000
+		return [][2]int{{1000, 1}, {1500, 2}, {2000, 3}, {2600, 5}}
+	}
+}
+
 // LowBuyPositionLayers 按低吸的仓位档把"广度就绪数"映射成建仓层数。
 //
 // slow1000:       1000→1, 1500→2, 2000→3, 2600→5
 // conservative1200: 1200→1, 1800→2, 2400→3, 3200→5
 func LowBuyPositionLayers(mode string, breadthReadyCount int) int {
-	var steps [][2]int
-	switch mode {
-	case "conservative1200":
-		steps = [][2]int{{1200, 1}, {1800, 2}, {2400, 3}, {3200, 5}}
-	default: // slow1000
-		steps = [][2]int{{1000, 1}, {1500, 2}, {2000, 3}, {2600, 5}}
-	}
 	layers := 0
-	for _, step := range steps {
+	for _, step := range lowBuyPositionThresholds(mode) {
 		if breadthReadyCount >= step[0] {
 			layers = step[1]
 		}
 	}
 	return layers
+}
+
+// LowBuyDynamicTargetCount 低吸的动态目标持仓数（原实现 `_low_buy_dynamic_target_count`）。
+//
+//	count < 第一档阈值 → desired = 0
+//	否则 desired = 满足的最大档的目标数
+//	结果 = max(0, min(desired, targetPositionCount, maxStockCount))
+func LowBuyDynamicTargetCount(readyCount, targetPositionCount, maxStockCount int, positionMode string) int {
+	thresholds := lowBuyPositionThresholds(positionMode)
+	desired := 0
+	if readyCount >= thresholds[0][0] {
+		for _, step := range thresholds {
+			if readyCount >= step[0] {
+				desired = step[1]
+			}
+		}
+	}
+	result := desired
+	for _, value := range []int{targetPositionCount, maxStockCount} {
+		if value < 0 {
+			value = 0
+		}
+		if value < result {
+			result = value
+		}
+	}
+	if result < 0 {
+		result = 0
+	}
+	return result
+}
+
+// LowBuyBreadthEntryAllowed 低吸的"广度允许开新仓"
+// （原实现 `market_breadth_status` 低吸分支的 `breadth_entry_allowed`，:1754-1758）。
+//
+// ⚠ 原实现的 `entry_allowed = breadth_entry_allowed AND index_entry_allowed`，
+// 其中 `index_entry_allowed` 依赖 `low_buy_index_*` 列（创业板指 close>ma20 且 close>ma60）。
+// 本项目 `stock_strength` 表**没有这些列**，所以这里只实现广度那一支。
+// 指数那一支属于"做不到"的部分，**不伪造一个恒真的判定**。
+func LowBuyBreadthEntryAllowed(readyCount int, positionMode string) bool {
+	thresholds := lowBuyPositionThresholds(positionMode)
+	return readyCount >= thresholds[0][0]
 }

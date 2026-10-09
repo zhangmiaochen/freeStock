@@ -300,15 +300,44 @@ func TestNearTermRepairScore(t *testing.T) {
 		t.Errorf("深度回撤时修复分应为 0，实际 %v", got)
 	}
 	// 突破前高配合分：clip((close/prevHigh60 - 0.95)/0.08, 0, 1) * 1.5
-	// 要拿满 1.5 分需要 close >= prevHigh60 * 1.03
-	near := Indicators{Close: 103, ReboundFromLow60: 0, DrawdownFromHigh120: -40}
+	// 要拿满 1.5 分需要 close >= prevHigh60 * 1.03。
+	// 注意均线要给非零值，否则会叠上 "close > ma20/ma60" 的 2 + 1.5 分
+	near := Indicators{Close: 103, Ma20: 200, Ma60: 200, ReboundFromLow60: 0, DrawdownFromHigh120: -40}
 	if got := NearTermRepairScore(near, 100); got != 1.5 {
 		t.Errorf("站上前高 3%% 时配合分应满 1.5，实际 %v", got)
 	}
 	// 正好在前高处（1.0 倍）只得 0.625 * 1.5 = 0.9375
-	atHigh := Indicators{Close: 100, ReboundFromLow60: 0, DrawdownFromHigh120: -40}
-	if got := NearTermRepairScore(atHigh, 100); math.Abs(got-0.9375) > 0.001 {
-		t.Errorf("刚好在前高时应得 0.9375，实际 %v", got)
+	atHigh := Indicators{Close: 100, Ma20: 200, Ma60: 200, ReboundFromLow60: 0, DrawdownFromHigh120: -40}
+	if got := NearTermRepairScore(atHigh, 100); math.Abs(got-0.94) > 0.001 {
+		t.Errorf("刚好在前高时应得 0.94（分项按原实现 round(2)），实际 %v", got)
+	}
+}
+
+// 均线缺失（值为 0）时**不该**跳过加分 —— 原实现 fillna(0) 后直接比较，
+// `close > 0` 成立就加分。加了保护会让次新股总分低 10~20 分。
+func TestBaseScoresHandleZeroMovingAverages(t *testing.T) {
+	// 上市不久：只有 ma20，ma60/ma120/ma250 都还是 0
+	young := Indicators{Close: 12, Ma20: 11}
+
+	// close>ma20 (8) + ma20>ma60=0 (8) + ma20>lag5=0 (2) = 18
+	// （lag 项在 lag 传 0 时也成立 —— 这正是原实现 fillna(0) 后的行为）
+	if got := TrendBase(young, 0, 0); got != 18 {
+		t.Errorf("均线为 0 时应照常加分：trend = %v，期望 18", got)
+	}
+	// dd120=0 → 4；close>ma20 → 2；close>ma60=0 → 1.5 = 7.5
+	if got := NearTermRepairScore(young, 0); got != 7.5 {
+		t.Errorf("均线为 0 时应照常加分：near = %v，期望 7.5", got)
+	}
+	// 结构分：位置 fallback 1 + 均线量能块 4（close>=ma20 且 vr20<=1.15 且 dd120 在 -18..-3）
+	structure := StructureBase(Indicators{Close: 12, Ma20: 11, DrawdownFromHigh120: -8}, 0, 0)
+	if structure != 1+4 {
+		t.Errorf("均线为 0 时结构分应含量能块：%v，期望 5", structure)
+	}
+
+	// 对照：均线齐全且空头排列 → 只有 close>ma20 (8) + 两个 lag 项 (2+2) = 12
+	mature := Indicators{Close: 12, Ma20: 11, Ma60: 12, Ma120: 13, Ma250: 14}
+	if got := TrendBase(mature, 0, 0); got != 12 {
+		t.Errorf("空头排列时 trend 应为 8+2+2=12，实际 %v", got)
 	}
 }
 
@@ -607,10 +636,14 @@ func TestBuildStrategyConfigFallbacks(t *testing.T) {
 	if cfg.MarketState != StateRange {
 		t.Errorf("未知市场状态应回退震荡: %s", cfg.MarketState)
 	}
-	// 非法数值 → 默认
+	// 非法数值 → **1**（原实现是 `max(1, int(x or 1))`，不是回退到 5/10）
 	cfg = BuildStrategyConfig(StrategyTrendGrowth, StateRange, 0, 0, 0, "")
-	if cfg.TargetCount != 5 || cfg.TotalLayers != 10 || cfg.MaxLayersPerStock != 3 {
-		t.Errorf("非法数值应回退默认: %+v", cfg)
+	if cfg.TargetCount != 1 || cfg.TotalLayers != 1 || cfg.MaxLayersPerStock != 3 {
+		t.Errorf("非法数值应归到 1（单股层数除外）: %+v", cfg)
+	}
+	// 空 scope → "all"（原实现 `resolve_strategy_market_scope_key("")`）
+	if cfg.MarketScopeKey != "all" {
+		t.Errorf("空 scope 应为 all，实际 %s", cfg.MarketScopeKey)
 	}
 }
 

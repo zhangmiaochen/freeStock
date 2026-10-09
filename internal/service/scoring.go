@@ -94,6 +94,8 @@ type scoreInput struct {
 	market     string
 	indicators score.Indicators
 	repair     score.RepairFeatures
+	// nearRepair 是 near_term_repair_score（超跌/高手/低吸都会用到）
+	nearRepair float64
 	prevHigh60 float64
 	bars       int
 	// 横截面排序用（取自最后一根 K 线）
@@ -118,7 +120,10 @@ func NewScoringService(stock *StockService) *ScoringService {
 // 调用方（含测试）应当**总是**给出 limit 或显式列出 codes。
 //
 // tradeDate 为 0 时取最新交易日。
-func (s *ScoringService) ScoreStocks(codes []string, tradeDate int, limit int) (*ScoringResult, error) {
+//
+// strategyID 决定用哪套评分公式（四个策略完全不同，见 score.ComputeStrategyScores）。
+// 传空串按趋势成长算。
+func (s *ScoringService) ScoreStocks(codes []string, tradeDate int, limit int, strategyID string) (*ScoringResult, error) {
 	if s.stock == nil {
 		return nil, fmt.Errorf("评分服务缺少股票服务依赖")
 	}
@@ -223,10 +228,15 @@ func (s *ScoringService) ScoreStocks(codes []string, tradeDate int, limit int) (
 		amounts = append(amounts, quoteAmountOf(in))
 		turns = append(turns, quoteTurnoverOf(in))
 	}
-	// 行业强度分位：用行业的 20 日收益排名
-	industryValues := make([]float64, 0, len(industryReturns))
-	for _, value := range industryReturns {
-		industryValues = append(industryValues, value)
+	// 行业强度分位：原实现在**个股**上排名（portfolio_service.py:1867
+	// `groupby("trade_date")["industry_return_20d"].rank(pct=True)`）——
+	// 同行业的股票共享同一个值，所以**大行业会占更多名次**。
+	// 按行业去重排名会得到完全不同的分位（行业规模不均时可差 0.2+）。
+	stockIndustryReturns := make([]float64, 0, len(inputs))
+	for _, in := range inputs {
+		if industry := industryByCode[in.code]; industry != "" {
+			stockIndustryReturns = append(stockIndustryReturns, industryReturns[industry])
+		}
 	}
 
 	// 组装行
@@ -239,30 +249,34 @@ func (s *ScoringService) ScoreStocks(codes []string, tradeDate int, limit int) (
 		ind.AmountRankPct = score.RankPct(amounts, quoteAmountOf(in))
 		ind.TurnRankPct = score.RankPct(turns, quoteTurnoverOf(in))
 		ind.IndustryReturn20D = industryReturns[industry]
-		ind.IndustryStrengthPct = score.RankPct(industryValues, ind.IndustryReturn20D)
+		ind.IndustryStrengthPct = score.RankPct(stockIndustryReturns, ind.IndustryReturn20D)
 		ind.BenchmarkReturn20D = benchmarkReturn
 		ind.RelativeStrength20D = round4(ind.StockReturn20D - benchmarkReturn)
 
-		// 基础分
-		trend := score.TrendBase(ind, 0, 0)
-		structure := score.StructureBase(ind, in.prevHigh60, 0)
-		rs := score.RSBase(ind)
-		capital := score.CapitalBase(ind)
-		nearRepair := score.NearTermRepairScore(ind, in.prevHigh60)
-		// 趋势成长的第五项用**修复能力分**（其余策略才用近期修复分）
-		adjustment := trendGrowthAdjustment(ind, in.repair, nearRepair)
-		total := score.TotalScore(trend, structure, rs, capital, in.repair.AbilityScore, adjustment)
+		// 按策略算五项分（四个策略的公式完全不同，见 strategy_scores.go）
+		scores := score.ComputeStrategyScores(strategyID, score.StrategyScoreInput{
+			Indicators:  ind,
+			Repair:      in.repair,
+			NearRepair:  in.nearRepair,
+			MainlineRaw: 0, // 本项目没有板块研究分
+		})
+		trend, structure := scores.Trend, scores.Structure
+		rs, capital := scores.RS, scores.Capital
+		total := scores.Total
 
 		row := score.Row{
 			Code:       in.code,
 			Name:       nameByCode[in.code],
+			Market:     marketByCode[in.code],
 			TotalScore: total,
 			TrendScore: trend, StructureScore: structure, RSScore: rs,
 			CapitalScore: capital,
-			// 参考实现：趋势成长的 repair_score 列存的是修复能力分
-			RepairScore: in.repair.AbilityScore,
+			// repair_score 列的含义**随策略不同**：
+			//   趋势成长 = 修复能力分；其余三个 = 各自加权后的修复分。
+			// 参考实现的这一列也是这么混用的。
+			RepairScore: repairColumnValue(strategyID, scores, in),
 
-			Close: ind.Close, Open: ind.Open,
+			Close: ind.Close, High: ind.High, Low: ind.Low, Open: ind.Open,
 			Ma5: ind.Ma5, Ma20: ind.Ma20, Ma30: ind.Ma30,
 			Ma60: ind.Ma60, Ma120: ind.Ma120, Ma250: ind.Ma250,
 			PctChg: ind.PctChg,
@@ -271,9 +285,16 @@ func (s *ScoringService) ScoreStocks(codes []string, tradeDate int, limit int) (
 			DrawdownFromHigh120: ind.DrawdownFromHigh120,
 			DrawdownFromHigh20:  ind.DrawdownFromHigh20,
 			ReboundFromLow60:    ind.ReboundFromLow60,
+			StockReturn3D:       ind.StockReturn3D,
 			StockReturn5D:       ind.StockReturn5D,
 			StockReturn10D:      ind.StockReturn10D,
+			StockReturn20D:      ind.StockReturn20D,
 			VolumeRatio20:       ind.VolumeRatio20,
+			VolumeRatio520:      ind.VolumeRatio520,
+			Ma5Prev:             ind.Ma5Prev,
+			Ma250Prev:           ind.Ma250Prev,
+			IndustryReturn20D:   ind.IndustryReturn20D,
+			BenchmarkReturn20D:  ind.BenchmarkReturn20D,
 		}
 		rows = append(rows, row)
 	}
@@ -291,31 +312,57 @@ func (s *ScoringService) ScoreStocks(codes []string, tradeDate int, limit int) (
 	return result, nil
 }
 
-// trendGrowthAdjustment 是趋势成长的"主线修正"分。
+// repairColumnValue 返回 repair_score 列应该存哪个值。
 //
-// 参考实现：
-//
-//	adj = clip(max(mainline分, industry_strength*100)/100, 0, 1) * 6
-//	    + score_0_1(rs20, 5, 30) * 3
-//	    - 4 * (mainline_raw < 40 且 rs20 < 12)
-//	    - 5 * (dd120 > -2 且 rs20 > 30)
-//
-// mainline_raw = max(mainline_board_score, industry_board_score, board_research_score)。
-// 本项目没有板块研究分，mainline_raw 只能取行业强度近似 —— 这里**不使用**它，
-// 避免用一个语义不同的值冒充。见函数内注释。
-func trendGrowthAdjustment(ind score.Indicators, repair score.RepairFeatures, nearRepair float64) float64 {
-	// industry_strength_pct 是 0..1 横截面分位，乘 100 得到"分位分"
-	mainline := ind.IndustryStrengthPct * 100
-	adj := clampF(mainline/100, 0, 1)*6 + scoreWindow01(ind.RelativeStrength20D, 5, 30)*3
-	if mainline < 40 && ind.RelativeStrength20D < 12 {
-		adj -= 4
+// 参考实现这一列的含义**随策略不同**：趋势成长存的是 `repair_ability_score`，
+// 其余三个策略存的是各自加权后的 repair 分（比如超跌是 ability*0.9+near*0.35）。
+// 直接统一成一种会让其中一个策略的数字对不上。
+func repairColumnValue(strategyID string, scores score.BaseScores, in scoreInput) float64 {
+	if strategyID == score.StrategyTrendGrowth || strategyID == "" {
+		return in.repair.AbilityScore
 	}
-	if ind.DrawdownFromHigh120 > -2 && ind.RelativeStrength20D > 30 {
-		adj -= 5
-	}
-	return math.Round(adj*100) / 100
+	// 非趋势成长：用五项里的第五项（即该策略口径的 repair）
+	return repairComponentOf(strategyID, scores, in)
 }
 
+// repairComponentOf 取出该策略第五项的值。
+//
+// 五个策略函数的返回值里没有单独暴露"修复分"（只暴露了 ability/near），
+// 所以这里按同一套公式重算一次，保证列里存的就是当时参与总分的那一项。
+func repairComponentOf(strategyID string, scores score.BaseScores, in scoreInput) float64 {
+	ind := in.indicators
+	switch strategyID {
+	case score.StrategyOversold:
+		return clampF(round4Local(in.repair.AbilityScore*0.9+in.nearRepair*0.35), 0, 15)
+	case score.StrategyExpert:
+		trendRepairWindow := ind.DrawdownFromHigh20 >= -14 && ind.DrawdownFromHigh20 <= -1.5 &&
+			ind.StockReturn5D <= 10 && ind.StockReturn10D <= 20
+		return clampF(round4Local(
+			in.repair.AbilityScore*0.45+in.nearRepair*0.55+2*boolFloat(trendRepairWindow)), 0, 15)
+	case score.StrategyTrendLowBuy:
+		value := 5*boolFloat(ind.DrawdownFromHigh20 >= -15 && ind.DrawdownFromHigh20 <= -2.5) +
+			5*boolFloat(ind.Ma30 > 0 && ind.Close >= ind.Ma30*0.985) +
+			clampF(in.repair.AbilityScore/15, 0, 1)*5
+		return clampF(round4Local(value), 0, 15)
+	}
+	return in.repair.AbilityScore
+}
+
+func boolFloat(condition bool) float64 {
+	if condition {
+		return 1
+	}
+	return 0
+}
+
+func round4Local(value float64) float64 { return math.Round(value*10000) / 10000 }
+
+// trendGrowthAdjustment 是趋势成长的"主线修正"分（保留给测试直接调用）。
+func trendGrowthAdjustment(ind score.Indicators, repair score.RepairFeatures, nearRepair float64) float64 {
+	return score.TrendGrowthAdjustment(ind)
+}
+
+// scoreWindow01 保留给测试。
 func scoreWindow01(value, low, high float64) float64 {
 	if high <= low {
 		return 0
@@ -381,11 +428,13 @@ func (s *ScoringService) loadScoreInputs(provider Provider, codes []string, star
 				if !ok {
 					continue
 				}
+				prevHigh := score.PrevHigh60(bars)
 				in := scoreInput{
 					code:       item.code,
 					indicators: ind,
 					repair:     score.BuildRepairFeatures(bars),
-					prevHigh60: score.PrevHigh60(bars),
+					nearRepair: score.NearTermRepairScore(ind, prevHigh),
+					prevHigh60: prevHigh,
 					bars:       len(bars),
 				}
 				// 成交额与换手取最后一根
@@ -543,11 +592,14 @@ func (s *ScoringService) marketState(provider Provider, date int) score.MarketSt
 			continue
 		}
 		days = append(days, score.MarketDay{
-			Date:        d,
-			AvgPct:      item.pctSum / float64(item.total),
-			UpRatio:     float64(item.up) / float64(item.total),
-			DownRatio:   float64(item.down) / float64(item.total),
-			TotalAmount: item.amountSum,
+			Date:      d,
+			AvgPct:    item.pctSum / float64(item.total),
+			UpRatio:   float64(item.up) / float64(item.total),
+			DownRatio: float64(item.down) / float64(item.total),
+			// **均值**不是求和 —— 原实现每日成交额用 ("amount","mean")
+			// （volume_price_market_state.py:111）。用求和的话，样本里
+			// 停牌股票多的日子会额外压低增速。
+			TotalAmount: item.amountSum / float64(item.total),
 		})
 	}
 	return score.BuildMarketState(days)

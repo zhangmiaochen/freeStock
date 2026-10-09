@@ -33,7 +33,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	_ "modernc.org/sqlite" // 纯 Go 驱动，不需要 CGO
@@ -144,6 +146,7 @@ type Portfolio struct {
 
 	BenchmarkCode string `json:"benchmarkCode"`
 	Status        string `json:"status"` // active / paused / archived
+	StatusLabel   string `json:"statusLabel"`
 
 	TargetPositionCount int `json:"targetPositionCount"`
 	MaxStockCount       int `json:"maxStockCount"`
@@ -251,6 +254,25 @@ type Summary struct {
 // 归一化（严格对齐原项目的 _normalize_* 规则）
 // ---------------------------------------------------------------------------
 
+// StatusLabels 是组合状态的中文标签。
+//
+// 原实现 portfolio_service.py:241-247 **只定义了 `active = "启用中"`**，
+// `paused` / `archived` 没有中文标签。这里补上是为了界面完整，
+// 属有意补充（不参与任何判定逻辑）。
+var StatusLabels = map[string]string{
+	StatusActive:   "启用中",
+	StatusPaused:   "已暂停",
+	StatusArchived: "已归档",
+}
+
+// StatusLabelOf 返回状态的中文标签。
+func StatusLabelOf(status string) string {
+	if label, ok := StatusLabels[status]; ok {
+		return label
+	}
+	return status
+}
+
 // NormalizeType 归一化组合类型。无法识别 → manual。
 func NormalizeType(value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
@@ -264,17 +286,56 @@ func NormalizeType(value string) string {
 	return TypeManual
 }
 
+// strategyAliases 是策略 ID 的别名表。
+//
+// 1:1 对照 portfolio_strategy.py:48-76 的 `_STRATEGY_ALIASES`。
+// 原实现是 `key = str(value or "").strip().lower()` 后 `_STRATEGY_ALIASES.get(key, TREND_GROWTH)`。
+//
+// 少这张表的话，传 `low_buy` / `超跌反弹` / `mainline` 都会被静默当成趋势成长 ——
+// 候选池、ready_score、低吸专属逻辑全变，而且**没有任何提示**。
+var strategyAliases = map[string]string{
+	"":             StrategyTrendGrowth,
+	"manual":       StrategyTrendGrowth,
+	"semi_auto":    StrategyTrendGrowth,
+	"auto":         StrategyTrendGrowth,
+	"trend":        StrategyTrendGrowth,
+	"trend_growth": StrategyTrendGrowth,
+	"growth":       StrategyTrendGrowth,
+	"趋势成长":         StrategyTrendGrowth,
+	"趋势强势":         StrategyTrendGrowth,
+
+	"trend_pullback_low_buy": StrategyTrendLowBuy,
+	"trend_low_buy":          StrategyTrendLowBuy,
+	"pullback_low_buy":       StrategyTrendLowBuy,
+	"low_buy":                StrategyTrendLowBuy,
+	"趋势低吸":                   StrategyTrendLowBuy,
+	"低吸趋势":                   StrategyTrendLowBuy,
+	"去rs低吸":                  StrategyTrendLowBuy,
+	"去 rs 低吸":                StrategyTrendLowBuy,
+
+	"oversold":         StrategyOversold,
+	"rebound":          StrategyOversold,
+	"oversold_rebound": StrategyOversold,
+	"超跌反弹":             StrategyOversold,
+	"超跌反抽":             StrategyOversold,
+
+	"expert":            StrategyExpert,
+	"expert_simulation": StrategyExpert,
+	"mainline":          StrategyExpert,
+	"高手模拟":              StrategyExpert,
+	"主线强度":              StrategyExpert,
+}
+
 // NormalizeStrategy 归一化策略 ID。
-// 缺省时回退到组合类型，再回退到 trend_growth（与原项目一致）。
+//
+// 走别名表（含中文与常见简写）；**未知值一律回退 trend_growth**
+// —— 原实现是 `.get(key, STRATEGY_TREND_GROWTH)`，并不看组合类型。
+// 第二个参数保留是为了兼容既有调用点。
 func NormalizeStrategy(strategyID, portfolioType string) string {
-	value := strings.ToLower(strings.TrimSpace(strategyID))
-	if _, ok := strategyLabels[value]; ok {
-		return value
-	}
-	// 原项目用 portfolio_type 兜底
-	switch NormalizeType(portfolioType) {
-	case TypeAuto:
-		return StrategyTrendGrowth
+	_ = portfolioType
+	key := strings.ToLower(strings.TrimSpace(strategyID))
+	if mapped, ok := strategyAliases[key]; ok {
+		return mapped
 	}
 	return StrategyTrendGrowth
 }
@@ -312,6 +373,10 @@ func NormalizeScopeType(value string) string {
 }
 
 // NormalizeScopeValue 把范围内容归一化成 JSON。
+//
+// 与原实现对齐的两点（portfolio_service.py:3667/3679/3684-3686）：
+//  1. 三个列表都**排序**后落库（原实现是 `sorted({...})`）
+//  2. **三个市场全选时也照写**，不丢弃 —— 此前我会把它当成"全部市场"抹掉
 func NormalizeScopeValue(scopeType string, value ScopeValue) string {
 	out := ScopeValue{}
 	switch scopeType {
@@ -321,10 +386,9 @@ func NormalizeScopeValue(scopeType string, value ScopeValue) string {
 		out.Items = cleanStrings(value.Items)
 	}
 	out.Markets = normalizeMarkets(value.Markets)
-	// 全选或为空 → 视为"全部市场"，不写 markets
-	if len(out.Markets) >= 3 {
-		out.Markets = nil
-	}
+	// sorted()：代码/名称按字典序，市场按 main/gem/star 的固定序（normalizeMarkets 已保证）
+	sort.Strings(out.Codes)
+	sort.Strings(out.Items)
 	raw, err := json.Marshal(out)
 	if err != nil {
 		return "{}"
@@ -547,17 +611,24 @@ func (s *Store) migrate() error {
 // nowText 返回当前时间戳文本（原项目用 TIMESTAMP，这里用 RFC3339）。
 func nowText() string { return time.Now().Format(time.RFC3339) }
 
-// newPortfolioID 生成组合 ID，格式与原项目一致：
-// pf_{YYYYMMDDHHMMSSffffff}_{random8}
-func newPortfolioID() string {
+// idSeq 保证同一纳秒内生成的 ID 也不重复。
+//
+// Windows 的时钟粒度较粗，紧凑循环里连续两次 time.Now() 可能返回**完全相同**
+// 的纳秒值 —— 只用时间戳做 ID 会撞主键（批量应用调仓时就会撞上）。
+var idSeq atomic.Uint64
+
+// newID 生成 `{prefix}_{时间戳}_{序号}` 形式的唯一 ID。
+func newID(prefix string) string {
 	now := time.Now()
-	suffix := fmt.Sprintf("%08x", now.UnixNano()&0xFFFFFFFF)
-	return fmt.Sprintf("pf_%s_%s", now.Format("20060102150405.000000"), suffix[:8])
+	return fmt.Sprintf("%s_%d_%04x", prefix, now.UnixNano(), idSeq.Add(1)&0xFFFF)
+}
+
+// newPortfolioID 生成组合 ID（格式与原项目一致：pf_{时间戳}_{后缀}）。
+func newPortfolioID() string {
+	return newID("pf")
 }
 
 // newTxnID 生成流水 ID。
 func newTxnID() string {
-	now := time.Now()
-	suffix := fmt.Sprintf("%08x", now.UnixNano()&0xFFFFFFFF)
-	return fmt.Sprintf("txn_%d_%s", now.UnixNano(), suffix[:8])
+	return newID("txn")
 }

@@ -14,6 +14,10 @@ const mocks = vi.hoisted(() => ({
   overview: vi.fn(),
   addPosition: vi.fn(),
   removePosition: vi.fn(),
+  refreshStrength: vi.fn(),
+  getStrengthSummary: vi.fn(),
+  buildPlan: vi.fn(),
+  applyRotation: vi.fn(),
 }));
 
 vi.mock("@/lib/backend", () => ({
@@ -193,6 +197,39 @@ beforeEach(() => {
   mocks.remove.mockResolvedValue(undefined);
   mocks.addPosition.mockResolvedValue({});
   mocks.removePosition.mockResolvedValue(undefined);
+  mocks.getStrengthSummary.mockResolvedValue({
+    strategyId: "trend_growth", latestDate: 20261008, count: 302, dates: [20261008],
+  });
+  mocks.refreshStrength.mockResolvedValue({
+    tradeDate: 20261008, saved: 302, skipped: 0, limit: 800,
+    marketState: { marketState: "bear", marketStateLabel: "熊市/风险释放", bullScore: 45, bearScore: 92, proxyRet20: -3.49, days: 80 },
+    unavailable: [], elapsed: "10s",
+  });
+  mocks.buildPlan.mockResolvedValue({
+    portfolioId: "pf_1", portfolioName: "我的组合",
+    strategyId: "trend_growth", strategyLabel: "趋势成长",
+    config: { strategyId: "trend_growth", marketState: "bear", totalLayers: 10, targetPositionCount: 5, readyScore: 68, candidateScoreFloor: 60, maxLayersPerStock: 3, allowNewAdds: true, requireCandidateSignal: false, replaceScoreGap: 20, warningScore: 60, reduceScore: 45, clearScore: 35, maxReplaceCount: 2 },
+    marketState: { marketState: "bear", marketStateLabel: "熊市/风险释放", bullScore: 45, bearScore: 92, proxyRet20: -3.49, days: 80 },
+    strengthDate: 20261008,
+    plan: {
+      rows: [{
+        tsCode: "600519", name: "贵州茅台", action: "clear", actionLabel: "清仓",
+        score: 26.42, scoreGap: 0, rankNo: 0, candidateTsCode: "", candidateName: "",
+        candidateScore: 0, expectedImprovement: 0, reason: "结构破坏且不可修复，清仓",
+        sourceType: "holding", currentLayers: 1, targetLayers: 0, layersDelta: -1,
+        decisionState: "trend_break_exit", isExecutable: true, requiresConfirmation: true,
+        executionMode: "confirm_required", executionModeLabel: "人工确认后执行", actionPrefix: "待确认",
+      }],
+      compare: [], candidates: [], marketState: "bear", strategyId: "trend_growth",
+      entryAllowed: true, notes: [],
+    },
+    holdings: [], candidates: [], notes: [],
+  });
+  mocks.applyRotation.mockResolvedValue({
+    portfolioId: "pf_1", portfolioName: "我的组合", tradeDate: 20261008,
+    applied: { positionCount: 0, added: 0, reduced: 0, cleared: 1, unchanged: 0, skipped: [] },
+    changed: [],
+  });
 });
 
 describe("组合管理页面", () => {
@@ -417,5 +454,102 @@ describe("组合管理页面", () => {
     await row.findAll("button")[0].trigger("click");
     await vi.waitFor(() => expect(router.currentRoute.value.path).toBe("/kline"));
     expect(router.currentRoute.value.query.code).toBe("600519");
+  });
+
+  // ---- 阶段二：评分与调仓建议 ----
+
+  it("加载组合时读取评分状态", async () => {
+    const { wrapper } = await mountPage();
+    await vi.waitFor(() => expect(mocks.getStrengthSummary).toHaveBeenCalledWith("trend_growth"));
+    expect(wrapper.text()).toContain("评分日 20261008");
+    expect(wrapper.text()).toContain("302 只");
+  });
+
+  it("没有评分时提示先刷新，并说明代价", async () => {
+    mocks.getStrengthSummary.mockResolvedValue({
+      strategyId: "trend_growth", latestDate: 0, count: 0, dates: [],
+    });
+    const { wrapper } = await mountPage();
+
+    expect(wrapper.text()).toContain("尚未评分");
+    expect(wrapper.text()).toContain("刷新评分");
+    expect(wrapper.text()).toContain("日线");
+  });
+
+  it("刷新评分把当前策略和只数传给后端", async () => {
+    const { wrapper } = await mountPage();
+    await button(wrapper, "刷新评分")!.trigger("click");
+    await vi.waitFor(() => expect(mocks.refreshStrength).toHaveBeenCalled());
+
+    const [strategyId, limit] = mocks.refreshStrength.mock.calls[0];
+    expect(strategyId).toBe("trend_growth");
+    expect(limit).toBe(800); // 默认档
+    // 结果提示
+    await vi.waitFor(() => expect(wrapper.text()).toContain("物化 302 只"));
+  });
+
+  it("生成建议后渲染面板", async () => {
+    const { wrapper } = await mountPage();
+    await button(wrapper, "生成建议")!.trigger("click");
+    await vi.waitFor(() => expect(mocks.buildPlan).toHaveBeenCalledWith("pf_1"));
+
+    await vi.waitFor(() => expect(wrapper.text()).toContain("调仓建议"));
+    expect(wrapper.text()).toContain("清仓");
+    expect(wrapper.text()).toContain("熊市/风险释放");
+  });
+
+  it("生成建议失败时显示原因（例如还没评分）", async () => {
+    mocks.buildPlan.mockRejectedValue(new Error("「我的组合」还没有评分数据。请先刷新评分"));
+    const { wrapper } = await mountPage();
+    await button(wrapper, "生成建议")!.trigger("click");
+    await vi.waitFor(() => expect(wrapper.text()).toContain("请先刷新评分"));
+  });
+
+  it("一键应用建议要先确认，取消则不发请求", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const { wrapper } = await mountPage();
+    await button(wrapper, "生成建议")!.trigger("click");
+    await vi.waitFor(() => expect(wrapper.text()).toContain("调仓建议"));
+
+    await button(wrapper, "一键应用建议")!.trigger("click");
+    await nextTick();
+    expect(mocks.applyRotation).not.toHaveBeenCalled();
+    confirmSpy.mockRestore();
+  });
+
+  it("确认后应用建议并显示结果", async () => {
+    // 默认 fixture 是手动组合（allowApplyRotation=false），一键应用会被禁用。
+    // 这里换成允许应用的半自动组合，才能验证应用流程本身。
+    mocks.list.mockResolvedValue([
+      portfolio({ type: "semi_auto", allowApplyRotation: true, requireManualConfirmation: true }),
+    ]);
+    mocks.detail.mockResolvedValue(detail({
+      portfolio: portfolio({ type: "semi_auto", allowApplyRotation: true, requireManualConfirmation: true }),
+    }));
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const { wrapper } = await mountPage();
+    await button(wrapper, "生成建议")!.trigger("click");
+    await vi.waitFor(() => expect(wrapper.text()).toContain("调仓建议"));
+
+    const applyButton = button(wrapper, "一键应用建议")!;
+    expect(applyButton.attributes("disabled")).toBeUndefined();
+    await applyButton.trigger("click");
+    await vi.waitFor(() => expect(mocks.applyRotation).toHaveBeenCalledWith("pf_1"));
+    await vi.waitFor(() => expect(wrapper.text()).toContain("已应用"));
+    expect(wrapper.text()).toContain("清仓 1");
+    confirmSpy.mockRestore();
+  });
+
+  it("手动组合的一键应用按钮被禁用并说明原因", async () => {
+    mocks.list.mockResolvedValue([portfolio({ type: "manual", allowApplyRotation: false })]);
+    mocks.detail.mockResolvedValue(detail({
+      portfolio: portfolio({ type: "manual", allowApplyRotation: false }),
+    }));
+    const { wrapper } = await mountPage();
+
+    const applyButton = button(wrapper, "一键应用建议");
+    expect(applyButton).toBeTruthy();
+    expect(applyButton!.attributes("disabled")).toBeDefined();
+    expect(applyButton!.attributes("title")).toContain("不支持一键应用");
   });
 });

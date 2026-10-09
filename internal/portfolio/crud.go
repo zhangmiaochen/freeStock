@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"freestock/internal/market"
 )
 
 // PricePoint 是某只股票的最新收盘价。
@@ -19,12 +21,16 @@ type PricePoint struct {
 // PriceSource 提供持仓现价。
 //
 // 定义成接口是为了让 portfolio 包**不反过来依赖 service 包**（会成环）。
-// 原项目是从"最新评分日"的 stock_strength_history.close_price 取现价；
-// 本项目阶段一没有评分表，改为取最新交易日的日 K 收盘价 ——
-// 语义一致（都是"最近一个有数据的交易日的收盘价"），
-// 且原实现里"取不到就记 0"的行为也照搬。
+//
+// ⚠ **现价必须来自"最新评分日"**（原实现 portfolio_service.py:3199
+// `merged["current_price"] = close_price`，取自 stock_strength_history）。
+// 取"最新交易日收盘价"会导致同一程序内**两个页面打架**：
+// 评分没刷到最新时，详情页显示今日浮盈、而建议页与清仓判定用评分日旧价 ——
+// 用户看到 +8%，系统按 +3% 判定。原实现两处同源，永远自洽。
 type PriceSource interface {
-	LatestClose(codes []string) (map[string]PricePoint, error)
+	// LatestClose 返回这些股票在**该策略最新评分日**的收盘价。
+	// 评分表里没有的股票不返回（调用方按 0 处理）。
+	LatestClose(codes []string, strategyID string) (map[string]PricePoint, error)
 }
 
 // PortfolioInput 是创建/更新组合的入参（对应原项目的 payload）。
@@ -46,50 +52,139 @@ type PortfolioInput struct {
 }
 
 // PositionInput 是新增持仓的入参。
+//
+// Layers / Weight 用指针是为了区分"**未提供**"与"**显式传 0**" ——
+// 原实现（portfolio_service.py:534-535）这两者的语义不同：
+//
+//	position_layers: min(2, max(1, _safe_int(payload.get("position_layers"), default_layers)))
+//	  → 未提供 = default_layers；显式 0 → clamp 到 1
+//	position_weight: max(0.0, _safe_float(payload.get("position_weight"), _weight_from_layers(...)))
+//	  → 未提供 = 按层数换算；显式 0 → 存 0
 type PositionInput struct {
-	Code        string  `json:"code"`
-	Name        string  `json:"name"`
-	EntryPrice  float64 `json:"entryPrice"`
-	EntryDate   string  `json:"entryDate"`
-	Layers      int     `json:"layers"`
-	Weight      float64 `json:"weight"` // 百分数；0 表示由层数换算
-	HoldingType string  `json:"holdingType"`
-	StrategyTag string  `json:"strategyTag"`
+	Code        string   `json:"code"`
+	Name        string   `json:"name"`
+	EntryPrice  float64  `json:"entryPrice"`
+	EntryDate   string   `json:"entryDate"`
+	Layers      *int     `json:"layers"`
+	Weight      *float64 `json:"weight"`
+	HoldingType string   `json:"holdingType"`
+	StrategyTag string   `json:"strategyTag"`
+	// SourceType / LastAction 可入参指定（原实现支持覆盖），
+	// 留空时分别是 manual / manual_add
+	SourceType string `json:"sourceType"`
+	LastAction string `json:"lastAction"`
 }
 
 // ---------------------------------------------------------------------------
 // 组合 CRUD
 // ---------------------------------------------------------------------------
 
+// IsSupportedAShareCode 校验是否是受支持的 A 股代码。
+//
+// 对应 Python 的 `is_supported_a_share_ts_code`（market_data.py:182-191）：
+// 6 位数字 + 前缀白名单。这里复用 market.KeyOf 的前缀表，但**排除基金**
+// （159/5xx 等虽然 market.KeyOf 认得，但不是 A 股）。
+//
+// 放宽会导致写入 AAPL / 1234 / 000001SH 这类脏代码，之后所有行情查询都静默失败。
+func IsSupportedAShareCode(code string) bool {
+	bare := BareCode(code)
+	if len(bare) != 6 {
+		return false
+	}
+	for _, ch := range bare {
+		if ch < '0' || ch > '9' {
+			return false
+		}
+	}
+	switch market.KeyOf(bare) {
+	case market.KeySHMain, market.KeySZMain, market.KeyChiNext, market.KeySTAR, market.KeyBSE:
+		return true
+	}
+	return false
+}
+
 // normalizeInput 把入参归一化成可落库的组合。
-func normalizeInput(in PortfolioInput) (Portfolio, error) {
-	name := strings.TrimSpace(in.Name)
+//
+// existing 非 nil 时按 Python 的 `payload.get(x) or base.get(x) or 默认` 语义
+// **逐字段回落** —— 省略某个字段（传零值）会保留原值，而不是被打回默认。
+//
+// ⚠ 注意 Python 的 `or` 语义：
+//   - 传 0 / 空串 → falsy → 回落到旧值 → 再回落到默认
+//   - 传**负数** → truthy → 不回落 → 由 `max(1, ...)` 兜到 1
+//
+// 少了这个回落，只改个名字就会把 strategy_id 打回趋势成长、scope 清空。
+func normalizeInput(in PortfolioInput, existing *Portfolio) (Portfolio, error) {
+	// 按字段取"入参非零值 → 旧值 → 默认"
+	pick := func(value, old string) string {
+		if value != "" {
+			return value
+		}
+		return old
+	}
+
+	var old Portfolio
+	if existing != nil {
+		old = *existing
+	}
+
+	name := strings.TrimSpace(pick(in.Name, old.Name))
 	if name == "" {
 		return Portfolio{}, errors.New("组合名称不能为空")
 	}
 
-	portfolioType := NormalizeType(in.Type)
-	strategyID := NormalizeStrategy(in.StrategyID, portfolioType)
+	portfolioType := NormalizeType(pick(in.Type, old.Type))
+	strategyID := NormalizeStrategy(pick(in.StrategyID, old.StrategyID), portfolioType)
 
-	benchmark := strings.TrimSpace(in.BenchmarkCode)
+	benchmark := strings.TrimSpace(pick(in.BenchmarkCode, old.BenchmarkCode))
 	if benchmark == "" {
 		benchmark = defaultBenchmark
 	}
 
+	// 整数：0 视为"未提供"，回落到旧值；负数视为显式传入，由 max(1, ..) 兜底
 	target := in.TargetPositionCount
-	if target < 1 {
+	if target == 0 {
+		target = old.TargetPositionCount
+	}
+	if target == 0 {
 		target = 5
 	}
+	if target < 1 {
+		target = 1
+	}
+
 	maxCount := in.MaxStockCount
+	if maxCount == 0 {
+		maxCount = old.MaxStockCount
+	}
 	if maxCount < target {
 		maxCount = target
 	}
+
 	layers := in.TotalLayers
-	if layers < 1 {
+	if layers == 0 {
+		layers = old.TotalLayers
+	}
+	if layers == 0 {
 		layers = DefaultTotalLayers
 	}
+	if layers < 1 {
+		layers = 1
+	}
 
-	scopeType := NormalizeScopeType(in.ScopeType)
+	scopeType := NormalizeScopeType(pick(in.ScopeType, old.ScopeType))
+
+	// 范围内容：入参为空（两个数组都空且 scopeType 没变）时沿用旧 JSON
+	scopeJSON := NormalizeScopeValue(scopeType, in.ScopeValue)
+	if existing != nil && isEmptyScopeValue(in.ScopeValue) && scopeType == NormalizeScopeType(old.ScopeType) {
+		scopeJSON = old.ScopeValueJSON
+	}
+
+	status := NormalizeStatus(pick(in.Status, old.Status))
+
+	notes := strings.TrimSpace(in.Notes)
+	if notes == "" {
+		notes = old.Notes
+	}
 
 	mode := executionModes[portfolioType]
 	return Portfolio{
@@ -99,14 +194,14 @@ func normalizeInput(in PortfolioInput) (Portfolio, error) {
 		StrategyID:                strategyID,
 		StrategyLabel:             StrategyLabel(strategyID),
 		BenchmarkCode:             benchmark,
-		Status:                    NormalizeStatus(in.Status),
+		Status:                    status,
 		TargetPositionCount:       target,
 		MaxStockCount:             maxCount,
 		TotalLayers:               layers,
 		RebalanceFrequency:        RotationMode, // 恒为 signal（原项目的死字段）
 		ScopeType:                 scopeType,
-		ScopeValueJSON:            NormalizeScopeValue(scopeType, in.ScopeValue),
-		Notes:                     strings.TrimSpace(in.Notes),
+		ScopeValueJSON:            scopeJSON,
+		Notes:                     notes,
 		ExecutionMode:             mode.Mode,
 		ExecutionModeLabel:        mode.ModeLabel,
 		AllowApplyRotation:        mode.AllowApplyRotation,
@@ -114,9 +209,14 @@ func normalizeInput(in PortfolioInput) (Portfolio, error) {
 	}, nil
 }
 
+// isEmptyScopeValue 判断范围内容是否为空（用于"省略即保留原值"）。
+func isEmptyScopeValue(value ScopeValue) bool {
+	return len(value.Codes) == 0 && len(value.Items) == 0 && len(value.Markets) == 0
+}
+
 // Create 新建组合。
 func (s *Store) Create(in PortfolioInput) (Portfolio, error) {
-	item, err := normalizeInput(in)
+	item, err := normalizeInput(in, nil)
 	if err != nil {
 		return Portfolio{}, err
 	}
@@ -147,7 +247,7 @@ func (s *Store) Update(id string, in PortfolioInput) (Portfolio, error) {
 	if err != nil {
 		return Portfolio{}, err
 	}
-	item, err := normalizeInput(in)
+	item, err := normalizeInput(in, &existing)
 	if err != nil {
 		return Portfolio{}, err
 	}
@@ -199,9 +299,15 @@ func (s *Store) Get(id string) (Portfolio, error) {
 	return item, nil
 }
 
-// List 列出全部组合，按创建时间倒序（新的在前）。
+// List 列出全部组合。
+//
+// 排序（原实现 portfolio_service.py:3029-3040）：
+// **未归档优先** → updated_at 降序 → portfolio_id 升序。
+// 此前只按 created_at 降序 —— 归档组合会混在活跃组合中间。
 func (s *Store) List() ([]Portfolio, error) {
-	rows, err := s.db.Query(portfolioSelect + ` ORDER BY p.created_at DESC`)
+	rows, err := s.db.Query(portfolioSelect + `
+		ORDER BY CASE WHEN p.status = 'archived' THEN 1 ELSE 0 END ASC,
+		         p.updated_at DESC, p.portfolio_id ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("读取组合列表失败：%w", err)
 	}
@@ -267,6 +373,7 @@ func applyDerived(item *Portfolio) {
 	if item.TotalLayers < 1 {
 		item.TotalLayers = DefaultTotalLayers
 	}
+	item.StatusLabel = StatusLabelOf(item.Status)
 	item.ScopeLabel = scopeLabel(item.ScopeType, ParseScopeValue(item.ScopeValueJSON))
 	item.AvailableLayers = item.TotalLayers - item.UsedLayers
 	item.PositionRatio = round(weightFromLayers(item.UsedLayers, item.TotalLayers), 4)
@@ -330,8 +437,19 @@ func (s *Store) AddPosition(portfolioID string, in PositionInput) (Position, err
 	if code == "" {
 		return Position{}, errors.New("股票代码不能为空")
 	}
+	// 代码合法性（Python 是 is_supported_a_share_ts_code，不合法直接报错）
+	if !IsSupportedAShareCode(code) {
+		return Position{}, fmt.Errorf(
+			"股票代码格式错误，应为 6 位 A 股代码（如 600519 / 000001）：%s", in.Code)
+	}
 	if in.EntryPrice < 0 {
 		return Position{}, errors.New("建仓价格不能为负")
+	}
+	// 建仓价为 0 时应当由调用方用当日收盘价补齐（service 层负责）。
+	// 这里兜住：0 成本会让 profit_loss_pct 恒为 0、浮盈保护永不触发，
+	// 用户却以为建仓成功了 —— 必须报错而不是静默写入。
+	if in.EntryPrice == 0 {
+		return Position{}, errors.New("缺少有效的建仓价格（传 0 且未取到收盘价）")
 	}
 
 	var exists int
@@ -345,47 +463,66 @@ func (s *Store) AddPosition(portfolioID string, in PositionInput) (Position, err
 		return Position{}, fmt.Errorf("%s 已在该组合中，不能重复添加", code)
 	}
 
-	// 层数 clamp：原项目 add_position 是 min(2, max(1, ...))
-	layers := in.Layers
-	if layers < 1 {
-		// 未指定时按"总层数 / 目标持仓数"取整，再 clamp
-		layers = int(math.Round(float64(item.TotalLayers) / float64(item.TargetPositionCount)))
+	// 层数：未提供 → default_layers（总层数/目标持仓数，再 clamp）；
+	// **显式传 0 → clamp 到 1**（原实现 :534）
+	defaultLayers := int(math.Round(float64(item.TotalLayers) / float64(item.TargetPositionCount)))
+	defaultLayers = clamp(defaultLayers, 1, maxManualLayers)
+	layers := defaultLayers
+	if in.Layers != nil {
+		layers = clamp(*in.Layers, 1, maxManualLayers)
 	}
-	layers = clamp(layers, 1, maxManualLayers)
 
-	// 权重：界面没填就按层数换算
-	weight := in.Weight
-	if weight <= 0 {
-		weight = weightFromLayers(layers, item.TotalLayers)
+	// 权重：未提供 → 按层数换算；**显式传 0 → 存 0**（原实现 :535 的 max(0.0, ...)）
+	weight := weightFromLayers(layers, item.TotalLayers)
+	if in.Weight != nil {
+		weight = math.Max(0, *in.Weight)
 	}
 
 	name := strings.TrimSpace(in.Name)
 	if name == "" {
 		name = code
 	}
+	// holding_type **不设白名单**（原实现 :537 是 `_safe_str(...)` 原样存）
 	holdingType := strings.TrimSpace(in.HoldingType)
-	if holdingType != HoldingSwing && holdingType != HoldingBase {
-		holdingType = ""
+	sourceType := strings.TrimSpace(in.SourceType)
+	if sourceType == "" {
+		sourceType = SourceManual
+	}
+	lastAction := strings.TrimSpace(in.LastAction)
+	if lastAction == "" {
+		lastAction = "manual_add"
 	}
 
 	now := nowText()
 	entryDate := NormalizeDate(in.EntryDate)
 	if entryDate == "" {
-		entryDate = time.Now().Format("20060102")
+		// 缺省用**最新评分日**，不是"今天"（原实现 :513/524
+		// `latest_trade_date = self._get_latest_strength_trade_date() or ... or
+		//  pro.get_latest_daily_trade_date()`，再 `entry_date = ... or latest_trade_date`）。
+		//
+		// 用今天的话，周末/节假日/盘前建仓会得一个非交易日 ——
+		// 持有交易日数与最高价窗口的起点都会偏。
+		if date, err := s.LatestStrengthDate(item.StrategyID); err == nil && date > 0 {
+			entryDate = fmt.Sprintf("%d", date)
+		} else {
+			// 该策略还没评分过：退到"今天"是最后的兜底
+			//（调用方 service 层会用股票列表的交易日覆盖，正常路径走不到这里）
+			entryDate = time.Now().Format("20060102")
+		}
 	}
 
 	position := Position{
 		PortfolioID:    portfolioID,
 		Code:           code,
 		Name:           name,
-		EntryPrice:     round(in.EntryPrice, 4),
+		EntryPrice:     in.EntryPrice, // 不 round（原实现原样落库）
 		EntryDate:      entryDate,
 		PositionLayers: layers,
 		PositionWeight: round(weight, 4),
-		SourceType:     SourceManual,
+		SourceType:     sourceType,
 		HoldingType:    holdingType,
 		StrategyTag:    strings.TrimSpace(in.StrategyTag),
-		LastAction:     "manual_add",
+		LastAction:     lastAction,
 		CreatedAt:      now,
 		UpdatedAt:      now,
 	}
@@ -464,10 +601,15 @@ func (s *Store) getPosition(portfolioID, code string) (Position, error) {
 	return item, nil
 }
 
-// ListPositions 列出组合的持仓，按权重从大到小。
+// ListPositions 列出组合的持仓。
+//
+// 排序（原实现 portfolio_service.py:3051）：
+// **权重降序 → 建仓日升序 → 代码升序**。
+// 只按权重+代码排的话，同权重持仓的顺序与原实现不同。
 func (s *Store) ListPositions(portfolioID string) ([]Position, error) {
 	rows, err := s.db.Query(
-		positionSelect+` WHERE portfolio_id=? ORDER BY position_weight DESC, ts_code`,
+		positionSelect+` WHERE portfolio_id=?
+		ORDER BY position_weight DESC, entry_date ASC, ts_code ASC`,
 		portfolioID,
 	)
 	if err != nil {
@@ -601,7 +743,7 @@ func Summarize(item Portfolio, positions []Position, prices PriceSource, fill *[
 		for _, position := range positions {
 			codes = append(codes, position.Code)
 		}
-		if loaded, err := prices.LatestClose(codes); err == nil {
+		if loaded, err := prices.LatestClose(codes, item.StrategyID); err == nil {
 			priceMap = loaded
 		}
 	}

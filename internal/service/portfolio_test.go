@@ -26,7 +26,7 @@ func TestPortfolioServiceCreateAndDetail(t *testing.T) {
 
 	created, err := svc.CreatePortfolio(portfolio.PortfolioInput{
 		Name: "测试组合", Type: "semi_auto", StrategyID: portfolio.StrategyTrendLowBuy,
-		TargetPositionCount: 3, TotalLayers: 10,
+		TargetPositionCount: 3, TotalLayers: (10),
 		ScopeType: portfolio.ScopeIndustry, ScopeValue: portfolio.ScopeValue{Items: []string{"银行"}},
 	})
 	if err != nil {
@@ -38,12 +38,12 @@ func TestPortfolioServiceCreateAndDetail(t *testing.T) {
 
 	// 加两个持仓
 	if _, err := svc.AddPosition(created.ID, portfolio.PositionInput{
-		Code: "600519", Name: "贵州茅台", EntryPrice: 1500, Layers: 1,
+		Code: "600519", Name: "贵州茅台", EntryPrice: 1500, Layers: intPtr(1),
 	}); err != nil {
 		t.Fatalf("加持仓失败: %v", err)
 	}
 	if _, err := svc.AddPosition(created.ID, portfolio.PositionInput{
-		Code: "000001", Name: "平安银行", EntryPrice: 10, Layers: 1,
+		Code: "000001", Name: "平安银行", EntryPrice: 10, Layers: intPtr(1),
 	}); err != nil {
 		t.Fatalf("加持仓失败: %v", err)
 	}
@@ -86,12 +86,12 @@ func TestPortfolioServicePositionsSortedByWeight(t *testing.T) {
 	svc, _ := newPortfolioService(t)
 	t.Cleanup(svc.Close)
 
-	created, _ := svc.CreatePortfolio(portfolio.PortfolioInput{Name: "排序组合", TotalLayers: 10})
+	created, _ := svc.CreatePortfolio(portfolio.PortfolioInput{Name: "排序组合", TotalLayers: (10)})
 	// 层数会被 clamp 到 [1,2]，用总层数不同的组合来区分权重不方便，
 	// 直接看排序稳定性：同权重时按代码升序
 	for _, code := range []string{"600519", "000001", "300750"} {
 		if _, err := svc.AddPosition(created.ID, portfolio.PositionInput{
-			Code: code, EntryPrice: 10, Layers: 1,
+			Code: code, EntryPrice: 10, Layers: intPtr(1),
 		}); err != nil {
 			t.Fatalf("加持仓 %s 失败: %v", code, err)
 		}
@@ -118,7 +118,7 @@ func TestPortfolioServiceUpdateAndDelete(t *testing.T) {
 
 	created, _ := svc.CreatePortfolio(portfolio.PortfolioInput{Name: "原名"})
 	updated, err := svc.UpdatePortfolio(created.ID, portfolio.PortfolioInput{
-		Name: "改名", Type: "auto", TotalLayers: 20,
+		Name: "改名", Type: "auto", TotalLayers: (20),
 	})
 	if err != nil {
 		t.Fatalf("更新失败: %v", err)
@@ -142,8 +142,8 @@ func TestPortfolioServiceOverviewAndOptions(t *testing.T) {
 	svc, _ := newPortfolioService(t)
 	t.Cleanup(svc.Close)
 
-	a, _ := svc.CreatePortfolio(portfolio.PortfolioInput{Name: "运行中", TotalLayers: 10})
-	svc.AddPosition(a.ID, portfolio.PositionInput{Code: "600519", EntryPrice: 10, Layers: 1})
+	a, _ := svc.CreatePortfolio(portfolio.PortfolioInput{Name: "运行中", TotalLayers: (10)})
+	svc.AddPosition(a.ID, portfolio.PositionInput{Code: "600519", EntryPrice: 10, Layers: intPtr(1)})
 	svc.CreatePortfolio(portfolio.PortfolioInput{Name: "已归档", Status: "archived"})
 
 	overview, err := svc.GetPortfolioOverview()
@@ -203,7 +203,7 @@ func TestPortfolioServiceFillsNameFromUniverse(t *testing.T) {
 	}
 
 	position, err := svc.AddPosition(created.ID, portfolio.PositionInput{
-		Code: "600519", EntryPrice: 1500, Layers: 1,
+		Code: "600519", EntryPrice: 1500, Layers: intPtr(1),
 	})
 	if err != nil {
 		t.Fatalf("加持仓失败: %v", err)
@@ -220,20 +220,20 @@ func TestPortfolioServiceDetailWithRealPrices(t *testing.T) {
 	requireLocalServer(t, svc.stock)
 	t.Cleanup(svc.Close)
 
-	created, err := svc.CreatePortfolio(portfolio.PortfolioInput{Name: "真实行情组合", TotalLayers: 10})
+	created, err := svc.CreatePortfolio(portfolio.PortfolioInput{Name: "真实行情组合", TotalLayers: (10)})
 	if err != nil {
 		t.Fatalf("创建失败: %v", err)
 	}
 
 	// 用远低于市价的成本，保证必然是浮盈
 	if _, err := svc.AddPosition(created.ID, portfolio.PositionInput{
-		Code: "600519", EntryPrice: 1, Layers: 1,
+		Code: "600519", EntryPrice: 1, Layers: intPtr(1),
 	}); err != nil {
 		t.Fatalf("加持仓失败: %v", err)
 	}
 	// 用远高于市价的成本，保证必然是浮亏
 	if _, err := svc.AddPosition(created.ID, portfolio.PositionInput{
-		Code: "000001", EntryPrice: 99999, Layers: 1,
+		Code: "000001", EntryPrice: 99999, Layers: intPtr(1),
 	}); err != nil {
 		t.Fatalf("加持仓失败: %v", err)
 	}

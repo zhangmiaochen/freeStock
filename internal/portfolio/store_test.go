@@ -8,7 +8,7 @@ import (
 // fakePrices 是固定的现价来源。
 type fakePrices map[string]PricePoint
 
-func (f fakePrices) LatestClose(codes []string) (map[string]PricePoint, error) {
+func (f fakePrices) LatestClose(codes []string, strategyID string) (map[string]PricePoint, error) {
 	out := map[string]PricePoint{}
 	for _, code := range codes {
 		if point, ok := f[code]; ok {
@@ -79,10 +79,10 @@ func TestNormalizeScopeTypeAndValue(t *testing.T) {
 		}
 	}
 
-	// 全选三个市场 → 视为"全部市场"，不写 markets
+	// 三个市场全选时**照写不省略**（原实现 :3684-3686）
 	raw := NormalizeScopeValue(ScopeAll, ScopeValue{Markets: []string{"main", "gem", "star"}})
-	if got := ParseScopeValue(raw); len(got.Markets) != 0 {
-		t.Errorf("三个市场全选应归一为「全部市场」: %s", raw)
+	if got := ParseScopeValue(raw); len(got.Markets) != 3 {
+		t.Errorf("三个市场全选应照写（不抹成空）: %s", raw)
 	}
 	// 部分选择 → 保留，且别名要能归一
 	raw = NormalizeScopeValue(ScopeAll, ScopeValue{Markets: []string{"主板", "kcb"}})
@@ -90,13 +90,13 @@ func TestNormalizeScopeTypeAndValue(t *testing.T) {
 	if len(got.Markets) != 2 || got.Markets[0] != "main" || got.Markets[1] != "star" {
 		t.Errorf("市场别名归一错误: %v", got.Markets)
 	}
-	// 股票代码要去后缀、去重
+	// 股票代码要去后缀、去重，**并按字典序排序**（原实现是 sorted({...})）
 	raw = NormalizeScopeValue(ScopeManualCodes, ScopeValue{
 		Codes: []string{"600519.SH", "600519", "000001.SZ"},
 	})
 	got = ParseScopeValue(raw)
-	if len(got.Codes) != 2 || got.Codes[0] != "600519" || got.Codes[1] != "000001" {
-		t.Errorf("代码应去后缀并去重: %v", got.Codes)
+	if len(got.Codes) != 2 || got.Codes[0] != "000001" || got.Codes[1] != "600519" {
+		t.Errorf("代码应去后缀、去重、排序: %v", got.Codes)
 	}
 }
 
@@ -188,13 +188,93 @@ func TestCreatePortfolioValidation(t *testing.T) {
 		t.Errorf("max_stock_count 应被抬到 target: %d", item.MaxStockCount)
 	}
 
-	// 目标持仓数下限 1
+	// 目标持仓数下限 1 —— 注意负数**不回落**到默认值
+	// （Python 的 `payload.get(x) or base.get(x) or 5` 里 -5 是 truthy，
+	//  再经 `max(1, ...)` 得 1）
 	item, err = store.Create(PortfolioInput{Name: "组合B", TargetPositionCount: -5})
 	if err != nil {
 		t.Fatalf("创建失败: %v", err)
 	}
+	if item.TargetPositionCount != 1 {
+		t.Errorf("负数目标数应被 max(1,..) 兜到 1，实际 %d", item.TargetPositionCount)
+	}
+	// 显式传 0 视为"未提供" → 回落默认 5
+	item, err = store.Create(PortfolioInput{Name: "组合C", TargetPositionCount: 0})
+	if err != nil {
+		t.Fatalf("创建失败: %v", err)
+	}
 	if item.TargetPositionCount != 5 {
-		t.Errorf("非法目标数应回退默认 5: %d", item.TargetPositionCount)
+		t.Errorf("传 0 应回落到默认 5，实际 %d", item.TargetPositionCount)
+	}
+}
+
+// 局部更新必须保留未提交的字段（Python 的 `payload or base or 默认` 语义）。
+//
+// 少了这个，脚本/API 只改一个字段就会把 strategy_id 打回趋势成长、
+// scope_value_json 清空、notes 清空 —— 静默丢数据。
+func TestUpdatePreservesOmittedFields(t *testing.T) {
+	store := newStore(t)
+
+	created, err := store.Create(PortfolioInput{
+		Name: "原名", Type: "semi_auto", StrategyID: StrategyTrendLowBuy,
+		BenchmarkCode: "000905.SH", Status: "paused",
+		TargetPositionCount: 8, MaxStockCount: 12, TotalLayers: (20),
+		ScopeType: ScopeIndustry, ScopeValue: ScopeValue{Items: []string{"银行", "证券"}},
+		Notes: "重要备注",
+	})
+	if err != nil {
+		t.Fatalf("创建失败: %v", err)
+	}
+
+	// 只改名字
+	updated, err := store.Update(created.ID, PortfolioInput{Name: "新名"})
+	if err != nil {
+		t.Fatalf("更新失败: %v", err)
+	}
+	if updated.Name != "新名" {
+		t.Errorf("名称应改: %s", updated.Name)
+	}
+	// 其余字段必须原样保留
+	if updated.Type != "semi_auto" {
+		t.Errorf("类型被打回: %s", updated.Type)
+	}
+	if updated.StrategyID != StrategyTrendLowBuy {
+		t.Errorf("策略被打回: %s", updated.StrategyID)
+	}
+	if updated.BenchmarkCode != "000905.SH" {
+		t.Errorf("基准被打回: %s", updated.BenchmarkCode)
+	}
+	if updated.Status != "paused" {
+		t.Errorf("状态被打回: %s", updated.Status)
+	}
+	if updated.TargetPositionCount != 8 || updated.MaxStockCount != 12 || updated.TotalLayers != 20 {
+		t.Errorf("数值字段被打回: target=%d max=%d layers=%d",
+			updated.TargetPositionCount, updated.MaxStockCount, updated.TotalLayers)
+	}
+	if updated.ScopeType != ScopeIndustry {
+		t.Errorf("范围类型被打回: %s", updated.ScopeType)
+	}
+	scope := ParseScopeValue(updated.ScopeValueJSON)
+	if len(scope.Items) != 2 {
+		t.Errorf("范围内容被清空: %+v", scope)
+	}
+	if updated.Notes != "重要备注" {
+		t.Errorf("备注被清空: %q", updated.Notes)
+	}
+
+	// 显式改某个字段时其他字段仍保留
+	updated, err = store.Update(created.ID, PortfolioInput{Status: "archived", TotalLayers: (30)})
+	if err != nil {
+		t.Fatalf("更新失败: %v", err)
+	}
+	if updated.Status != "archived" || updated.TotalLayers != 30 {
+		t.Errorf("显式字段未生效: %+v", updated)
+	}
+	if updated.Name != "新名" || updated.StrategyID != StrategyTrendLowBuy {
+		t.Errorf("改状态时其它字段被覆盖: name=%s strategy=%s", updated.Name, updated.StrategyID)
+	}
+	if updated.BenchmarkCode != "000905.SH" || updated.Notes != "重要备注" {
+		t.Errorf("改状态时基准/备注被覆盖: %s / %s", updated.BenchmarkCode, updated.Notes)
 	}
 }
 
@@ -226,7 +306,7 @@ func TestUpdateAndListPortfolios(t *testing.T) {
 
 	updated, err := store.Update(created.ID, PortfolioInput{
 		Name: "新名称", Type: "semi_auto", StrategyID: StrategyTrendLowBuy,
-		TargetPositionCount: 3, TotalLayers: 20,
+		TargetPositionCount: 3, TotalLayers: (20),
 	})
 	if err != nil {
 		t.Fatalf("更新失败: %v", err)
@@ -290,11 +370,11 @@ func TestDeletePortfolioCascades(t *testing.T) {
 
 func TestAddPositionClampsLayers(t *testing.T) {
 	store := newStore(t)
-	item, _ := store.Create(PortfolioInput{Name: "组合", TotalLayers: 10})
+	item, _ := store.Create(PortfolioInput{Name: "组合", TotalLayers: (10)})
 
 	// 原项目 add_position 把层数 clamp 到 [1,2] —— 这是如实的照搬
 	position, err := store.AddPosition(item.ID, PositionInput{
-		Code: "600519.SH", Name: "贵州茅台", EntryPrice: 1500.123456, EntryDate: "2026-09-30", Layers: 9,
+		Code: "600519.SH", Name: "贵州茅台", EntryPrice: 1500.123456, EntryDate: "2026-09-30", Layers: intPtr(9),
 	})
 	if err != nil {
 		t.Fatalf("加持仓失败: %v", err)
@@ -314,9 +394,9 @@ func TestAddPositionClampsLayers(t *testing.T) {
 	if position.EntryDate != "20260930" {
 		t.Errorf("日期应归一为 YYYYMMDD: %s", position.EntryDate)
 	}
-	// 价格保留 4 位
-	if position.EntryPrice != 1500.1235 {
-		t.Errorf("价格应保留 4 位小数: %v", position.EntryPrice)
+	// 价格**原样落库、不舍入**（原实现 :530 `_safe_float(payload.get("entry_price"), 0.0)`）
+	if position.EntryPrice != 1500.123456 {
+		t.Errorf("价格应原样保留（不舍入）: %v", position.EntryPrice)
 	}
 	if position.SourceType != SourceManual || position.LastAction != "manual_add" {
 		t.Errorf("来源/动作错误: %s / %s", position.SourceType, position.LastAction)
@@ -370,10 +450,10 @@ func TestAddPositionFillsName(t *testing.T) {
 		t.Errorf("名称应回填代码: %q", position.Name)
 	}
 
-	// 非法的仓位性质应归一为空
+	// 仓位性质**原样保留、不设白名单**（原实现 :537 是 `_safe_str(...)`）
 	position, _ = store.AddPosition(item.ID, PositionInput{Code: "000001", EntryPrice: 10, HoldingType: "乱填"})
-	if position.HoldingType != "" {
-		t.Errorf("非法仓位性质应清空: %q", position.HoldingType)
+	if position.HoldingType != "乱填" {
+		t.Errorf("仓位性质应原样保留: %q", position.HoldingType)
 	}
 	// 合法的保留
 	position, _ = store.AddPosition(item.ID, PositionInput{Code: "000002", EntryPrice: 10, HoldingType: HoldingBase})
@@ -387,7 +467,7 @@ func TestTransactionsAreAppendOnly(t *testing.T) {
 	store := newStore(t)
 	item, _ := store.Create(PortfolioInput{Name: "组合"})
 
-	store.AddPosition(item.ID, PositionInput{Code: "600519", EntryPrice: 1500, Layers: 1})
+	store.AddPosition(item.ID, PositionInput{Code: "600519", EntryPrice: 1500, Layers: intPtr(1)})
 	store.DeletePosition(item.ID, "600519")
 
 	txns, err := store.ListTransactions(item.ID)
@@ -425,12 +505,12 @@ func TestTransactionsAreAppendOnly(t *testing.T) {
 
 func TestSummarizeWeightedReturn(t *testing.T) {
 	store := newStore(t)
-	item, _ := store.Create(PortfolioInput{Name: "组合", TotalLayers: 10})
+	item, _ := store.Create(PortfolioInput{Name: "组合", TotalLayers: (10)})
 
 	// 仓位 A：1 层 → 10%，成本 100 → 现价 110（+10%）
-	store.AddPosition(item.ID, PositionInput{Code: "600519", Name: "A", EntryPrice: 100, Layers: 1})
+	store.AddPosition(item.ID, PositionInput{Code: "600519", Name: "A", EntryPrice: 100, Layers: intPtr(1)})
 	// 仓位 B：1 层 → 10%，成本 100 → 现价 90（-10%）
-	store.AddPosition(item.ID, PositionInput{Code: "000001", Name: "B", EntryPrice: 100, Layers: 1})
+	store.AddPosition(item.ID, PositionInput{Code: "000001", Name: "B", EntryPrice: 100, Layers: intPtr(1)})
 
 	prices := fakePrices{
 		"600519": {Close: 110, Date: "20260930"},
@@ -481,10 +561,10 @@ func TestSummarizeWeightedReturn(t *testing.T) {
 // 取不到现价时记 0，并且不计入收益率 —— 与原实现的 left join 行为一致。
 func TestSummarizeMissingPrice(t *testing.T) {
 	store := newStore(t)
-	item, _ := store.Create(PortfolioInput{Name: "组合", TotalLayers: 10})
+	item, _ := store.Create(PortfolioInput{Name: "组合", TotalLayers: (10)})
 
-	store.AddPosition(item.ID, PositionInput{Code: "600519", EntryPrice: 100, Layers: 1})
-	store.AddPosition(item.ID, PositionInput{Code: "000001", EntryPrice: 100, Layers: 1})
+	store.AddPosition(item.ID, PositionInput{Code: "600519", EntryPrice: 100, Layers: intPtr(1)})
+	store.AddPosition(item.ID, PositionInput{Code: "000001", EntryPrice: 100, Layers: intPtr(1)})
 
 	// 只给一只股票价格
 	prices := fakePrices{"600519": {Close: 120, Date: "20260930"}}
@@ -514,7 +594,7 @@ func TestSummarizeMissingPrice(t *testing.T) {
 func TestSummarizeZeroCost(t *testing.T) {
 	store := newStore(t)
 	item, _ := store.Create(PortfolioInput{Name: "组合"})
-	store.AddPosition(item.ID, PositionInput{Code: "600519", EntryPrice: 0, Layers: 1})
+	store.AddPosition(item.ID, PositionInput{Code: "600519", EntryPrice: 0, Layers: intPtr(1)})
 
 	detail, err := store.Detail(item.ID, fakePrices{"600519": {Close: 100, Date: "20260930"}})
 	if err != nil {
@@ -540,11 +620,11 @@ func TestPersistsAcrossReopen(t *testing.T) {
 	}
 	item, _ := store.Create(PortfolioInput{
 		Name: "持久化组合", Type: "semi_auto", StrategyID: StrategyTrendLowBuy,
-		TotalLayers: 20, TargetPositionCount: 3,
+		TotalLayers: (20), TargetPositionCount: 3,
 		ScopeType: ScopeIndustry, ScopeValue: ScopeValue{Items: []string{"银行", "证券"}, Markets: []string{"main"}},
 		Notes: "备注内容",
 	})
-	store.AddPosition(item.ID, PositionInput{Code: "600519", Name: "贵州茅台", EntryPrice: 1500, Layers: 2})
+	store.AddPosition(item.ID, PositionInput{Code: "600519", Name: "贵州茅台", EntryPrice: 1500, Layers: intPtr(2)})
 	store.Close()
 
 	// 重开
@@ -569,7 +649,7 @@ func TestPersistsAcrossReopen(t *testing.T) {
 	}
 	// 范围 JSON 往返
 	scope := ParseScopeValue(got.ScopeValueJSON)
-	if len(scope.Items) != 2 || scope.Items[0] != "银行" || len(scope.Markets) != 1 {
+	if len(scope.Items) != 2 || scope.Items[0] != "证券" || len(scope.Markets) != 1 {
 		t.Errorf("范围未持久化: %+v", scope)
 	}
 
@@ -590,10 +670,10 @@ func TestPersistsAcrossReopen(t *testing.T) {
 func TestOverview(t *testing.T) {
 	store := newStore(t)
 
-	a, _ := store.Create(PortfolioInput{Name: "活跃组合", TotalLayers: 10})
-	store.AddPosition(a.ID, PositionInput{Code: "600519", EntryPrice: 100, Layers: 1})
-	b, _ := store.Create(PortfolioInput{Name: "归档组合", Status: "archived", TotalLayers: 20})
-	store.AddPosition(b.ID, PositionInput{Code: "000001", EntryPrice: 10, Layers: 2})
+	a, _ := store.Create(PortfolioInput{Name: "活跃组合", TotalLayers: (10)})
+	store.AddPosition(a.ID, PositionInput{Code: "600519", EntryPrice: 100, Layers: intPtr(1)})
+	b, _ := store.Create(PortfolioInput{Name: "归档组合", Status: "archived", TotalLayers: (20)})
+	store.AddPosition(b.ID, PositionInput{Code: "000001", EntryPrice: 10, Layers: intPtr(2)})
 
 	overview, err := store.Overview()
 	if err != nil {

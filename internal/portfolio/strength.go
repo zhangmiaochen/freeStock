@@ -34,6 +34,8 @@ type StrengthRow struct {
 	RepairScore    float64 `json:"repairScore"`
 
 	Close  float64 `json:"closePrice"`
+	High   float64 `json:"highPrice"`
+	Low    float64 `json:"lowPrice"`
 	Open   float64 `json:"openPrice"`
 	PctChg float64 `json:"pctChg"`
 
@@ -48,9 +50,16 @@ type StrengthRow struct {
 	DrawdownFromHigh20  float64 `json:"drawdownFromHigh20"`
 	DrawdownFromHigh120 float64 `json:"drawdownFromHigh120"`
 	ReboundFromLow60    float64 `json:"reboundFromLow60"`
+	StockReturn3D       float64 `json:"stockReturn3d"`
 	StockReturn5D       float64 `json:"stockReturn5d"`
 	StockReturn10D      float64 `json:"stockReturn10d"`
+	StockReturn20D      float64 `json:"stockReturn20d"`
 	VolumeRatio20       float64 `json:"volumeRatio20"`
+	VolumeRatio520      float64 `json:"volumeRatio520"`
+	Ma5Prev             float64 `json:"ma5PrevPrice"`
+	Ma250Prev           float64 `json:"ma250PrevPrice"`
+	IndustryReturn20D   float64 `json:"industryReturn20d"`
+	BenchmarkReturn20D  float64 `json:"benchmarkReturn20d"`
 }
 
 const strengthSchema = `
@@ -68,6 +77,8 @@ CREATE TABLE IF NOT EXISTS stock_strength (
   capital_score         REAL NOT NULL DEFAULT 0,
   repair_score          REAL NOT NULL DEFAULT 0,
   close_price           REAL NOT NULL DEFAULT 0,
+  high_price            REAL NOT NULL DEFAULT 0,
+  low_price             REAL NOT NULL DEFAULT 0,
   open_price            REAL NOT NULL DEFAULT 0,
   pct_chg               REAL NOT NULL DEFAULT 0,
   ma5_price             REAL NOT NULL DEFAULT 0,
@@ -80,9 +91,16 @@ CREATE TABLE IF NOT EXISTS stock_strength (
   drawdown_from_high_20 REAL NOT NULL DEFAULT 0,
   drawdown_from_high_120 REAL NOT NULL DEFAULT 0,
   rebound_from_low_60   REAL NOT NULL DEFAULT 0,
+  stock_return_3d       REAL NOT NULL DEFAULT 0,
   stock_return_5d       REAL NOT NULL DEFAULT 0,
   stock_return_10d      REAL NOT NULL DEFAULT 0,
+  stock_return_20d      REAL NOT NULL DEFAULT 0,
   volume_ratio_20       REAL NOT NULL DEFAULT 0,
+  volume_ratio_5_20     REAL NOT NULL DEFAULT 0,
+  ma5_prev_price        REAL NOT NULL DEFAULT 0,
+  ma250_prev_price      REAL NOT NULL DEFAULT 0,
+  industry_return_20d   REAL NOT NULL DEFAULT 0,
+  benchmark_return_20d  REAL NOT NULL DEFAULT 0,
   created_at            TEXT NOT NULL DEFAULT '',
   PRIMARY KEY (trade_date, strategy_id, ts_code)
 );
@@ -112,11 +130,14 @@ func (s *Store) SaveStrength(tradeDate int64, strategyID string, rows []Strength
 		INSERT INTO stock_strength (
 			trade_date, strategy_id, ts_code, name, industry, market,
 			total_score, trend_score, structure_score, rs_score, capital_score, repair_score,
-			close_price, open_price, pct_chg,
+			close_price, high_price, low_price, open_price, pct_chg,
 			ma5_price, ma20_price, ma30_price, ma60_price, ma120_price, ma250_price,
 			relative_strength_20d, drawdown_from_high_20, drawdown_from_high_120,
-			rebound_from_low_60, stock_return_5d, stock_return_10d, volume_ratio_20, created_at
-		) VALUES (?,?,?,?,?,?, ?,?,?,?,?,?, ?,?,?, ?,?,?,?,?,?, ?,?,?, ?,?,?,?,?)`)
+			rebound_from_low_60, stock_return_3d, stock_return_5d, stock_return_10d,
+			stock_return_20d, volume_ratio_20, volume_ratio_5_20,
+			ma5_prev_price, ma250_prev_price,
+			industry_return_20d, benchmark_return_20d, created_at
+		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		return fmt.Errorf("准备评分写入失败：%w", err)
 	}
@@ -130,10 +151,12 @@ func (s *Store) SaveStrength(tradeDate int64, strategyID string, rows []Strength
 			row.TradeDate, row.StrategyID, row.Code, row.Name, row.Industry, row.Market,
 			row.TotalScore, row.TrendScore, row.StructureScore, row.RSScore,
 			row.CapitalScore, row.RepairScore,
-			row.Close, row.Open, row.PctChg,
+			row.Close, row.High, row.Low, row.Open, row.PctChg,
 			row.Ma5, row.Ma20, row.Ma30, row.Ma60, row.Ma120, row.Ma250,
 			row.RelativeStrength20D, row.DrawdownFromHigh20, row.DrawdownFromHigh120,
-			row.ReboundFromLow60, row.StockReturn5D, row.StockReturn10D, row.VolumeRatio20, now,
+			row.ReboundFromLow60, row.StockReturn3D, row.StockReturn5D, row.StockReturn10D,
+			row.StockReturn20D, row.VolumeRatio20, row.VolumeRatio520,
+			row.Ma5Prev, row.Ma250Prev, row.IndustryReturn20D, row.BenchmarkReturn20D, now,
 		); err != nil {
 			return fmt.Errorf("写入评分失败（%s）：%w", row.Code, err)
 		}
@@ -199,10 +222,13 @@ func (s *Store) StrengthCount(tradeDate int64, strategyID string) (int, error) {
 const strengthSelect = `
 	SELECT trade_date, strategy_id, ts_code, name, industry, market,
 	       total_score, trend_score, structure_score, rs_score, capital_score, repair_score,
-	       close_price, open_price, pct_chg,
+	       close_price, high_price, low_price, open_price, pct_chg,
 	       ma5_price, ma20_price, ma30_price, ma60_price, ma120_price, ma250_price,
 	       relative_strength_20d, drawdown_from_high_20, drawdown_from_high_120,
-	       rebound_from_low_60, stock_return_5d, stock_return_10d, volume_ratio_20
+	       rebound_from_low_60, stock_return_3d, stock_return_5d, stock_return_10d,
+	       stock_return_20d, volume_ratio_20, volume_ratio_5_20,
+	       ma5_prev_price, ma250_prev_price,
+	       industry_return_20d, benchmark_return_20d
 	FROM stock_strength`
 
 func scanStrength(row scanner) (StrengthRow, error) {
@@ -211,10 +237,12 @@ func scanStrength(row scanner) (StrengthRow, error) {
 		&out.TradeDate, &out.StrategyID, &out.Code, &out.Name, &out.Industry, &out.Market,
 		&out.TotalScore, &out.TrendScore, &out.StructureScore, &out.RSScore,
 		&out.CapitalScore, &out.RepairScore,
-		&out.Close, &out.Open, &out.PctChg,
+		&out.Close, &out.High, &out.Low, &out.Open, &out.PctChg,
 		&out.Ma5, &out.Ma20, &out.Ma30, &out.Ma60, &out.Ma120, &out.Ma250,
 		&out.RelativeStrength20D, &out.DrawdownFromHigh20, &out.DrawdownFromHigh120,
-		&out.ReboundFromLow60, &out.StockReturn5D, &out.StockReturn10D, &out.VolumeRatio20,
+		&out.ReboundFromLow60, &out.StockReturn3D, &out.StockReturn5D, &out.StockReturn10D,
+		&out.StockReturn20D, &out.VolumeRatio20, &out.VolumeRatio520,
+		&out.Ma5Prev, &out.Ma250Prev, &out.IndustryReturn20D, &out.BenchmarkReturn20D,
 	)
 	return out, err
 }
@@ -277,10 +305,124 @@ func (s *Store) LoadStrengthForCodes(tradeDate int64, strategyID string, codes [
 	return out, rows.Err()
 }
 
+// LowBuyBreadthReadyCount 统计"低吸广度就绪"的股票数。
+//
+// 原实现的口径（portfolio_service.py）：
+//
+//	low_buy_breadth_ready_count = 当日 (close > ma60 且 ma20 > ma60 且 close > 0 且 ma60 > 0) 的股票数
+//
+// 这个数**驱动两件事**：低吸持仓的强制清仓阈值（< 900）与低吸入场档位（>=1200）。
+// 传 0 会让低吸组合的每只持仓都被判"广度不足"而清仓 —— 所以必须真的算出来。
+//
+// ⚠ 口径差异：这里是在**已物化的评分表**上数（受 RefreshStrength 的 limit 截断），
+// 原实现是在全市场评分帧上数。limit 越小这个数越偏小，低吸越容易被误判为广度不足。
+func (s *Store) LowBuyBreadthReadyCount(tradeDate int64, strategyID string) (int, error) {
+	var count int
+	err := s.db.QueryRow(`
+		SELECT COUNT(*) FROM stock_strength
+		WHERE trade_date=? AND strategy_id=?
+		  AND close_price > 0 AND ma60_price > 0
+		  AND close_price > ma60_price AND ma20_price > ma60_price`,
+		tradeDate, strategyID,
+	).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("统计低吸广度失败：%w", err)
+	}
+	return count, nil
+}
+
 // migrateStrength 建评分表（在 Store.migrate 里调用）。
 func (s *Store) migrateStrength() error {
 	if _, err := s.db.Exec(strengthSchema); err != nil {
 		return fmt.Errorf("建评分表失败：%w", err)
 	}
+	if _, err := s.db.Exec(marketStateSchema); err != nil {
+		return fmt.Errorf("建市场状态表失败：%w", err)
+	}
+	// 给已存在的老库补列（SQLite 没有 ADD COLUMN IF NOT EXISTS，只能忽略重复列错误）
+	for _, col := range []string{
+		"high_price REAL NOT NULL DEFAULT 0",
+		"low_price REAL NOT NULL DEFAULT 0",
+		"stock_return_3d REAL NOT NULL DEFAULT 0",
+		"stock_return_20d REAL NOT NULL DEFAULT 0",
+		"volume_ratio_5_20 REAL NOT NULL DEFAULT 0",
+		"ma5_prev_price REAL NOT NULL DEFAULT 0",
+		"ma250_prev_price REAL NOT NULL DEFAULT 0",
+		"industry_return_20d REAL NOT NULL DEFAULT 0",
+		"benchmark_return_20d REAL NOT NULL DEFAULT 0",
+	} {
+		if _, err := s.db.Exec("ALTER TABLE stock_strength ADD COLUMN " + col); err != nil &&
+			!strings.Contains(err.Error(), "duplicate column") {
+			return fmt.Errorf("补评分列失败（%s）：%w", col, err)
+		}
+	}
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// 市场状态
+// ---------------------------------------------------------------------------
+
+// MarketStateRow 是物化的市场状态。
+//
+// 与评分一起物化：市场状态由**全市场宽度**算出（80 天 × 全市场），
+// 每次出建议都重算要十几秒，所以跟着评分一起刷新。
+type MarketStateRow struct {
+	TradeDate  int64   `json:"tradeDate"`
+	State      string  `json:"state"`
+	Label      string  `json:"label"`
+	BullScore  float64 `json:"bullScore"`
+	BearScore  float64 `json:"bearScore"`
+	ProxyRet20 float64 `json:"proxyRet20"`
+	Days       int     `json:"days"`
+	CreatedAt  string  `json:"createdAt"`
+}
+
+const marketStateSchema = `
+CREATE TABLE IF NOT EXISTS market_state (
+  trade_date   INTEGER PRIMARY KEY,
+  state        TEXT NOT NULL DEFAULT 'range',
+  label        TEXT NOT NULL DEFAULT '',
+  bull_score   REAL NOT NULL DEFAULT 0,
+  bear_score   REAL NOT NULL DEFAULT 0,
+  proxy_ret_20 REAL NOT NULL DEFAULT 0,
+  days         INTEGER NOT NULL DEFAULT 0,
+  created_at   TEXT NOT NULL DEFAULT ''
+);`
+
+// SaveMarketState 写入市场状态（同一天覆盖）。
+func (s *Store) SaveMarketState(row MarketStateRow) error {
+	_, err := s.db.Exec(`
+		INSERT INTO market_state (trade_date, state, label, bull_score, bear_score, proxy_ret_20, days, created_at)
+		VALUES (?,?,?,?,?,?,?,?)
+		ON CONFLICT(trade_date) DO UPDATE SET
+			state=excluded.state, label=excluded.label,
+			bull_score=excluded.bull_score, bear_score=excluded.bear_score,
+			proxy_ret_20=excluded.proxy_ret_20, days=excluded.days,
+			created_at=excluded.created_at`,
+		row.TradeDate, row.State, row.Label, row.BullScore, row.BearScore,
+		row.ProxyRet20, row.Days, nowText(),
+	)
+	if err != nil {
+		return fmt.Errorf("写入市场状态失败：%w", err)
+	}
+	return nil
+}
+
+// LoadMarketState 读取市场状态；没物化过时返回 range 兜底而不是报错 ——
+// 缺市场状态不该让整个组合页打不开。
+func (s *Store) LoadMarketState(tradeDate int64) (MarketStateRow, error) {
+	var out MarketStateRow
+	err := s.db.QueryRow(`
+		SELECT trade_date, state, label, bull_score, bear_score, proxy_ret_20, days, created_at
+		FROM market_state WHERE trade_date=?`, tradeDate,
+	).Scan(&out.TradeDate, &out.State, &out.Label, &out.BullScore,
+		&out.BearScore, &out.ProxyRet20, &out.Days, &out.CreatedAt)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return MarketStateRow{TradeDate: tradeDate, State: "range", Label: "震荡/轮动"}, nil
+		}
+		return out, fmt.Errorf("读取市场状态失败：%w", err)
+	}
+	return out, nil
 }

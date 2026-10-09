@@ -16,7 +16,9 @@ import { useRouter } from "vue-router";
 import {
   Briefcase,
   ChartCandlestick,
+  Check,
   CircleAlert,
+  Funnel,
   LoaderCircle,
   Pencil,
   Plus,
@@ -26,18 +28,21 @@ import {
 } from "@lucide/vue";
 
 import PortfolioForm from "@/components/portfolio/PortfolioForm.vue";
+import PlanPanel from "@/components/portfolio/PlanPanel.vue";
 import StockSearchBox from "@/components/kline/StockSearchBox.vue";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   api,
   errorMessage,
+  type PlanResult,
   type Portfolio,
   type PortfolioDetail,
   type PortfolioInput,
   type PortfolioOptions,
   type PortfolioOverview,
   type PositionInput,
+  type StrengthSummary,
 } from "@/lib/backend";
 import { formatPercent, trendClass } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -74,6 +79,17 @@ const positionInput = ref<PositionInput>({
   strategyTag: "",
 } as PositionInput);
 const pickedName = ref("");
+
+// ---- 阶段二：评分与调仓建议 ----
+const plan = ref<PlanResult | null>(null);
+const planLoading = ref(false);
+const planError = ref("");
+const applying = ref(false);
+const refreshing = ref(false);
+const strength = ref<StrengthSummary | null>(null);
+/** 刷新评分时评多少只（保护数据源，全市场要几分钟） */
+const refreshLimit = ref(800);
+const applyResult = ref<string>("");
 
 const summary = computed(() => current.value?.summary ?? null);
 const positions = computed(() => current.value?.positions ?? []);
@@ -129,7 +145,92 @@ async function loadDetail(id: string) {
 async function selectPortfolio(id: string) {
   currentId.value = id;
   showPositionForm.value = false;
+  plan.value = null;
+  planError.value = "";
+  applyResult.value = "";
   await loadDetail(id);
+  // 详情拿到后就知道策略了，顺手读一下评分状态
+  if (current.value) {
+    await loadStrength();
+  }
+}
+
+/** 读评分物化状态（判断能不能出建议） */
+async function loadStrength() {
+  if (!current.value) return;
+  try {
+    strength.value = await api.portfolio.getStrengthSummary(current.value.portfolio.strategyId);
+  } catch {
+    strength.value = null;
+  }
+}
+
+/** 生成调仓建议 */
+async function loadPlan() {
+  if (!currentId.value) return;
+  planLoading.value = true;
+  planError.value = "";
+  applyResult.value = "";
+  try {
+    plan.value = await api.portfolio.buildPlan(currentId.value);
+  } catch (err) {
+    planError.value = errorMessage(err);
+    plan.value = null;
+  } finally {
+    planLoading.value = false;
+  }
+}
+
+/** 刷新全市场评分并物化 */
+async function refreshStrength() {
+  if (!current.value) return;
+  refreshing.value = true;
+  planError.value = "";
+  applyResult.value = "";
+  try {
+    const result = await api.portfolio.refreshStrength(
+      current.value.portfolio.strategyId,
+      refreshLimit.value,
+    );
+    // 注意顺序：loadPlan 会清空提示，所以结果消息必须**在它之后**设置，
+    // 否则用户看不到"评分完成"的反馈
+    await loadStrength();
+    await loadPlan();
+    applyResult.value =
+      `评分完成：${result.tradeDate} 物化 ${result.saved} 只，` +
+      `市场状态 ${result.marketState.marketStateLabel}` +
+      (result.skipped > 0 ? `（跳过 ${result.skipped} 只数据不足）` : "");
+  } catch (err) {
+    planError.value = errorMessage(err);
+  } finally {
+    refreshing.value = false;
+  }
+}
+
+/** 一键应用建议 */
+async function applyPlan() {
+  if (!currentId.value || !plan.value) return;
+  const changed = plan.value.plan.rows.filter((row) => row.isExecutable).length;
+  if (!window.confirm(
+    `确定应用建议？会影响 ${changed} 只股票，持仓会被重写（流水会保留审计记录）。`,
+  )) return;
+
+  applying.value = true;
+  planError.value = "";
+  try {
+    const result = await api.portfolio.applyRotation(currentId.value);
+    await refresh();
+    await loadPlan();
+    // 顺序很重要：loadPlan 会清空提示，结果消息必须放在它之后
+    applyResult.value =
+      `已应用：持仓 ${result.applied.positionCount} 只 ` +
+      `（清仓 ${result.applied.cleared}、新增 ${result.applied.added}、` +
+      `减仓 ${result.applied.reduced}、不变 ${result.applied.unchanged}）`;
+  } catch (err) {
+    planError.value = errorMessage(err);
+  } finally {
+    applying.value = false;
+  }
 }
 
 async function refresh() {
@@ -137,7 +238,6 @@ async function refresh() {
   await loadList();
   if (currentId.value) await loadDetail(currentId.value);
 }
-
 function openCreate() {
   editing.value = null;
   formMode.value = "create";
@@ -569,6 +669,76 @@ onMounted(async () => {
               </table>
             </div>
           </section>
+
+          <!-- ============ 策略建议 ============ -->
+          <section class="bg-card rounded-lg border">
+            <div class="flex flex-wrap items-center gap-2 border-b px-4 py-2">
+              <span class="text-sm font-medium">策略建议</span>
+              <Badge v-if="strength && strength.latestDate" variant="secondary" class="text-[10px]">
+                评分日 {{ strength.latestDate }} · {{ strength.count }} 只
+              </Badge>
+              <Badge v-else variant="outline" class="text-[10px]">尚未评分</Badge>
+
+              <div class="ml-auto flex flex-wrap items-center gap-2">
+                <label class="text-muted-foreground flex items-center gap-1 text-[11px]">
+                  评分只数
+                  <select
+                    v-model.number="refreshLimit"
+                    class="bg-background h-6 rounded border px-1 text-[11px] outline-none"
+                  >
+                    <option :value="300">300</option>
+                    <option :value="800">800</option>
+                    <option :value="1500">1500</option>
+                    <option :value="0">全市场（很慢）</option>
+                  </select>
+                </label>
+                <Button size="xs" variant="outline" :disabled="refreshing" @click="refreshStrength">
+                  <LoaderCircle v-if="refreshing" class="animate-spin" />
+                  <RefreshCw v-else />
+                  {{ refreshing ? "评分中…" : "刷新评分" }}
+                </Button>
+                <Button size="xs" variant="outline" :disabled="planLoading" @click="loadPlan">
+                  <LoaderCircle v-if="planLoading" class="animate-spin" />
+                  <Funnel v-else />
+                  生成建议
+                </Button>
+                <Button
+                  size="xs"
+                  :disabled="applying || !plan || !current.portfolio.allowApplyRotation"
+                  :title="current.portfolio.allowApplyRotation
+                    ? '把建议应用到持仓（会重写持仓，流水保留）'
+                    : '该组合类型仅生成分析提醒，不支持一键应用'"
+                  @click="applyPlan"
+                >
+                  <LoaderCircle v-if="applying" class="animate-spin" />
+                  <Check v-else />
+                  一键应用建议
+                </Button>
+              </div>
+            </div>
+
+            <p v-if="planError" class="text-destructive border-b px-4 py-2 text-xs">{{ planError }}</p>
+            <p v-if="applyResult" class="text-up border-b px-4 py-2 text-xs">{{ applyResult }}</p>
+
+            <p
+              v-if="!plan && !planError && !planLoading"
+              class="text-muted-foreground px-4 py-6 text-center text-xs"
+            >
+              <template v-if="!strength || !strength.latestDate">
+                还没有 {{ current.portfolio.strategyLabel }} 的评分数据。
+                评分需要对全市场逐股拉一年日线，先点「刷新评分」（约 {{ refreshLimit || "几" }} 只需要几分钟）。
+              </template>
+              <template v-else>
+                点「生成建议」查看候选池与调仓动作
+              </template>
+            </p>
+
+            <p v-if="planLoading" class="text-muted-foreground flex items-center justify-center gap-2 py-6 text-xs">
+              <LoaderCircle class="size-4 animate-spin" /> 正在生成调仓建议…
+            </p>
+          </section>
+
+          <PlanPanel v-if="plan" :plan="plan" @open-kline="openKline" />
 
           <!-- 流水 -->
           <section v-if="current.transactions.length" class="bg-card overflow-hidden rounded-lg border">

@@ -359,14 +359,21 @@ func scoreWindow(value, low, high float64) float64 {
 //
 //	8*(close>ma20) + 8*(ma20>ma60) + 6*(ma60>ma120) + 4*(ma120>ma250)
 //	+ 2*(ma20>ma20_lag5) + 2*(ma60>ma60_lag10)
+//
+// ⚠ **不要给均线加 `> 0` 保护**。原实现先把缺失均线 `fillna(0.0)`
+// （portfolio_service.py:1936-1946），然后直接用 `np.where(close > ma20, 8, 0)` ——
+// 均线为 0 时 `close > 0` 成立、**加分**。
+//
+// 加了保护会让上市 30~249 个交易日的次新股少拿分：
+// 30~59 根少 8 分、60~119 根少约 10 分、120~249 根少 4 分 —— 直接跨过/跌落建仓线。
 func TrendBase(ind Indicators, ma20Lag5, ma60Lag10 float64) float64 {
-	score := 8*boolToFloat(ind.Close > ind.Ma20 && ind.Ma20 > 0) +
-		8*boolToFloat(ind.Ma20 > ind.Ma60 && ind.Ma60 > 0) +
-		6*boolToFloat(ind.Ma60 > ind.Ma120 && ind.Ma120 > 0) +
-		4*boolToFloat(ind.Ma120 > ind.Ma250 && ind.Ma250 > 0) +
-		2*boolToFloat(ind.Ma20 > ma20Lag5 && ma20Lag5 > 0) +
-		2*boolToFloat(ind.Ma60 > ma60Lag10 && ma60Lag10 > 0)
-	return round(clamp(score, 0, 30), 4)
+	score := 8*boolToFloat(ind.Close > ind.Ma20) +
+		8*boolToFloat(ind.Ma20 > ind.Ma60) +
+		6*boolToFloat(ind.Ma60 > ind.Ma120) +
+		4*boolToFloat(ind.Ma120 > ind.Ma250) +
+		2*boolToFloat(ind.Ma20 > ma20Lag5) +
+		2*boolToFloat(ind.Ma60 > ma60Lag10)
+	return round(clamp(score, 0, 30), 2)
 }
 
 // StructureBase 结构基础分（上限 20）。
@@ -394,13 +401,14 @@ func StructureBase(ind Indicators, prevHigh60, winRate float64) float64 {
 		}
 	}
 	// 均线上方 + 量能温和 + 有回撤（三者同时）
-	if ind.Close >= ind.Ma20 && ind.Ma20 > 0 &&
+	// 同样**不加** `Ma20 > 0` 保护（原实现 fillna(0) 后直接比较）
+	if ind.Close >= ind.Ma20 &&
 		ind.VolumeRatio20 <= 1.15 &&
 		ind.DrawdownFromHigh120 <= -3 && ind.DrawdownFromHigh120 >= -18 {
 		score += 4
 	}
 	score += clamp(winRate/100, 0, 1) * 2
-	return round(clamp(score, 0, 20), 4)
+	return round(clamp(score, 0, 20), 2)
 }
 
 // RSBase 相对强度基础分（上限 20），含过热冷却。
@@ -419,7 +427,7 @@ func RSBase(ind Indicators) float64 {
 	if ind.RelativeStrength20D >= 50 && ind.DrawdownFromHigh120 >= -3 {
 		score -= 2
 	}
-	return round(clamp(score, 0, 20), 4)
+	return round(clamp(score, 0, 20), 2)
 }
 
 // CapitalBase 资金基础分（上限 15）。
@@ -430,7 +438,7 @@ func CapitalBase(ind Indicators) float64 {
 		clamp(ind.TurnRankPct, 0, 1)*4 +
 		clamp((ind.VolumeRatio20-0.8)/1.2, 0, 1)*2 +
 		clamp(ind.IndustryStrengthPct, 0, 1)*2
-	return round(clamp(score, 0, 15), 4)
+	return round(clamp(score, 0, 15), 2)
 }
 
 // NearTermRepairScore 近期修复分（上限 15）。
@@ -441,12 +449,13 @@ func CapitalBase(ind Indicators) float64 {
 func NearTermRepairScore(ind Indicators, prevHigh60 float64) float64 {
 	score := clamp(ind.ReboundFromLow60, 0, 1)*6 +
 		clamp((20+ind.DrawdownFromHigh120)/20, 0, 1)*4 +
-		2*boolToFloat(ind.Close > ind.Ma20 && ind.Ma20 > 0) +
-		1.5*boolToFloat(ind.Close > ind.Ma60 && ind.Ma60 > 0)
+		2*boolToFloat(ind.Close > ind.Ma20) +
+		1.5*boolToFloat(ind.Close > ind.Ma60)
+	// prevHigh60 > 0 这个守卫是原实现本身就有的（分母不能为 0），保留
 	if prevHigh60 > 0 {
 		score += clamp((ind.Close/prevHigh60-0.95)/0.08, 0, 1) * 1.5
 	}
-	return round(clamp(score, 0, 15), 4)
+	return round(clamp(score, 0, 15), 2)
 }
 
 // TotalScore 合成总分：`clip(五项和 + 调整分, 0, 100)`。
@@ -508,12 +517,11 @@ func BuildRepairFeatures(bars []Bar) RepairFeatures {
 	}
 
 	var (
-		events     int
-		recovered  int
-		newHighs   int
-		totalDays  float64
-		recoverCnt int
-		lastEvent  = -RepairGap - 1
+		events    int
+		recovered int
+		newHighs  int
+		totalDays float64
+		lastEvent = -RepairGap - 1
 	)
 
 	last := len(bars) - 1
@@ -557,7 +565,11 @@ func BuildRepairFeatures(bars []Bar) RepairFeatures {
 		if recoveredFlag {
 			recovered++
 			totalDays += float64(recoverDay)
-			recoverCnt++
+		} else {
+			// ⚠ **未修复的事件也要计 40 天**（原实现 portfolio_service.py:381：
+			// `recovery_days = float(hits[0]+1) if recovered else float(recovery_window)`）。
+			// 不这么做的话，一个都没修复的股票会得到 avg=0 → speed=1 → 白拿 4 分。
+			totalDays += float64(RepairWindow)
 		}
 		if newHighFlag {
 			newHighs++
@@ -572,9 +584,8 @@ func BuildRepairFeatures(bars []Bar) RepairFeatures {
 	// 注意：这里用的是 0..1 的**原始比例**（未乘 100），与原实现一致
 	out.RecoveryProbability = round(float64(recovered)/float64(events), 4)
 	out.NewHighProbability = round(float64(newHighs)/float64(events), 4)
-	if recoverCnt > 0 {
-		out.AvgRecoveryDays = round(totalDays/float64(recoverCnt), 4)
-	}
+	// **分母是事件数**，不是已修复数（原实现 `np.divide(days_sum, event_count)`）
+	out.AvgRecoveryDays = round(totalDays/float64(events), 4)
 
 	// repair_ability_score = clip(prob*8 + speed*4 + newhigh*3, 0, 15)
 	// speed = clip((40 - avg_days) / 32, 0, 1)

@@ -350,28 +350,47 @@ func TestLowBuyProfitProtect(t *testing.T) {
 	}
 }
 
-// 低吸入场条件
+// 低吸入场条件（对照 portfolio_rotation_logic.py:550-586）
 func TestLowBuyCandidateCondition(t *testing.T) {
 	cfg := baseConfig(StrategyTrendLowBuy)
+	// 全部 10 个价格字段都要 > 0（原实现 min(...) <= 0 直接拒）
 	good := Row{
 		Code: "A", TotalScore: 50,
-		Ma120: 90, Ma250: 80, Ma30: 95, Ma60: 90, Ma20: 100, Ma5: 93,
+		Ma120: 90, Ma250: 80, Ma250Prev: 78, // ma120 > ma250 > ma250_prev
+		Ma30: 95, Ma60: 90, Ma20: 100, Ma5: 93, Ma5Prev: 92, // ma5 > ma5_prev
 		Close: 96, Open: 95, // 阳线；ma30*0.975=92.6 <= 96 <= ma20*1.04=104
-		RelativeStrength20D: 5, DrawdownFromHigh20: -10,
+		RelativeStrength20D: 5, StockReturn20D: 10, DrawdownFromHigh20: -10,
 	}
 	if !isLowBuyCandidate(good, cfg, 0) {
 		t.Error("符合低吸结构的票应通过")
 	}
-	// 均线排列不对
+	// 均线排列不对（ma20 > ma30 不成立）
 	bad := good
-	bad.Ma20 = 90 // ma20 > ma30 不再成立
+	bad.Ma20 = 90
 	if isLowBuyCandidate(bad, cfg, 0) {
 		t.Error("均线排列不对不该通过")
+	}
+	// **ma250 没有上翘**（原实现要求 ma250 > ma250_prev）—— 这是此前漏掉的一条
+	flat := good
+	flat.Ma250Prev = 85
+	if isLowBuyCandidate(flat, cfg, 0) {
+		t.Error("ma250 走平/下弯不该通过")
+	}
+	// **ma5 没有上翘**（原实现要求 ma5 > ma5_prev）
+	declining := good
+	declining.Ma5Prev = 99
+	if isLowBuyCandidate(declining, cfg, 0) {
+		t.Error("ma5 下弯不该通过")
+	}
+	// 任一价格字段为 0 直接拒
+	zero := good
+	zero.Ma250Prev = 0
+	if isLowBuyCandidate(zero, cfg, 0) {
+		t.Error("价格字段为 0 时不该通过")
 	}
 	// 阴线
 	yin := good
 	yin.Close = 94
-	yin.Open = 95
 	if isLowBuyCandidate(yin, cfg, 0) {
 		t.Error("阴线不该通过")
 	}
@@ -389,6 +408,14 @@ func TestLowBuyCandidateCondition(t *testing.T) {
 	}
 	if !isLowBuyCandidate(narrow, cfg, 500) {
 		t.Error("就绪数 <1200 时 -20% 应通过（区间是 -28..-3）")
+	}
+	// **ret20 用 20 日绝对涨幅，不是相对强度** ——
+	// 大盘大涨时相对强度低但绝对涨幅高的票应当被拒
+	absolute := good
+	absolute.StockReturn20D = 30
+	absolute.RelativeStrength20D = 5
+	if isLowBuyCandidate(absolute, cfg, 500) {
+		t.Error("20 日绝对涨幅 >25% 应被拒（不能用相对强度代替）")
 	}
 }
 
@@ -604,31 +631,83 @@ func TestReplacementCountLimited(t *testing.T) {
 
 func TestBreadthGateThresholds(t *testing.T) {
 	// universe < 100 时闸门不启用
-	if !breadthEntryAllowed(nil, StrategyTrendGrowth, 50) {
+	if !breadthEntryAllowed(nil, StrategyTrendGrowth) {
 		t.Error("universe < 100 时闸门不该启用")
 	}
-	// 趋势成长需要 20 只 >= 70 分
-	rows := make([]Row, 10)
-	for i := range rows {
-		rows[i] = cand("X", 80)
+	// 趋势成长需要 20 只 >= 70 分。**分母是全量评分**，不是候选池。
+	universe := func(n int, score float64) []float64 {
+		out := make([]float64, n)
+		for i := range out {
+			out[i] = score
+		}
+		return out
 	}
-	if breadthEntryAllowed(rows, StrategyTrendGrowth, 7000) {
+	// 7000 只全市场，但只有 10 只 >=70
+	few := append(universe(6990, 30), universe(10, 80)...)
+	if breadthEntryAllowed(few, StrategyTrendGrowth) {
 		t.Error("只有 10 只达标（需要 20）闸门应拦截")
 	}
-	ready := make([]Row, 25)
-	for i := range ready {
-		ready[i] = cand("X", 80)
-	}
-	if !breadthEntryAllowed(ready, StrategyTrendGrowth, 7000) {
+	// 25 只达标 → 放行
+	enough := append(universe(6975, 30), universe(25, 80)...)
+	if !breadthEntryAllowed(enough, StrategyTrendGrowth) {
 		t.Error("25 只达标应放行")
 	}
-	// 超跌反弹只需要 5 只且门槛是 62
-	oversoldReady := make([]Row, 6)
-	for i := range oversoldReady {
-		oversoldReady[i] = cand("X", 63)
+	// 全市场不足 100 → 闸门关闭（哪怕一只都不达标）
+	small := universe(50, 10)
+	if !breadthEntryAllowed(small, StrategyTrendGrowth) {
+		t.Error("全市场 <100 时闸门应关闭")
 	}
-	if !breadthEntryAllowed(oversoldReady, StrategyOversold, 7000) {
+	// 超跌反弹只需要 5 只且门槛是 62
+	oversoldReady := append(universe(7000, 30), universe(6, 63)...)
+	if !breadthEntryAllowed(oversoldReady, StrategyOversold) {
 		t.Error("超跌反弹 6 只 >=62 应放行")
+	}
+	oversoldFew := append(universe(7000, 30), universe(3, 63)...)
+	if breadthEntryAllowed(oversoldFew, StrategyOversold) {
+		t.Error("超跌反弹只有 3 只（需要 5）应拦截")
+	}
+}
+
+// 广度闸门必须用全量评分做分母 —— 用候选池（已 head 截断到 80）会让
+// `universe >= 100` 恒不成立、闸门永不启用。
+func TestBreadthUsesUniverseNotCandidatePool(t *testing.T) {
+	cfg := BuildStrategyConfig(StrategyTrendGrowth, StateRange, 3, 10, 3, "")
+
+	// 候选池很小（5 只），但全市场有一万只、其中大量达标 → 应放行
+	var candidates []Row
+	for i := 0; i < 5; i++ {
+		candidates = append(candidates, cand("C"+ftoa(float64(i), 0), 95))
+	}
+	universeScores := make([]float64, 10000)
+	for i := range universeScores {
+		universeScores[i] = 80 // 全部达标
+	}
+
+	plan := BuildRotationPlan(RotationInput{
+		Candidates: candidates, Config: cfg, MarketState: StateRange,
+		MaxStockLimit: 5, UniverseScores: universeScores,
+	})
+	if !plan.EntryAllowed {
+		t.Error("全市场广度充足时应放行（不该因为候选池只有 5 只就关闭闸门）")
+	}
+
+	// 反过来：全市场一万只但几乎都不达标 → 应拦截
+	weak := make([]float64, 10000)
+	for i := range weak {
+		weak[i] = 30
+	}
+	plan = BuildRotationPlan(RotationInput{
+		Candidates: candidates, Config: cfg, MarketState: StateRange,
+		MaxStockLimit: 5, UniverseScores: weak,
+	})
+	if plan.EntryAllowed {
+		t.Error("全市场广度不足时应拦截")
+	}
+	// 拦截后 add 行应被删除
+	for _, row := range plan.Rows {
+		if row.Action == ActionAdd {
+			t.Errorf("广度不足时不该有建仓行: %+v", row)
+		}
 	}
 }
 
@@ -865,6 +944,94 @@ func TestIsWeakSingleLayerStock(t *testing.T) {
 // ---------------------------------------------------------------------------
 // 边界
 // ---------------------------------------------------------------------------
+
+// 建仓必须受额度控制：不能因为候选池有 80 只就生成 80 条 add。
+//
+// 少了这个限制，「一键应用」会真的建出几十个持仓。
+func TestAddQuotaIsEnforced(t *testing.T) {
+	// target=3 → 最多建 3 只；总层数 10 → 层数也不能超
+	cfg := BuildStrategyConfig(StrategyTrendGrowth, StateRange, 3, 10, 3, "")
+
+	// 造 50 只高分候选
+	var candidates []Row
+	for i := 0; i < 50; i++ {
+		row := cand(string(rune('A'+i%26))+string(rune('a'+i/26)), 90)
+		row.Code = "X" + ftoa(float64(i), 0)
+		candidates = append(candidates, row)
+	}
+
+	plan := BuildRotationPlan(RotationInput{
+		Candidates:    candidates,
+		Config:        cfg,
+		MarketState:   StateRange,
+		MaxStockLimit: 5,
+	})
+
+	adds := 0
+	totalLayers := 0
+	for _, row := range plan.Rows {
+		if row.Action == ActionAdd {
+			adds++
+			totalLayers += row.TargetLayers
+		}
+	}
+	if adds > cfg.TargetCount {
+		t.Errorf("建仓数不该超过目标持仓数 %d，实际 %d", cfg.TargetCount, adds)
+	}
+	if totalLayers > cfg.TotalLayers {
+		t.Errorf("建仓层数不该超过总层数 %d，实际 %d", cfg.TotalLayers, totalLayers)
+	}
+	t.Logf("50 只候选 → 建仓 %d 只、共 %d 层（上限 %d 只 / %d 层）",
+		adds, totalLayers, cfg.TargetCount, cfg.TotalLayers)
+}
+
+// 已有持仓占满额度时不该再建仓。
+func TestAddQuotaRespectsExistingHoldings(t *testing.T) {
+	cfg := BuildStrategyConfig(StrategyTrendGrowth, StateRange, 3, 10, 3, "")
+	holdings := []Row{
+		hold("600519", nil), hold("000001", nil), hold("601318", nil),
+	}
+	// 三只都已占满 target=3
+	var candidates []Row
+	for i := 0; i < 20; i++ {
+		row := cand("Y"+ftoa(float64(i), 0), 95)
+		candidates = append(candidates, row)
+	}
+
+	plan := BuildRotationPlan(RotationInput{
+		Holdings: holdings, Candidates: candidates,
+		Config: cfg, MarketState: StateRange, MaxStockLimit: 5,
+	})
+
+	for _, row := range plan.Rows {
+		// 只看**真正的新建仓**（配对换入行在 partial_rotate 下动作名也是 add）
+		if row.Action == ActionAdd && !row.FromPair {
+			t.Errorf("额度已满（3/3）时不该建仓: %+v", row)
+		}
+	}
+}
+
+// 熊市且 allow_new_adds=false 时不该建仓。
+func TestNoNewAddsWhenDisallowed(t *testing.T) {
+	// 超跌反弹在熊市 allow_new_adds=false
+	cfg := BuildStrategyConfig(StrategyOversold, StateBear, 5, 10, 3, "")
+	if cfg.AllowNewAdds {
+		t.Fatal("前提不成立：超跌反弹在熊市应禁止加新仓")
+	}
+	var candidates []Row
+	for i := 0; i < 10; i++ {
+		row := cand("Z"+ftoa(float64(i), 0), 95)
+		candidates = append(candidates, row)
+	}
+	plan := BuildRotationPlan(RotationInput{
+		Candidates: candidates, Config: cfg, MarketState: StateBear, MaxStockLimit: 5,
+	})
+	for _, row := range plan.Rows {
+		if row.Action == ActionAdd {
+			t.Errorf("allow_new_adds=false 时不该建仓: %+v", row)
+		}
+	}
+}
 
 func TestBuildRotationPlanEmpty(t *testing.T) {
 	plan := BuildRotationPlan(RotationInput{

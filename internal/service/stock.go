@@ -157,6 +157,10 @@ type StockService struct {
 	// 最新交易日缓存
 	tradeDateMu sync.Mutex
 	tradeDate   int
+
+	// 行业/概念范围匹配（数据湖成员表，懒加载一次）
+	scopeOnce   sync.Once
+	scopeMatch  *ScopeMatcher
 	tradeDateAt time.Time
 
 	// 按交易日的历史全量快照（条件选股指定日期时用）。

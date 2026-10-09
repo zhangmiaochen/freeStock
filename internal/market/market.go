@@ -13,16 +13,16 @@ type Definition struct {
 
 // 市场定义（顺序即前端展示顺序）。
 const (
-	KeySHMain   = "sh-main"
-	KeySTAR     = "star"
-	KeySZMain   = "sz-main"
-	KeyChiNext  = "chinext"
-	KeyBSE      = "bse"
-	KeySHFund   = "sh-fund"
-	KeySZFund   = "sz-fund"
-	KeyUnknown  = "unknown"
-	GroupStock  = "股票"
-	GroupFund   = "基金"
+	KeySHMain  = "sh-main"
+	KeySTAR    = "star"
+	KeySZMain  = "sz-main"
+	KeyChiNext = "chinext"
+	KeyBSE     = "bse"
+	KeySHFund  = "sh-fund"
+	KeySZFund  = "sz-fund"
+	KeyUnknown = "unknown"
+	GroupStock = "股票"
+	GroupFund  = "基金"
 )
 
 // Definitions 是所有已知市场，按展示顺序排列。

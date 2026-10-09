@@ -32,6 +32,37 @@ export function AddPosition(portfolioID: string, $in: portfolio$0.PositionInput)
 }
 
 /**
+ * ApplyRotation 生成建议并**一键应用**到持仓。
+ * 
+ * 流程（对齐参考实现 portfolio_service.apply_rotation）：
+ *  1. 组合类型不允许应用时直接拒绝（手动组合）
+ *  2. 重建当日建议
+ *  3. 过滤出可执行的动作
+ *  4. 逐股算目标层数（**硬编码 clamp 到 3**）
+ *  5. 写流水 + 整表重写持仓
+ * 
+ * 与参考实现的差异：参考实现在应用后还会**再重建一次建议并覆盖四张快照表**。
+ * 本项目目前不落快照表（建议是实时算的），所以省掉这一步；等需要历史建议
+ * 追溯时再补。
+ */
+export function ApplyRotation(portfolioID: string): $CancellablePromise<$models.ApplyResult | null> {
+    return $Call.ByID(4242904346, portfolioID).then(($result: any) => {
+        return $$createType3($result);
+    });
+}
+
+/**
+ * BuildPlan 为组合生成真实的调仓建议。
+ * 
+ * 需要该策略的评分已经物化过（先调 RefreshStrength）。
+ */
+export function BuildPlan(portfolioID: string): $CancellablePromise<$models.PlanResult | null> {
+    return $Call.ByID(98111483, portfolioID).then(($result: any) => {
+        return $$createType5($result);
+    });
+}
+
+/**
  * Close 关闭组合库。
  */
 export function Close(): $CancellablePromise<void> {
@@ -43,7 +74,7 @@ export function Close(): $CancellablePromise<void> {
  */
 export function CreatePortfolio($in: portfolio$0.PortfolioInput): $CancellablePromise<portfolio$0.Portfolio | null> {
     return $Call.ByID(3176039300, $in).then(($result: any) => {
-        return $$createType3($result);
+        return $$createType7($result);
     });
 }
 
@@ -73,7 +104,7 @@ export function GetDatabasePath(): $CancellablePromise<string> {
  */
 export function GetPortfolioDetail(id: string): $CancellablePromise<portfolio$0.Detail | null> {
     return $Call.ByID(3155250749, id).then(($result: any) => {
-        return $$createType5($result);
+        return $$createType9($result);
     });
 }
 
@@ -82,7 +113,7 @@ export function GetPortfolioDetail(id: string): $CancellablePromise<portfolio$0.
  */
 export function GetPortfolioOptions(): $CancellablePromise<$models.PortfolioOptions | null> {
     return $Call.ByID(2468696434).then(($result: any) => {
-        return $$createType7($result);
+        return $$createType11($result);
     });
 }
 
@@ -91,22 +122,33 @@ export function GetPortfolioOptions(): $CancellablePromise<$models.PortfolioOpti
  */
 export function GetPortfolioOverview(): $CancellablePromise<portfolio$0.Overview | null> {
     return $Call.ByID(357445967).then(($result: any) => {
-        return $$createType9($result);
+        return $$createType13($result);
     });
 }
 
 /**
- * LatestClose 实现 portfolio.PriceSource：返回这批股票的最新收盘价。
- * 
- * 原项目是从"最新评分日"的 stock_strength_history.close_price 取现价。
- * 本项目阶段一没有评分表，改为取**最新交易日的日 K 收盘价** ——
- * 语义一致（都是最近一个有数据的交易日的收盘价）。
- * 
- * 走股票列表的缓存，所以不会为几只持仓单独发请求。
+ * GetStrengthSummary 返回评分物化状态。
  */
-export function LatestClose(codes: string[]): $CancellablePromise<{ [_ in string]?: portfolio$0.PricePoint }> {
-    return $Call.ByID(898950825, codes).then(($result: any) => {
-        return $$createType11($result);
+export function GetStrengthSummary(strategyID: string): $CancellablePromise<$models.StrengthSummary | null> {
+    return $Call.ByID(1979789275, strategyID).then(($result: any) => {
+        return $$createType15($result);
+    });
+}
+
+/**
+ * LatestClose 实现 portfolio.PriceSource。
+ * 
+ * **优先取"该策略最新评分日"的收盘价**（原实现 portfolio_service.py:3199），
+ * 与建议页同源 —— 两处取不同来源会让用户看到"详情页 +8%、系统按 +3% 判定"。
+ * 
+ * 评分表里没有该股时**不返回**（调用方按 0 处理，与原实现的左连接落空一致）。
+ * 
+ * 唯一的偏离：该策略**完全没有评分数据**时退回到最新交易日收盘价。
+ * 否则详情页在首次刷新评分之前一个价格都显示不出来（原实现会显示 0）。
+ */
+export function LatestClose(codes: string[], strategyID: string): $CancellablePromise<{ [_ in string]?: portfolio$0.PricePoint }> {
+    return $Call.ByID(898950825, codes, strategyID).then(($result: any) => {
+        return $$createType17($result);
     });
 }
 
@@ -115,7 +157,24 @@ export function LatestClose(codes: string[]): $CancellablePromise<{ [_ in string
  */
 export function ListPortfolios(): $CancellablePromise<portfolio$0.Portfolio[]> {
     return $Call.ByID(4287571721).then(($result: any) => {
-        return $$createType12($result);
+        return $$createType18($result);
+    });
+}
+
+/**
+ * RefreshStrength 给指定策略评分并把结果物化。
+ * 
+ * limit > 0 时只评前 limit 只（保护数据源；全市场 7000+ 次请求要几分钟）。
+ * 建议日常用 800~1500，够选候选池了。
+ * limit > 0 时只评股票列表的前 limit 只（保护数据源；全市场 7000+ 次请求要几分钟）。
+ * 建议日常用 800~1500，够选候选池了。
+ * 
+ * **所有组合的持仓代码一定会被评上**，哪怕不在前 limit 只里 ——
+ * 否则持仓没有评分，轮动建议就永远是空的。
+ */
+export function RefreshStrength(strategyID: string, limit: number): $CancellablePromise<$models.RefreshResult | null> {
+    return $Call.ByID(3438224358, strategyID, limit).then(($result: any) => {
+        return $$createType20($result);
     });
 }
 
@@ -124,21 +183,29 @@ export function ListPortfolios(): $CancellablePromise<portfolio$0.Portfolio[]> {
  */
 export function UpdatePortfolio(id: string, $in: portfolio$0.PortfolioInput): $CancellablePromise<portfolio$0.Portfolio | null> {
     return $Call.ByID(30553471, id, $in).then(($result: any) => {
-        return $$createType3($result);
+        return $$createType7($result);
     });
 }
 
 // Private type creation functions
 const $$createType0 = portfolio$0.Position.createFrom;
 const $$createType1 = $Create.Nullable($$createType0);
-const $$createType2 = portfolio$0.Portfolio.createFrom;
+const $$createType2 = $models.ApplyResult.createFrom;
 const $$createType3 = $Create.Nullable($$createType2);
-const $$createType4 = portfolio$0.Detail.createFrom;
+const $$createType4 = $models.PlanResult.createFrom;
 const $$createType5 = $Create.Nullable($$createType4);
-const $$createType6 = $models.PortfolioOptions.createFrom;
+const $$createType6 = portfolio$0.Portfolio.createFrom;
 const $$createType7 = $Create.Nullable($$createType6);
-const $$createType8 = portfolio$0.Overview.createFrom;
+const $$createType8 = portfolio$0.Detail.createFrom;
 const $$createType9 = $Create.Nullable($$createType8);
-const $$createType10 = portfolio$0.PricePoint.createFrom;
-const $$createType11 = $Create.Map($Create.Any, $$createType10);
-const $$createType12 = $Create.Array($$createType2);
+const $$createType10 = $models.PortfolioOptions.createFrom;
+const $$createType11 = $Create.Nullable($$createType10);
+const $$createType12 = portfolio$0.Overview.createFrom;
+const $$createType13 = $Create.Nullable($$createType12);
+const $$createType14 = $models.StrengthSummary.createFrom;
+const $$createType15 = $Create.Nullable($$createType14);
+const $$createType16 = portfolio$0.PricePoint.createFrom;
+const $$createType17 = $Create.Map($Create.Any, $$createType16);
+const $$createType18 = $Create.Array($$createType6);
+const $$createType19 = $models.RefreshResult.createFrom;
+const $$createType20 = $Create.Nullable($$createType19);
