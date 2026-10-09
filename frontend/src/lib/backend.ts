@@ -241,9 +241,15 @@ export const api = {
       PortfolioService.DeletePosition(portfolioID, code) as Promise<void>,
 
     // ---- 阶段二：评分与轮动建议 ----
-    /** 刷新某策略的全市场评分（物化到组合库，耗时较长） */
-    refreshStrength: (strategyId: string, limit: number) =>
-      PortfolioService.RefreshStrength(strategyId, limit) as Promise<RefreshResult>,
+    /**
+     * 刷新某策略的评分。
+     *
+     * `force=false` 是**增量刷新**：已算过的代码不再重算
+     *（评分只取决于 代码 + 交易日 + 策略，重算值完全相同，
+     *  但每只都省掉一次 320 个交易日的行情拉取）。
+     */
+    refreshStrength: (strategyId: string, limit: number, force = false) =>
+      PortfolioService.RefreshStrength(strategyId, limit, force) as Promise<RefreshResult>,
     getStrengthSummary: (strategyId: string) =>
       PortfolioService.GetStrengthSummary(strategyId) as Promise<StrengthSummary>,
     /** 生成调仓建议 */

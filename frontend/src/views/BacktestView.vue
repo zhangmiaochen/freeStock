@@ -7,7 +7,7 @@
  *   ② **跑回测**：引擎逐日重放决策，信号在 T 日收盘生成、T+1 开盘执行
  *   ③ **看结果**：净值曲线 + 成交明细 + 绩效指标
  */
-import { computed, onMounted, ref } from "vue";
+import { computed, onActivated, onMounted, ref } from "vue";
 import { api } from "@/lib/backend";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -97,8 +97,11 @@ const warning = computed(() => {
 async function loadPortfolios() {
   const list = (await api.portfolio.list()) as unknown as PortfolioLite[];
   portfolios.value = list ?? [];
-  if (!portfolioId.value && portfolios.value.length > 0) {
-    portfolioId.value = portfolios.value[0]!.id;
+  // 保持用户的选择；但那只组合已被删除时回落到第一只 ——
+  // 否则下拉框会停在一个不存在的 id 上，"跑回测"必然报错
+  const stillExists = portfolios.value.some((p) => p.id === portfolioId.value);
+  if (!stillExists) {
+    portfolioId.value = portfolios.value[0]?.id ?? "";
   }
 }
 
@@ -198,11 +201,28 @@ const chart = computed(() => {
   return { path, width, height, min, max };
 });
 
-onMounted(async () => {
-  defaultRange();
+// ⚠ App.vue 用了 `<KeepAlive>`，页面切走再切回来**不会重新 mount** ——
+// 只用 onMounted 的话，在组合管理页改了组合（新建/改名/删除）再切回来，
+// 这里的组合列表还是旧的。
+//
+// onActivated 在 KeepAlive 下每次重新显示都会触发（首次挂载也触发），
+// 所以真正的刷新放在这里。
+let rangeInitialized = false;
+
+async function refreshOnShow() {
+  // 回测区间只在**第一次**进入时给默认值 ——
+  // 否则用户填好的区间会在每次切回来时被重置
+  if (!rangeInitialized) {
+    defaultRange();
+    rangeInitialized = true;
+  }
   await loadPortfolios();
   await loadRuns();
-});
+}
+
+onMounted(refreshOnShow); // 非 KeepAlive 场景（比如单独渲染/测试）
+onActivated(refreshOnShow); // KeepAlive 下每次切回来
+
 </script>
 
 <template>

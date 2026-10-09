@@ -182,24 +182,36 @@ async function loadPlan() {
 }
 
 /** 刷新全市场评分并物化 */
-async function refreshStrength() {
+async function refreshStrength(force = false) {
   if (!current.value) return;
   refreshing.value = true;
   planError.value = "";
   applyResult.value = "";
   try {
+    // 第三个参数 force=false → **增量刷新**：已算过的代码不再重算
+    //（评分只取决于 代码 + 交易日 + 策略，重算值完全相同，
+    //  但每只都会省掉一次 320 个交易日的行情拉取）
     const result = await api.portfolio.refreshStrength(
       current.value.portfolio.strategyId,
       refreshLimit.value,
+      force,
     );
     // 注意顺序：loadPlan 会清空提示，所以结果消息必须**在它之后**设置，
     // 否则用户看不到"评分完成"的反馈
     await loadStrength();
     await loadPlan();
-    applyResult.value =
-      `评分完成：${result.tradeDate} 物化 ${result.saved} 只，` +
-      `市场状态 ${result.marketState.marketStateLabel}` +
-      (result.skipped > 0 ? `（跳过 ${result.skipped} 只数据不足）` : "");
+    if (result.skippedFromCache) {
+      applyResult.value =
+        `${result.tradeDate} 的评分已是最新（${result.total} 只），本次未重算。` +
+        `数据有修订需要覆盖时，点「全量重算」。`;
+    } else {
+      applyResult.value =
+        `评分完成：${result.tradeDate} 新算 ${result.saved} 只` +
+        (result.reused > 0 ? `、复用已有 ${result.reused} 只` : "") +
+        `，共 ${result.total} 只，` +
+        `市场状态 ${result.marketState.marketStateLabel}` +
+        (result.skipped > 0 ? `（跳过 ${result.skipped} 只数据不足）` : "");
+    }
   } catch (err) {
     planError.value = errorMessage(err);
   } finally {
@@ -692,10 +704,20 @@ onMounted(async () => {
                     <option :value="0">全市场（很慢）</option>
                   </select>
                 </label>
-                <Button size="xs" variant="outline" :disabled="refreshing" @click="refreshStrength">
+                <Button size="xs" variant="outline" :disabled="refreshing" @click="refreshStrength(false)">
                   <LoaderCircle v-if="refreshing" class="animate-spin" />
                   <RefreshCw v-else />
                   {{ refreshing ? "评分中…" : "刷新评分" }}
+                </Button>
+                <Button
+                  size="xs"
+                  variant="ghost"
+                  :disabled="refreshing"
+                  title="忽略已有评分，全部重算（数据修订后需要覆盖时用）"
+                  @click="refreshStrength(true)"
+                >
+                  <RefreshCw v-if="!refreshing" />
+                  全量重算
                 </Button>
                 <Button size="xs" variant="outline" :disabled="planLoading" @click="loadPlan">
                   <LoaderCircle v-if="planLoading" class="animate-spin" />

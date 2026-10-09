@@ -110,6 +110,42 @@ CREATE TABLE IF NOT EXISTS stock_strength (
 CREATE INDEX IF NOT EXISTS idx_strength_lookup ON stock_strength(trade_date, strategy_id, total_score DESC);
 `
 
+// StrengthCodes 返回某 (交易日, 策略) 下**已有评分**的代码集合。
+//
+// 用于**增量刷新**：已经算过的代码不必重算 —— 结果完全相同，
+// 但省掉一次 320 个交易日的行情拉取（那是刷新评分的主要成本）。
+func (s *Store) StrengthCodes(tradeDate int64, strategyID string) (map[string]bool, error) {
+	rows, err := s.db.Query(
+		`SELECT ts_code FROM stock_strength WHERE trade_date=? AND strategy_id=?`,
+		tradeDate, strategyID)
+	if err != nil {
+		return nil, fmt.Errorf("读取已有评分代码失败：%w", err)
+	}
+	defer rows.Close()
+
+	out := map[string]bool{}
+	for rows.Next() {
+		var code string
+		if err := rows.Scan(&code); err != nil {
+			return nil, fmt.Errorf("扫描已有评分代码失败：%w", err)
+		}
+		out[code] = true
+	}
+	return out, rows.Err()
+}
+
+// StrengthCount 返回某 (交易日, 策略) 已落库的评分数（增量刷新后用来报告总量）。
+func (s *Store) StrengthCount(tradeDate int64, strategyID string) (int, error) {
+	var count int
+	err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM stock_strength WHERE trade_date=? AND strategy_id=?`,
+		tradeDate, strategyID).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("统计评分条数失败：%w", err)
+	}
+	return count, nil
+}
+
 // SaveStrength 覆盖写入某日某策略的评分。
 //
 // 先删后插：一次刷新的结果应当**完整替换**该 (日期, 策略) 的旧数据，
@@ -205,19 +241,6 @@ func (s *Store) StrengthDates(strategyID string) ([]int64, error) {
 		out = append(out, date)
 	}
 	return out, rows.Err()
-}
-
-// StrengthCount 返回某日某策略的评分条数。
-func (s *Store) StrengthCount(tradeDate int64, strategyID string) (int, error) {
-	var count int
-	err := s.db.QueryRow(
-		`SELECT COUNT(*) FROM stock_strength WHERE trade_date=? AND strategy_id=?`,
-		tradeDate, strategyID,
-	).Scan(&count)
-	if err != nil {
-		return 0, fmt.Errorf("统计评分失败：%w", err)
-	}
-	return count, nil
 }
 
 // strengthSelect 是评分的读取列（顺序与 scanStrength 对应）。

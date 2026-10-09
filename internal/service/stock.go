@@ -399,24 +399,41 @@ func (s *StockService) SetDataSource(kind, rawURL string) (SourceStatus, error) 
 	}
 
 	if kind == config.KindCnLake {
-		// 指定了根目录就记住它
-		if root := strings.TrimSpace(rawURL); root != "" && s.cfg != nil {
-			s.cfg.SetCnLakeRoot(root)
-		}
-		s.lakeMu.Lock()
-		s.lake = nil // 让 lakeHandle 按新根目录重新探测
-		s.lakeMu.Unlock()
+		root := strings.TrimSpace(rawURL)
 
-		lake := s.lakeHandle()
-		if !lakeCanServeQuotes(lake) {
+		// ⚠ **先探测校验、通过之后才落库换句柄。**
+		//
+		// 之前是「先把新根目录写进配置 → 再清掉已打开的 lake → 然后才校验」，
+		// 校验失败直接 return。于是：
+		//   ① 配置被留在**坏目录**上（`SetCnLakeRoot` 已写盘）
+		//   ② 原来能用的 lake 句柄也被清掉了
+		// → 所有依赖数据湖的功能（财报/股本/股东户数/概念范围/指数闸门）全废，
+		//   而且前端把"当前源"标灰，**用户连切回去都做不到**。
+		//
+		// 现在用一个**临时**的 Lake 去探测，校验通过才动配置和句柄。
+		probe := s.lakeHandle()
+		if root != "" && probe.Root() != root {
+			probe = cnlake.Open(root)
+		}
+		if !lakeCanServeQuotes(probe) {
 			// 不切换：没有日线的话列表会是一片空白，不如直接说清楚。
 			// 注意财务数据不受影响 —— 它们本来就一直从数据湖读。
+			// **且此时配置与已有句柄都没被动过**，用户可以直接换别的源。
 			return status, fmt.Errorf(
 				"数据湖缺少 daily_bars（日线），无法作为行情源；" +
 					"财报 / 股本结构 / 股东户数等仍会继续从数据湖读取。" +
 					"请先让 cnequity 的 init 完成日线回填")
 		}
 
+		// ---- 校验通过，这时才真正换掉 ----
+		if root != "" && s.cfg != nil {
+			s.cfg.SetCnLakeRoot(root)
+		}
+		s.lakeMu.Lock()
+		s.lake = probe
+		s.lakeMu.Unlock()
+
+		lake := probe
 		s.switchProvider(NewLakeProvider(lake), config.DataSource{
 			Key:  "cnlake",
 			Name: "本地数据湖（cnequity）",

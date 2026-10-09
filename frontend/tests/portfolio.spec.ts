@@ -202,6 +202,8 @@ beforeEach(() => {
   });
   mocks.refreshStrength.mockResolvedValue({
     tradeDate: 20261008, saved: 302, skipped: 0, limit: 800,
+    // 增量刷新新增的三个字段（见 RefreshResult）
+    reused: 0, total: 302, skippedFromCache: false,
     marketState: { marketState: "bear", marketStateLabel: "熊市/风险释放", bullScore: 45, bearScore: 92, proxyRet20: -3.49, days: 80 },
     unavailable: [], elapsed: "10s",
   });
@@ -481,11 +483,36 @@ describe("组合管理页面", () => {
     await button(wrapper, "刷新评分")!.trigger("click");
     await vi.waitFor(() => expect(mocks.refreshStrength).toHaveBeenCalled());
 
-    const [strategyId, limit] = mocks.refreshStrength.mock.calls[0];
+    const [strategyId, limit, force] = mocks.refreshStrength.mock.calls[0];
     expect(strategyId).toBe("trend_growth");
     expect(limit).toBe(800); // 默认档
+    // 「刷新评分」是**增量**（force=false），不重算已算过的
+    expect(force).toBe(false);
     // 结果提示
-    await vi.waitFor(() => expect(wrapper.text()).toContain("物化 302 只"));
+    await vi.waitFor(() => expect(wrapper.text()).toContain("新算 302 只"));
+    expect(wrapper.text()).toContain("共 302 只");
+  });
+
+  it("「全量重算」传 force=true", async () => {
+    const { wrapper } = await mountPage();
+    await button(wrapper, "全量重算")!.trigger("click");
+    await vi.waitFor(() => expect(mocks.refreshStrength).toHaveBeenCalled());
+
+    const [, , force] = mocks.refreshStrength.mock.calls[0];
+    expect(force).toBe(true);
+  });
+
+  it("全部命中缓存时提示未重算", async () => {
+    mocks.refreshStrength.mockResolvedValue({
+      tradeDate: 20261008, saved: 0, skipped: 0, limit: 800,
+      reused: 302, total: 302, skippedFromCache: true,
+      marketState: { marketState: "bear", marketStateLabel: "熊市/风险释放", bullScore: 45, bearScore: 92, proxyRet20: -3.49, days: 80 },
+      unavailable: [], elapsed: "0s",
+    });
+    const { wrapper } = await mountPage();
+    await button(wrapper, "刷新评分")!.trigger("click");
+    await vi.waitFor(() => expect(wrapper.text()).toContain("已是最新"));
+    expect(wrapper.text()).toContain("未重算");
   });
 
   it("生成建议后渲染面板", async () => {

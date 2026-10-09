@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onActivated, onMounted, ref } from "vue";
 import {
   Check,
   Database,
@@ -34,7 +34,12 @@ const hasStatus = computed(() => status.value !== null);
 
 async function loadSources() {
   try {
-    sources.value = await api.getDataSources();
+    const list = await api.getDataSources();
+    // 只在拿到有效列表时替换 —— 出错时保留旧列表，
+    // 否则界面会变成一个空页面，用户连"换一个源"都点不到
+    if (Array.isArray(list) && list.length > 0) {
+      sources.value = list;
+    }
     current.value = await api.getCurrentDataSource();
     customURL.value = current.value?.url ?? "";
     configPath.value = (await api.getConfigPath()) ?? "";
@@ -42,6 +47,17 @@ async function loadSources() {
     message.value = errorMessage(err);
   }
 }
+
+// ⚠ App.vue 用了 `<KeepAlive>`：页面切走再切回来**不会重新 mount**。
+//
+// 这里必须做两件事：
+//  1. **清掉可能残留的 busy** —— 上一次操作如果在加载全市场列表的过程中
+//     被切走，busy 会一直停在 "switch"，回来时按钮就是灰的、点不动
+//  2. 重新拉一次数据源列表（配置可能在别处被改过）
+onActivated(() => {
+  busy.value = "";
+  void loadSources();
+});
 
 onMounted(loadSources);
 
@@ -64,16 +80,35 @@ async function useSource(kind: string, url: string) {
   try {
     status.value = await api.setDataSource(kind, url);
     message.value = `已切换到 ${status.value.url}（${status.value.message}）`;
+
+    // ★ 切换**已经成功**，这里就把按钮放开。
+    //
+    // 后面 `loadUniverse` 要拉全市场 7000+ 只，很慢；
+    // 把它算进 busy 的话，用户会以为"切换卡住了"、按钮一直点不动。
+    // 列表刷新放到后台跑，失败也只提示、不回滚切换结果。
+    busy.value = "";
     await loadSources();
-    // 数据源变了，清空股票列表让用户重新加载
+
     store.universe = null;
-    await store.loadUniverse(true);
-    await store.loadCategories();
+    void (async () => {
+      try {
+        await store.loadUniverse(true);
+        await store.loadCategories();
+      } catch (err) {
+        message.value = `${message.value}（股票列表刷新失败：${errorMessage(err)}）`;
+      }
+    })();
+    return;
   } catch (err) {
-    // 切换失败时后端会给出具体原因（例如数据湖缺少日线），原样展示
+    // 切换失败时后端会给出具体原因（例如数据湖缺少日线），原样展示。
+    //
+    // ⚠ 切换失败**不改动任何已有配置**（后端已保证先校验后落库），
+    // 因此这里刷新列表后其它数据源照常可选 —— 不会被锁在当前源上。
     message.value = errorMessage(err);
     await loadSources();
   } finally {
+    // 成功分支已经提前清过；这里兜住失败/异常路径，
+    // 保证按钮**任何情况下都能恢复可点**
     busy.value = "";
   }
 }
@@ -164,10 +199,10 @@ function kindLabel(kind: string) {
             <Button
               size="sm"
               variant="outline"
-              :disabled="source.current || busy !== ''"
+              :disabled="busy !== ''"
               @click="useSource(source.kind, source.url)"
             >
-              切换
+              {{ source.current ? "重新应用" : "切换" }}
             </Button>
           </div>
         </div>

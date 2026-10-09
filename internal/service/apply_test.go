@@ -53,7 +53,7 @@ func TestApplyRotationEndToEnd(t *testing.T) {
 		t.Fatalf("应用前应有 3 个持仓，实际 %d", len(before.Positions))
 	}
 
-	if _, err := svc.RefreshStrength(score.StrategyTrendGrowth, 300); err != nil {
+	if _, err := svc.RefreshStrength(score.StrategyTrendGrowth, 300, true); err != nil {
 		t.Fatalf("刷新评分失败: %v", err)
 	}
 

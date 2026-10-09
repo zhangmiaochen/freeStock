@@ -41,7 +41,7 @@ func TestBuildPlanEndToEnd(t *testing.T) {
 	}
 
 	// ---- 刷新评分 ----
-	refresh, err := svc.RefreshStrength(score.StrategyTrendGrowth, 300)
+	refresh, err := svc.RefreshStrength(score.StrategyTrendGrowth, 300, true)
 	if err != nil {
 		t.Fatalf("刷新评分失败: %v", err)
 	}
@@ -207,7 +207,7 @@ func TestStrengthSummary(t *testing.T) {
 		t.Errorf("没刷新过时应为空: %+v", summary)
 	}
 
-	if _, err := svc.RefreshStrength(score.StrategyTrendGrowth, 150); err != nil {
+	if _, err := svc.RefreshStrength(score.StrategyTrendGrowth, 150, true); err != nil {
 		t.Fatalf("刷新失败: %v", err)
 	}
 	summary, err = svc.GetStrengthSummary(score.StrategyTrendGrowth)
@@ -236,7 +236,7 @@ func TestStrengthPersistsAcrossReopen(t *testing.T) {
 	svc, _ := newPortfolioService(t)
 	requireLocalServer(t, svc.stock)
 
-	if _, err := svc.RefreshStrength(score.StrategyTrendGrowth, 120); err != nil {
+	if _, err := svc.RefreshStrength(score.StrategyTrendGrowth, 120, true); err != nil {
 		t.Fatalf("刷新失败: %v", err)
 	}
 	before, err := svc.GetStrengthSummary(score.StrategyTrendGrowth)

@@ -3,9 +3,11 @@ package cnlake
 import (
 	"fmt"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/parquet-go/parquet-go"
 )
@@ -243,20 +245,90 @@ func (l *Lake) FilesForYears(name string, startYear, endYear int) []string {
 // ---------------------------------------------------------------------------
 
 // readTyped 按列裁剪读取一组 parquet 文件，keep 为 nil 时全取。
+//
+// **并发读**：数据集的文件数很多（`daily_bars` 上万、`financial_statement_items` 两百多），
+// 而且每读一个文件都要 `os.Open` + 解析 parquet footer —— 串行跑满一核、
+// 磁盘却闲着。这里用有界工作池并发读。
+//
+// ⚠ **结果按文件顺序合并**，与串行版本逐字节一致 ——
+// 有些数据集（如 `trading_calendar`）依赖顺序，不能让并发打乱它。
 func readTyped[T any](files []string, keep func(*T) bool) ([]T, error) {
-	out := make([]T, 0, 1024)
-	for _, path := range files {
-		handle, err := openParquet(path)
+	if len(files) == 0 {
+		return nil, nil
+	}
+	// 单文件没必要起协程
+	if len(files) == 1 {
+		out := make([]T, 0, 1024)
+		handle, err := openParquet(files[0])
 		if err != nil {
 			return out, err
 		}
+		defer handle.Close()
 		if err := readTypedFile(handle, keep, &out); err != nil {
-			handle.Close()
 			return out, err
 		}
-		handle.Close()
+		return out, nil
+	}
+
+	// 每个文件写自己的槽位，最后按序拼接 —— 不用锁，也不打乱顺序
+	perFile := make([][]T, len(files))
+	errs := make([]error, len(files))
+
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	for w := 0; w < lakeReadWorkers(len(files)); w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range jobs {
+				handle, err := openParquet(files[i])
+				if err != nil {
+					errs[i] = err
+					continue
+				}
+				rows := make([]T, 0, 256)
+				if err := readTypedFile(handle, keep, &rows); err != nil {
+					handle.Close()
+					errs[i] = err
+					continue
+				}
+				handle.Close()
+				perFile[i] = rows
+			}
+		}()
+	}
+	for i := range files {
+		jobs <- i
+	}
+	close(jobs)
+	wg.Wait()
+
+	out := make([]T, 0, 1024)
+	for i := range files {
+		if errs[i] != nil {
+			return out, errs[i]
+		}
+		out = append(out, perFile[i]...)
 	}
 	return out, nil
+}
+
+// lakeReadWorkers 按文件数与 CPU 数决定并发度。
+//
+// 上限设 8：这是**磁盘 IO 密集**的活，再多的协程只会互相抢 IO，
+// 而且每个文件都要读 footer，随机寻道会变多。
+func lakeReadWorkers(fileCount int) int {
+	workers := runtime.NumCPU()
+	if workers > 8 {
+		workers = 8
+	}
+	if workers > fileCount {
+		workers = fileCount
+	}
+	if workers < 1 {
+		workers = 1
+	}
+	return workers
 }
 
 func readTypedFile[T any](handle *parquetHandle, keep func(*T) bool, out *[]T) error {

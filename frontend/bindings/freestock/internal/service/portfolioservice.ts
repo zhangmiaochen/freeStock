@@ -245,9 +245,16 @@ export function RefreshBackfill(strategyID: string, startDate: number, endDate: 
  * 
  * **所有组合的持仓代码一定会被评上**，哪怕不在前 limit 只里 ——
  * 否则持仓没有评分，轮动建议就永远是空的。
+ * RefreshStrength 刷新评分。
+ * 
+ * **增量刷新**：已经算过的代码不再重算 —— 评分结果只取决于 (代码, 交易日, 策略)，
+ * 重算出来的值完全相同，但每只都会省掉一次 320 个交易日的行情拉取
+ * （7546 只就是 7546 次 HTTP 往返，这是刷新的主要成本）。
+ * 
+ * force 为 true 时按全量重算（数据修订后需要覆盖时用）。
  */
-export function RefreshStrength(strategyID: string, limit: number): $CancellablePromise<$models.RefreshResult | null> {
-    return $Call.ByID(3438224358, strategyID, limit).then(($result: any) => {
+export function RefreshStrength(strategyID: string, limit: number, force: boolean): $CancellablePromise<$models.RefreshResult | null> {
+    return $Call.ByID(3438224358, strategyID, limit, force).then(($result: any) => {
         return $$createType32($result);
     });
 }

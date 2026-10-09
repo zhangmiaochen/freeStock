@@ -30,6 +30,12 @@ type RefreshResult struct {
 	MarketState score.MarketState `json:"marketState"`
 	Unavailable []string          `json:"unavailable"`
 	Elapsed     string            `json:"elapsed"`
+	// Reused 是本次**复用已有评分、没有重算**的只数
+	Reused int `json:"reused"`
+	// Total 是该 (交易日, 策略) 现在落库的总只数（新增 + 复用）
+	Total int `json:"total"`
+	// SkippedFromCache 为 true 表示"全部已算过，本次一次行情都没拉"
+	SkippedFromCache bool `json:"skippedFromCache"`
 }
 
 // RefreshStrength 给指定策略评分并把结果物化。
@@ -41,7 +47,14 @@ type RefreshResult struct {
 //
 // **所有组合的持仓代码一定会被评上**，哪怕不在前 limit 只里 ——
 // 否则持仓没有评分，轮动建议就永远是空的。
-func (s *PortfolioService) RefreshStrength(strategyID string, limit int) (*RefreshResult, error) {
+// RefreshStrength 刷新评分。
+//
+// **增量刷新**：已经算过的代码不再重算 —— 评分结果只取决于 (代码, 交易日, 策略)，
+// 重算出来的值完全相同，但每只都会省掉一次 320 个交易日的行情拉取
+// （7546 只就是 7546 次 HTTP 往返，这是刷新的主要成本）。
+//
+// force 为 true 时按全量重算（数据修订后需要覆盖时用）。
+func (s *PortfolioService) RefreshStrength(strategyID string, limit int, force bool) (*RefreshResult, error) {
 	store, err := s.db()
 	if err != nil {
 		return nil, err
@@ -55,6 +68,52 @@ func (s *PortfolioService) RefreshStrength(strategyID string, limit int) (*Refre
 		return nil, err
 	}
 
+	// 先解析评分日 —— 增量判断需要知道"算的是哪一天"
+	tradeDate := 0
+	if provider, _ := s.stock.snapshot(); provider != nil {
+		if resolved, err := provider.LatestTradeDate(context.Background()); err == nil {
+			tradeDate = resolved
+		}
+	}
+
+	reused := 0
+	if !force && tradeDate > 0 {
+		existing, err := store.StrengthCodes(int64(tradeDate), strategyID)
+		if err != nil {
+			// 读不到已有代码不该让刷新失败 —— 退化成全量重算即可
+			slog.Warn("读取已有评分失败，退化为全量重算", "err", err)
+		} else if len(existing) > 0 {
+			missing := make([]string, 0, len(codes))
+			for _, code := range codes {
+				if existing[portfolio.BareCode(code)] {
+					reused++
+					continue
+				}
+				missing = append(missing, code)
+			}
+			codes = missing
+		}
+	}
+
+	// 全部已算过：直接回已有结果，**一次行情都不拉**
+	if len(codes) == 0 {
+		state, _ := store.LoadMarketState(int64(tradeDate))
+		total, _ := store.StrengthCount(int64(tradeDate), strategyID)
+		slog.Info("评分已是最新，跳过重算",
+			"tradeDate", tradeDate, "strategy", strategyID, "reused", reused)
+		return &RefreshResult{
+			TradeDate: tradeDate, Saved: 0, Reused: reused, Total: total,
+			Limit: limit,
+			// 从已落库的市场状态回填，保证界面拿到的结构完整
+			MarketState: score.MarketState{
+				State: state.State, Label: state.Label,
+				BullScore: state.BullScore, BearScore: state.BearScore,
+				ProxyRet20: state.ProxyRet20, Days: state.Days,
+			},
+			SkippedFromCache: true,
+		}, nil
+	}
+
 	scoring := NewScoringService(s.stock)
 	result, err := scoring.ScoreStocks(codes, 0, 0, strategyID)
 	if err != nil {
@@ -65,9 +124,13 @@ func (s *PortfolioService) RefreshStrength(strategyID string, limit int) (*Refre
 	if err := s.saveScoringResult(store, result, strategyID); err != nil {
 		return nil, err
 	}
-	slog.Info("本次评分含持仓", "heldIncluded", heldCount)
+	total, _ := store.StrengthCount(int64(result.TradeDate), strategyID)
+	slog.Info("评分完成",
+		"tradeDate", result.TradeDate, "新增", len(result.Rows),
+		"复用已有", reused, "含持仓", heldCount)
 	return &RefreshResult{
 		TradeDate: result.TradeDate, Saved: len(result.Rows), Skipped: result.Skipped,
+		Reused: reused, Total: total,
 		Limit: limit, MarketState: result.MarketState,
 		Unavailable: result.Unavailable,
 	}, nil

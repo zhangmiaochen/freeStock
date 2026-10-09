@@ -2209,6 +2209,21 @@ export class RefreshResult {
     "unavailable": string[];
     "elapsed": string;
 
+    /**
+     * Reused 是本次**复用已有评分、没有重算**的只数
+     */
+    "reused": number;
+
+    /**
+     * Total 是该 (交易日, 策略) 现在落库的总只数（新增 + 复用）
+     */
+    "total": number;
+
+    /**
+     * SkippedFromCache 为 true 表示"全部已算过，本次一次行情都没拉"
+     */
+    "skippedFromCache": boolean;
+
     /** Creates a new RefreshResult instance. */
     constructor($$source: Partial<RefreshResult> = {}) {
         if (!("tradeDate" in $$source)) {
@@ -2231,6 +2246,15 @@ export class RefreshResult {
         }
         if (!("elapsed" in $$source)) {
             this["elapsed"] = "";
+        }
+        if (!("reused" in $$source)) {
+            this["reused"] = 0;
+        }
+        if (!("total" in $$source)) {
+            this["total"] = 0;
+        }
+        if (!("skippedFromCache" in $$source)) {
+            this["skippedFromCache"] = false;
         }
 
         Object.assign(this, $$source);
