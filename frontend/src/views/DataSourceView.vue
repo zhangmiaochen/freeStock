@@ -74,6 +74,27 @@ async function test(kind: string, url: string) {
   }
 }
 
+// 数据源变了要重载股票列表。但**必须串行化** ——
+//
+// 之前是直接 `void (async () => { await store.loadUniverse(true) })()`，
+// 于是快速来回切数据源时，**先发出的慢请求会最后返回、覆盖后一次的结果**
+//（数据湖那次加载很慢，stockdb 那次很快）—— 表现就是「切回 stockdb 不生效」。
+//
+// 串行化保证「最后一次切换」的加载一定最后写入 store。
+let reloadChain: Promise<void> = Promise.resolve();
+
+function reloadUniverseAfterSwitch(): Promise<void> {
+  reloadChain = reloadChain
+    .then(async () => {
+      await store.loadUniverse(true);
+      await store.loadCategories();
+    })
+    .catch((err) => {
+      message.value = `${message.value}（股票列表刷新失败：${errorMessage(err)}）`;
+    });
+  return reloadChain;
+}
+
 async function useSource(kind: string, url: string) {
   busy.value = "switch";
   message.value = "";
@@ -85,19 +106,11 @@ async function useSource(kind: string, url: string) {
     //
     // 后面 `loadUniverse` 要拉全市场 7000+ 只，很慢；
     // 把它算进 busy 的话，用户会以为"切换卡住了"、按钮一直点不动。
-    // 列表刷新放到后台跑，失败也只提示、不回滚切换结果。
     busy.value = "";
     await loadSources();
 
     store.universe = null;
-    void (async () => {
-      try {
-        await store.loadUniverse(true);
-        await store.loadCategories();
-      } catch (err) {
-        message.value = `${message.value}（股票列表刷新失败：${errorMessage(err)}）`;
-      }
-    })();
+    void reloadUniverseAfterSwitch();
     return;
   } catch (err) {
     // 切换失败时后端会给出具体原因（例如数据湖缺少日线），原样展示。

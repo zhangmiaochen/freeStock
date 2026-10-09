@@ -47,14 +47,36 @@ import DataSourceView from "@/views/DataSourceView.vue";
 
 const SOURCES = [
   {
-    key: "cnlake", name: "本地数据湖（cnequity）", url: "D:/lake",
-    kind: "cnlake", current: true, available: true,
+    key: "local", name: "本地数据（本机 stockdb）", url: "http://127.0.0.1:7899",
+    kind: "stockdb", current: true, available: true,
   },
   {
-    key: "remote", name: "远程节点", url: "http://127.0.0.1:7899",
+    key: "remote", name: "远程数据（公共测试节点）", url: "http://8.138.149.215:7899",
     kind: "stockdb", current: false, available: true,
   },
+  {
+    key: "cnlake", name: "本地数据湖（cnequity）", url: "D:/lake",
+    kind: "cnlake", current: false, available: true,
+  },
 ];
+
+// 模拟后端：切到谁，谁就是 current
+function mockBackend() {
+  let currentKey = "local";
+  const list = () =>
+    SOURCES.map((s) => ({ ...s, current: s.key === currentKey }));
+  mocks.getDataSources.mockImplementation(async () => list());
+  mocks.getCurrentDataSource.mockImplementation(async () => {
+    const found = list().find((s) => s.current)!;
+    return { ...found, current: true };
+  });
+  mocks.setDataSource.mockImplementation(async (kind: string, url: string) => {
+    const target = SOURCES.find((s) => s.kind === kind && s.url === url);
+    if (!target) throw new Error(`未知数据源 ${kind} ${url}`);
+    currentKey = target.key;
+    return { ...target, ok: true, message: "已连接", total: 7000, elapsed: "1s" };
+  });
+}
 
 function switchButtons(wrapper: ReturnType<typeof mount>) {
   // 「切换」/「重新应用」两个文案都算切换按钮
@@ -65,8 +87,7 @@ function switchButtons(wrapper: ReturnType<typeof mount>) {
 }
 
 async function mountPage() {
-  mocks.getDataSources.mockResolvedValue(SOURCES);
-  mocks.getCurrentDataSource.mockResolvedValue(SOURCES[0]);
+  if (!mocks.getDataSources.getMockImplementation()) mockBackend();
   mocks.getConfigPath.mockResolvedValue("D:/FreeStock/config.json");
   const wrapper = mount(DataSourceView);
   // 等首屏加载完
@@ -115,6 +136,55 @@ describe("数据源设置页", () => {
     await nextTick();
   });
 
+  it("切到数据湖后，再切回本机 stockdb 要生效", async () => {
+    mockBackend();
+    const { wrapper } = await mountPage();
+
+    // ① 切到数据湖
+    const lakeRow = wrapper
+      .findAll("div.bg-card")
+      .find((d) => d.text().includes("本地数据湖"))!;
+    expect(lakeRow).toBeTruthy();
+    const lakeBtn = lakeRow
+      .findAll("button")
+      .find((b) => b.text().includes("切换"))!;
+    await lakeBtn.trigger("click");
+    await vi.waitFor(() =>
+      expect(mocks.setDataSource).toHaveBeenCalledWith("cnlake", "D:/lake"),
+    );
+    await vi.waitFor(() => {
+      const row = wrapper
+        .findAll("div.bg-card")
+        .find((d) => d.text().includes("本地数据湖"))!;
+      expect(row.text()).toContain("使用中");
+    });
+
+    // ② 再切回本机 stockdb —— 这一步"不生效"是用户报的问题
+    const localRow = wrapper
+      .findAll("div.bg-card")
+      .find((d) => d.text().includes("本机 stockdb"))!;
+    expect(localRow).toBeTruthy();
+    const localBtn = localRow
+      .findAll("button")
+      .find((b) => b.text().includes("切换") || b.text().includes("重新应用"))!;
+    await localBtn.trigger("click");
+    await vi.waitFor(() =>
+      expect(mocks.setDataSource).toHaveBeenCalledWith("stockdb", "http://127.0.0.1:7899"),
+    );
+
+    // ★ 界面必须把「本机 stockdb」标成使用中，且数据湖不再是
+    await vi.waitFor(() => {
+      const local = wrapper
+        .findAll("div.bg-card")
+        .find((d) => d.text().includes("本机 stockdb"))!;
+      expect(local.text()).toContain("使用中");
+    });
+    const lakeAfter = wrapper
+      .findAll("div.bg-card")
+      .find((d) => d.text().includes("本地数据湖"))!;
+    expect(lakeAfter.text()).not.toContain("使用中");
+  });
+
   it("切换失败后按钮也能恢复可点击", async () => {
     mocks.setDataSource.mockRejectedValue(new Error("数据湖缺少 daily_bars"));
     const { wrapper } = await mountPage();
@@ -128,6 +198,57 @@ describe("数据源设置页", () => {
       );
       expect(stillBusy).toBe(false);
     });
+  });
+
+  it("快速来回切时，列表加载必须串行（后一次的慢请求不能覆盖前一次）", async () => {
+    mockBackend();
+    const { wrapper } = await mountPage();
+
+    // 第一次加载（切到数据湖）故意拖慢；第二次（切回 stockdb）很快
+    const order: string[] = [];
+    let releaseSlow: () => void = () => {};
+    mocks.loadUniverse
+      .mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            releaseSlow = () => {
+              order.push("湖");
+              resolve();
+            };
+          }),
+      )
+      .mockImplementationOnce(async () => {
+        order.push("本机");
+      });
+
+    // ① 切到数据湖（触发慢加载）
+    const lakeRow = wrapper
+      .findAll("div.bg-card")
+      .find((d) => d.text().includes("本地数据湖"))!;
+    await lakeRow
+      .findAll("button")
+      .find((b) => b.text().includes("切换"))!
+      .trigger("click");
+    await vi.waitFor(() => expect(mocks.loadUniverse).toHaveBeenCalledTimes(1));
+
+    // ② 还没加载完就切回本机 stockdb
+    const localRow = wrapper
+      .findAll("div.bg-card")
+      .find((d) => d.text().includes("本机 stockdb"))!;
+    await localRow
+      .findAll("button")
+      .find((b) => b.text().includes("切换") || b.text().includes("重新应用"))!
+      .trigger("click");
+    await vi.waitFor(() => expect(mocks.setDataSource).toHaveBeenCalledTimes(2));
+
+    // 放行慢加载
+    releaseSlow();
+    await vi.waitFor(() => expect(mocks.loadUniverse).toHaveBeenCalledTimes(2));
+
+    // ★ 串行化 → 顺序必须是「先湖、后本机」，
+    // 这样 store 里最终留下的是本机 stockdb 的数据
+    await vi.waitFor(() => expect(order.length).toBe(2));
+    expect(order).toEqual(["湖", "本机"]);
   });
 
   it("切走再切回来，按钮恢复可点击（真 KeepAlive）", async () => {
@@ -165,7 +286,10 @@ describe("数据源设置页", () => {
     await nextTick();
     await wrapper.setProps({ show: true });
     await nextTick();
-    await vi.waitFor(() => expect(mocks.getDataSources).toHaveBeenCalledTimes(2).valueOf() >= 0);
+    // 回到页面应当**重新拉一次**数据源列表（onActivated 生效）
+    await vi.waitFor(() =>
+      expect(mocks.getDataSources.mock.calls.length).toBeGreaterThan(1),
+    );
 
     // ★ 回到页面后，按钮必须能点
     await vi.waitFor(() => {

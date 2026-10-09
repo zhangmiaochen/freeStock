@@ -106,6 +106,9 @@ type scoreInput struct {
 // ScoringService 提供股票评分。
 type ScoringService struct {
 	stock *StockService
+	// override 非 nil 时替代 stock 的当前数据源（历史回填用带缓存的包装，
+	// 让同一只股票的日线只取一次）。见 provider_cache.go。
+	override Provider
 }
 
 // NewScoringService 构造评分服务。
@@ -128,6 +131,9 @@ func (s *ScoringService) ScoreStocks(codes []string, tradeDate int, limit int, s
 		return nil, fmt.Errorf("评分服务缺少股票服务依赖")
 	}
 	provider, source := s.stock.snapshot()
+	if s.override != nil {
+		provider = s.override
+	}
 	if provider == nil {
 		return nil, fmt.Errorf("数据源未就绪")
 	}
@@ -186,6 +192,19 @@ func (s *ScoringService) ScoreStocks(codes []string, tradeDate int, limit int, s
 
 	// 并发取每只股票的历史
 	inputs := s.loadScoreInputs(provider, targets, start, date)
+
+	// ⚠ **按代码排序，让后续所有累加/排序都有确定顺序。**
+	//
+	// `loadScoreInputs` 是 32 个 worker 并发 append 的，返回顺序取决于
+	// goroutine 调度 —— 同一个交易日、同一份数据，两次跑的顺序可以不同。
+	//
+	// 为什么必须修：下面的行业收益是把 `StockReturn20D` **累加**出来的，
+	// 而浮点加法**不满足结合律** —— 换个顺序求和，末位就不一样。
+	// 实测表现是 `IndustryReturn20D` 偶尔差到最后一位。
+	//
+	// 更严重的隐患是**行顺序**：候选池最后要 `head(max(80, target*12))` 截断，
+	// 顺序抖 = 截断边界上的股票可能换人 = 调仓建议不稳定。
+	sort.Slice(inputs, func(i, j int) bool { return inputs[i].code < inputs[j].code })
 
 	// 行业归属
 	industryByCode := map[string]string{}

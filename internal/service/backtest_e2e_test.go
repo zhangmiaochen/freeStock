@@ -50,7 +50,7 @@ func TestBacktestEndToEnd(t *testing.T) {
 	}
 	const limit = 20
 	began := time.Now()
-	bf, err := svc.RefreshBackfill(portfolio.StrategyTrendGrowth, start, latest, limit)
+	bf, err := svc.RefreshBackfill(portfolio.StrategyTrendGrowth, start, latest, limit, true)
 	if err != nil {
 		t.Fatalf("历史回填失败：%v", err)
 	}

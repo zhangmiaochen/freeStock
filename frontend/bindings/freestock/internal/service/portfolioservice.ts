@@ -225,12 +225,19 @@ export function PreviewAutoPortfolio(req: $models.AutoPortfolioRequest): $Cancel
 /**
  * RefreshBackfill 批量给 [startDate, endDate] 区间内每个交易日打分。
  * 
- * limit 与 RefreshStrength 同义（>0 时只评股票列表前 limit 只，保护数据源）。
- * **回测时建议传足够大的 limit**（如 1000+），否则候选池太小、
- * 回测出来的组合和实盘建议不是一回事。
+ * limit 语义：
+ * 
+ * 	limit <= 0 → **全市场**（所有有行情的股票）
+ * 	limit >  0 → 只评股票列表前 limit 只
+ * 
+ * **回测必须用全市场**：只用前 1000 只的话，候选池与实盘建议不是一回事，
+ * 回测出来的组合也不代表策略的真实表现。
+ * 
+ * force=false 时**增量**：已经算过的 (交易日, 代码) 不再重算 ——
+ * 重跑一个已经填过的区间应当在几秒内结束，而不是又花几分钟。
  */
-export function RefreshBackfill(strategyID: string, startDate: number, endDate: number, limit: number): $CancellablePromise<$models.BackfillResult | null> {
-    return $Call.ByID(1067070197, strategyID, startDate, endDate, limit).then(($result: any) => {
+export function RefreshBackfill(strategyID: string, startDate: number, endDate: number, limit: number, force: boolean): $CancellablePromise<$models.BackfillResult | null> {
+    return $Call.ByID(1067070197, strategyID, startDate, endDate, limit, force).then(($result: any) => {
         return $$createType30($result);
     });
 }

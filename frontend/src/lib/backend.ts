@@ -264,8 +264,22 @@ export const api = {
      * 历史回填：给一个日期区间内的每个交易日打分并落库。
      * **回测的前提** —— 没有历史评分就跑不了回测。
      */
-    refreshBackfill: (strategyId: string, startDate: number, endDate: number, limit: number) =>
-      PortfolioService.RefreshBackfill(strategyId, startDate, endDate, limit) as Promise<BackfillResult>,
+    /**
+     * 历史回填：给区间内每个交易日打分并落库（回测的前提）。
+     *
+     * `limit <= 0` 表示**全市场** —— 回测就该用全市场，只评一部分的话
+     * 候选池与实盘建议不是一回事。
+     *
+     * `force=false` 时**增量**：已算过的 (交易日, 代码) 直接跳过。
+     */
+    refreshBackfill: (
+      strategyId: string,
+      startDate: number,
+      endDate: number,
+      limit: number,
+      force = false,
+    ) =>
+      PortfolioService.RefreshBackfill(strategyId, startDate, endDate, limit, force) as Promise<BackfillResult>,
     /** 跑一次回测（区间内必须有已回填的历史评分） */
     createBacktest: (req: BacktestRequest) =>
       PortfolioService.CreateBacktest(req) as Promise<BacktestRunResult>,

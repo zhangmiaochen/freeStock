@@ -392,6 +392,21 @@ export class BackfillResult {
     "perDay": { [_ in string]?: number };
     "elapsed": string;
 
+    /**
+     * Reused 是本次**复用已有评分、没有重算**的 (交易日 × 代码) 数
+     */
+    "reused": number;
+
+    /**
+     * ScoredFromCache 是完全没动、直接跳过的交易日数
+     */
+    "scoredFromCache": number;
+
+    /**
+     * Total 是本次实际需要计算的 (交易日 × 代码) 数
+     */
+    "total": number;
+
     /** Creates a new BackfillResult instance. */
     constructor($$source: Partial<BackfillResult> = {}) {
         if (!("strategyId" in $$source)) {
@@ -420,6 +435,15 @@ export class BackfillResult {
         }
         if (!("elapsed" in $$source)) {
             this["elapsed"] = "";
+        }
+        if (!("reused" in $$source)) {
+            this["reused"] = 0;
+        }
+        if (!("scoredFromCache" in $$source)) {
+            this["scoredFromCache"] = 0;
+        }
+        if (!("total" in $$source)) {
+            this["total"] = 0;
         }
 
         Object.assign(this, $$source);

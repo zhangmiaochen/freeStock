@@ -6,6 +6,7 @@ import (
 	"sort"
 	"time"
 
+	"freestock/internal/portfolio"
 	"freestock/internal/score"
 )
 
@@ -31,15 +32,28 @@ type BackfillResult struct {
 	// PerDay 是每天的评分条数（按日期升序）
 	PerDay  map[string]int `json:"perDay"`
 	Elapsed string         `json:"elapsed"`
+	// Reused 是本次**复用已有评分、没有重算**的 (交易日 × 代码) 数
+	Reused int `json:"reused"`
+	// ScoredFromCache 是完全没动、直接跳过的交易日数
+	ScoredFromCache int `json:"scoredFromCache"`
+	// Total 是本次实际需要计算的 (交易日 × 代码) 数
+	Total int `json:"total"`
 }
 
 // RefreshBackfill 批量给 [startDate, endDate] 区间内每个交易日打分。
 //
-// limit 与 RefreshStrength 同义（>0 时只评股票列表前 limit 只，保护数据源）。
-// **回测时建议传足够大的 limit**（如 1000+），否则候选池太小、
-// 回测出来的组合和实盘建议不是一回事。
+// limit 语义：
+//
+//	limit <= 0 → **全市场**（所有有行情的股票）
+//	limit >  0 → 只评股票列表前 limit 只
+//
+// **回测必须用全市场**：只用前 1000 只的话，候选池与实盘建议不是一回事，
+// 回测出来的组合也不代表策略的真实表现。
+//
+// force=false 时**增量**：已经算过的 (交易日, 代码) 不再重算 ——
+// 重跑一个已经填过的区间应当在几秒内结束，而不是又花几分钟。
 func (s *PortfolioService) RefreshBackfill(
-	strategyID string, startDate, endDate, limit int,
+	strategyID string, startDate, endDate, limit int, force bool,
 ) (*BackfillResult, error) {
 	store, err := s.db()
 	if err != nil {
@@ -73,15 +87,61 @@ func (s *PortfolioService) RefreshBackfill(
 		"strategy", strategyID, "from", startDate, "to", endDate,
 		"tradingDays", len(dates), "codes", len(codes), "heldIncluded", heldCount)
 
+	// **同一只股票只取一次日线。**
+	//
+	// 原本每天都要重新拉一遍 320 个交易日的窗口，于是
+	// 回填 N 天 = N × 股票数 次请求（同一只股票的历史被重复拉 N 次）。
+	// 这里把每只股票在 [最早的评分窗口起点, 区间终点] 的日线缓存起来，
+	// 逐日评分时从缓存按区间切片 —— 结果与真实请求一致（见 provider_cache.go）。
 	scoring := NewScoringService(s.stock)
+	if provider, _ := s.stock.snapshot(); provider != nil && startDate > 0 {
+		windowStart := scoreWindowStart(startDate, scoreLookbackTradingDays)
+		cache := newRangeCachingProvider(provider, windowStart, endDate)
+		scoring.override = cache
+		// 留给紧接着的回测复用 —— 回测要的价格是这个窗口的子集
+		s.setBackfillCache(provider, cache)
+		slog.Info("回填启用日线缓存",
+			"windowStart", windowStart, "windowEnd", endDate,
+			"before", fmt.Sprintf("%d 次/只", len(dates)), "after", "1 次/只")
+	}
+
 	out := &BackfillResult{
 		StrategyID: strategyID, StartDate: startDate, EndDate: endDate,
 		Days: len(dates), Dates: dates, PerDay: map[string]int{},
 	}
 
 	for _, date := range dates {
+		// **增量**：已经算过的 (交易日, 代码) 不再重算。
+		//
+		// 和单日刷新同一个道理 —— 评分只取决于 (代码, 交易日, 策略)，
+		// 重算值完全相同。重跑一个已经填过的区间应当是**近乎瞬间**的事，
+		// 而不是又花几分钟。
+		todo := codes
+		if !force {
+			existing, err := store.StrengthCodes(int64(date), strategyID)
+			if err != nil {
+				// 读不到不该让回填失败 —— 退化为该日全量重算
+				slog.Warn("读取已有评分失败，该日全量重算", "date", date, "err", err)
+			} else if len(existing) > 0 {
+				missing := make([]string, 0, len(codes))
+				for _, code := range codes {
+					if existing[portfolio.BareCode(code)] {
+						continue
+					}
+					missing = append(missing, code)
+				}
+				out.Reused += len(codes) - len(missing)
+				todo = missing
+			}
+		}
+		if len(todo) == 0 {
+			// 该日已全部算过 —— 一次行情都不拉
+			out.ScoredFromCache++
+			continue
+		}
+
 		// 逐日调用：ScoreStocks 会按 tradeDate 取"截止该日"的窗口
-		result, err := scoring.ScoreStocks(codes, date, 0, strategyID)
+		result, err := scoring.ScoreStocks(todo, date, 0, strategyID)
 		if err != nil {
 			out.Skipped = append(out.Skipped,
 				fmt.Sprintf("%d：%v", date, err))

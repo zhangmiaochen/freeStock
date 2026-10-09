@@ -17,6 +17,7 @@ import {
   Briefcase,
   ChartCandlestick,
   Check,
+  CalendarDays,
   CircleAlert,
   Funnel,
   LoaderCircle,
@@ -89,6 +90,75 @@ const refreshing = ref(false);
 const strength = ref<StrengthSummary | null>(null);
 /** 刷新评分时评多少只（保护数据源，全市场要几分钟） */
 const refreshLimit = ref(800);
+
+// ---- 指定区间刷新 ----
+//
+// 「刷新评分」只算**最新交易日**；回测需要的是**历史每一天**的评分。
+// 之前那个入口只在回测页有，组合页要翻过去才能用，所以这里补一个。
+const useRange = ref(false);
+const rangeStart = ref("");
+const rangeEnd = ref("");
+const rangeRefreshing = ref(false);
+
+/** 把 YYYYMMDD 往前挪若干自然日（用 Date 算，避免非法日期）。 */
+function shiftDate(yyyymmdd: string, days: number): string {
+  const m = /^(\d{4})(\d{2})(\d{2})$/.exec(yyyymmdd);
+  if (!m) return "";
+  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  d.setDate(d.getDate() + days);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}`;
+}
+
+/** 切到区间模式时，用当前评分日兜一个默认区间（近 90 天）。 */
+function toggleRange(on: boolean) {
+  useRange.value = on;
+  if (on && !rangeEnd.value) {
+    const latest = String(strength.value?.latestDate ?? "");
+    if (/^\d{8}$/.test(latest)) {
+      rangeEnd.value = latest;
+      rangeStart.value = shiftDate(latest, -90);
+    }
+  }
+}
+
+/** 区间刷新：给区间内每个交易日打分（增量，已算过的会跳过）。 */
+async function refreshRange(force = false) {
+  if (!current.value) return;
+  const start = Number(rangeStart.value);
+  const end = Number(rangeEnd.value);
+  if (!start || !end || start > end) {
+    planError.value = "请填写合法的区间（YYYYMMDD，开始日不能晚于结束日）";
+    return;
+  }
+  rangeRefreshing.value = true;
+  planError.value = "";
+  applyResult.value = "";
+  try {
+    const result = (await api.portfolio.refreshBackfill(
+      current.value.portfolio.strategyId,
+      start,
+      end,
+      refreshLimit.value,
+      force,
+    )) as unknown as {
+      days: number; scored: number; skipped: string[];
+      elapsed: string; reused: number; scoredFromCache: number;
+    };
+    await loadStrength();
+    await loadPlan();
+    const scope = refreshLimit.value > 0 ? `前 ${refreshLimit.value} 只` : "全市场";
+    applyResult.value =
+      `区间评分完成（${scope}）：${result.days} 个交易日，实算 ${result.scored} 天` +
+      (result.scoredFromCache > 0 ? `、跳过已完成 ${result.scoredFromCache} 天` : "") +
+      (result.reused > 0 ? `、复用已有 ${result.reused} 条` : "") +
+      `，耗时 ${result.elapsed}`;
+  } catch (err) {
+    planError.value = errorMessage(err);
+  } finally {
+    rangeRefreshing.value = false;
+  }
+}
 const applyResult = ref<string>("");
 
 const summary = computed(() => current.value?.summary ?? null);
@@ -719,6 +789,16 @@ onMounted(async () => {
                   <RefreshCw v-if="!refreshing" />
                   全量重算
                 </Button>
+                <Button
+                  size="xs"
+                  variant="outline"
+                  :disabled="rangeRefreshing"
+                  title="给指定区间内每个交易日打分 —— 回测需要的就是这个"
+                  @click="toggleRange(!useRange)"
+                >
+                  <CalendarDays v-if="!rangeRefreshing" />
+                  {{ useRange ? "收起区间" : "指定区间" }}
+                </Button>
                 <Button size="xs" variant="outline" :disabled="planLoading" @click="loadPlan">
                   <LoaderCircle v-if="planLoading" class="animate-spin" />
                   <Funnel v-else />
@@ -736,6 +816,48 @@ onMounted(async () => {
                   <Check v-else />
                   一键应用建议
                 </Button>
+              </div>
+
+              <!-- 指定区间刷新：回测需要的是**历史每一天**的评分，
+                   「刷新评分」只算最新交易日 -->
+              <div
+                v-if="useRange"
+                class="bg-muted/40 mt-2 flex flex-wrap items-center gap-2 rounded-md px-2 py-2 text-[11px]"
+              >
+                <span class="text-muted-foreground">区间（含首尾）</span>
+                <input
+                  v-model="rangeStart"
+                  class="bg-background h-6 w-24 rounded border px-1 font-mono outline-none"
+                  placeholder="YYYYMMDD"
+                />
+                <span class="text-muted-foreground">→</span>
+                <input
+                  v-model="rangeEnd"
+                  class="bg-background h-6 w-24 rounded border px-1 font-mono outline-none"
+                  placeholder="YYYYMMDD"
+                />
+                <Button
+                  size="xs"
+                  variant="outline"
+                  :disabled="rangeRefreshing"
+                  @click="refreshRange(false)"
+                >
+                  <LoaderCircle v-if="rangeRefreshing" class="animate-spin" />
+                  <RefreshCw v-else />
+                  {{ rangeRefreshing ? "区间评分中…" : "刷新区间评分" }}
+                </Button>
+                <Button
+                  size="xs"
+                  variant="ghost"
+                  :disabled="rangeRefreshing"
+                  title="忽略已有评分，区间内全部重算"
+                  @click="refreshRange(true)"
+                >
+                  全量重算
+                </Button>
+                <span class="text-muted-foreground">
+                  增量进行：已算过的交易日会跳过；股票数用的就是左边的「评分只数」（0 = 全市场）。
+                </span>
               </div>
             </div>
 

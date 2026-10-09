@@ -23,6 +23,41 @@ type PortfolioService struct {
 	store *portfolio.Store
 	// opened 记录打开失败过，避免每次调用都重试失败的文件操作
 	openErr error
+
+	// ---- 回填 → 回测 的日线复用 ----
+	//
+	// 回填刚刚把每只股票在 `[窗口起点, 区间终点]` 的日线取回来了；
+	// 紧接着跑回测时，回测要的价格区间是**它的子集** —— 实测回测 97% 的
+	// 时间都花在重新取这批价上（300 只 / 4.9 秒，引擎本身只要 0.13 秒）。
+	//
+	// 所以把回填用过的缓存留在这里；回测若发现窗口覆盖得住就直接复用。
+	// 数据源一变就不认了（比较 provider 指针）。
+	cacheMu       sync.Mutex
+	backfillCache *rangeCachingProvider
+	cacheProvider Provider
+}
+
+// setBackfillCache 记下本次回填用的日线缓存，供紧随其后的回测复用。
+func (s *PortfolioService) setBackfillCache(provider Provider, cache *rangeCachingProvider) {
+	s.cacheMu.Lock()
+	s.backfillCache = cache
+	s.cacheProvider = provider
+	s.cacheMu.Unlock()
+}
+
+// backfillCacheFor 返回能覆盖 [start, end] 的回填缓存；没有则返回 nil。
+//
+// provider 必须是缓存的同一个来源 —— 换了数据源就不能复用旧缓存。
+func (s *PortfolioService) backfillCacheFor(provider Provider, start, end int) *rangeCachingProvider {
+	s.cacheMu.Lock()
+	defer s.cacheMu.Unlock()
+	if s.backfillCache == nil || s.cacheProvider != provider {
+		return nil
+	}
+	if start < s.backfillCache.from || end > s.backfillCache.to {
+		return nil
+	}
+	return s.backfillCache
 }
 
 // NewPortfolioService 构造组合服务。

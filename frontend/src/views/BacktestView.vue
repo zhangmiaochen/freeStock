@@ -67,7 +67,9 @@ const portfolioId = ref("");
 const startDate = ref("");
 const endDate = ref("");
 const initialCapital = ref(100000);
-const backfillLimit = ref(1000);
+// 0 = 全市场。**回测就该用全市场** —— 只评前 1000 只的话候选池与实盘建议
+// 不是一回事，回测出来的组合也不代表策略的真实表现。
+const backfillLimit = ref(0);
 
 const busy = ref("");
 const message = ref("");
@@ -118,8 +120,8 @@ function defaultRange() {
   endDate.value = end;
 }
 
-/** ① 历史回填 */
-async function doBackfill() {
+/** ① 历史回填（增量：已算过的交易日会直接跳过） */
+async function doBackfill(force = false) {
   const item = selected.value;
   if (!item) return;
   busy.value = "backfill";
@@ -131,8 +133,18 @@ async function doBackfill() {
       Number(startDate.value),
       Number(endDate.value),
       backfillLimit.value,
-    )) as unknown as { days: number; scored: number; skipped: string[]; elapsed: string };
-    message.value = `历史回填完成：区间 ${result.days} 个交易日，成功 ${result.scored} 天，跳过 ${result.skipped?.length ?? 0} 天，耗时 ${result.elapsed}`;
+      force,
+    )) as unknown as {
+      days: number; scored: number; skipped: string[];
+      elapsed: string; reused: number; scoredFromCache: number;
+    };
+    const scope = backfillLimit.value > 0 ? `前 ${backfillLimit.value} 只` : "全市场";
+    message.value =
+      `历史回填完成（${scope}）：区间 ${result.days} 个交易日，` +
+      `实算 ${result.scored} 天` +
+      (result.scoredFromCache > 0 ? `、跳过已完成 ${result.scoredFromCache} 天` : "") +
+      (result.reused > 0 ? `、复用已有评分 ${result.reused} 条` : "") +
+      `，跳过 ${result.skipped?.length ?? 0} 天，耗时 ${result.elapsed}`;
   } catch (e) {
     error.value = String(e);
   } finally {
@@ -259,11 +271,19 @@ onActivated(refreshOnShow); // KeepAlive 下每次切回来
           <input v-model.number="initialCapital" type="number" class="border-input bg-background h-9 w-32 rounded-md border px-2" />
         </label>
         <label class="flex flex-col gap-1 text-sm">
-          <span class="text-muted-foreground">回填股票数</span>
+          <span class="text-muted-foreground">回填股票数（0 = 全市场）</span>
           <input v-model.number="backfillLimit" type="number" class="border-input bg-background h-9 w-32 rounded-md border px-2" />
         </label>
-        <Button :disabled="!!busy || !selected" variant="outline" @click="doBackfill">
+        <Button :disabled="!!busy || !selected" variant="outline" @click="doBackfill(false)">
           {{ busy === "backfill" ? "回填中…" : "① 历史回填" }}
+        </Button>
+        <Button
+          :disabled="!!busy || !selected"
+          variant="ghost"
+          title="忽略已有评分，区间内全部重算（数据修订后需要覆盖时用）"
+          @click="doBackfill(true)"
+        >
+          全量重算区间
         </Button>
         <Button :disabled="!!busy || !selected" @click="doRun">
           {{ busy === "run" ? "回测中…" : "② 跑回测" }}
@@ -275,7 +295,10 @@ onActivated(refreshOnShow); // KeepAlive 下每次切回来
     <p v-if="error" class="text-destructive text-sm">{{ error }}</p>
 
     <p class="text-muted-foreground text-xs">
-      提示：回测前必须先做「历史回填」；回填股票数建议 ≥1000，否则候选池太小，结果与实盘建议不是一回事。
+      提示：回测前必须先做「历史回填」；<strong>建议用全市场（股票数填 0）</strong> ——
+      只回填一部分的话候选池太小，回测出来的组合与实盘建议不是一回事。
+      回填**增量进行**：已经算过的交易日会直接跳过，重跑同一区间只需几秒。
+      已回填的区间可以直接「② 跑回测」，回测会复用回填取到的日线，通常百毫秒级完成。
     </p>
 
     <!-- 指标 -->
