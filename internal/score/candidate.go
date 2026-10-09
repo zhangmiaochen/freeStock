@@ -182,6 +182,18 @@ func strategyIsOversold(strategyID string) bool {
 // 候选入场质量（3.2.2）
 // ---------------------------------------------------------------------------
 
+// HasSignalSource 表示本项目是否接入了 ML 信号表（`active_signal_*`）。
+//
+// ⚠ **恒为 false** —— 参考项目依赖 ML 模型信号表，本项目没有该数据源。
+//
+// 它的影响很具体：原实现在**熊市**下要求候选必须有"新鲜买入信号"。
+// 没有信号源时这条闸门**无法判定**；若把"无法判定"当成"不合格"，
+// 熊市里所有候选都会被拒 → 候选池为空 → 从现金起步的回测永远零成交。
+//
+// 所以凡是"依赖信号才能判定"的闸门都要以它为前置条件，
+// 并在界面上把这类偏差列出来（见 ScoringResult.Unavailable）。
+const HasSignalSource = false
+
 // CandidateQualityOK 判定候选是否达到入场质量。
 //
 // 返回 (是否通过, 原因)。replacementMode 为 true 时门槛 +1 分。
@@ -223,8 +235,25 @@ func CandidateQualityOK(row Row, cfg StrategyConfig, marketState string, replace
 		}
 	}
 
-	// 熊市必须有新鲜信号
-	if marketState == StateBear {
+	// 熊市必须有新鲜信号 —— **但本项目没有 ML 信号源，这条闸门无法判定**。
+	//
+	// 原实现 `candidate_quality_ok`（portfolio_rotation_logic.py:1069）：
+	//
+	//	has_fresh_signal = signal_type in {"buy","candidate_buy"} and signal_age <= ...
+	//	if state == "bear" and not has_fresh_signal:
+	//	    return False
+	//
+	// `active_signal_type` / `signal_age` 来自 **ML 模型信号表**，
+	// 本项目没有该数据源（见 ScoringResult.Unavailable），所以 `SignalType` 恒为空。
+	//
+	// ⚠ **把"无法判定"当成"不合格"后果很严重**：熊市里每一只候选都会被拒 →
+	// 候选池恒为空 → 而回测是**从纯现金起步**的（原实现 `positions = {}`），
+	// 于是**整个回测一笔成交都没有、净值永远等于初始资金**。
+	// 这正是用户报的"回测结果完全不对"。
+	//
+	// 所以这里选择**不应用**这条闸门，并在评分的 Unavailable 里注明这处偏差 ——
+	// 而不是伪造一个信号，也不是假装"熊市不该买"。
+	if marketState == StateBear && HasSignalSource {
 		ageLimit := 2
 		if !row.hasFreshSignal(ageLimit) {
 			return false, "熊市且无新鲜信号"

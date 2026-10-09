@@ -71,21 +71,27 @@ func (s *PortfolioService) RefreshBackfill(
 	if err != nil {
 		return nil, err
 	}
+	datesElapsed := time.Since(began)
 	if len(dates) == 0 {
 		return nil, fmt.Errorf("区间内没有交易日（%d ~ %d）", startDate, endDate)
 	}
 
 	// 代码集合每天相同：一次算好，避免逐日重复取列表
+	universeBegan := time.Now()
 	codes, heldCount, err := s.scoringUniverse(store, limit)
 	if err != nil {
 		return nil, err
 	}
+	universeElapsed := time.Since(universeBegan)
 	if len(codes) == 0 {
 		return nil, fmt.Errorf("没有可评分的股票")
 	}
 	slog.Info("历史回填开始",
 		"strategy", strategyID, "from", startDate, "to", endDate,
 		"tradingDays", len(dates), "codes", len(codes), "heldIncluded", heldCount)
+	slog.Info("回填阶段耗时（取数前）",
+		"tradingDates", datesElapsed.Round(time.Millisecond),
+		"scoringUniverse", universeElapsed.Round(time.Millisecond))
 
 	// **同一只股票只取一次日线。**
 	//
@@ -94,12 +100,15 @@ func (s *PortfolioService) RefreshBackfill(
 	// 这里把每只股票在 [最早的评分窗口起点, 区间终点] 的日线缓存起来，
 	// 逐日评分时从缓存按区间切片 —— 结果与真实请求一致（见 provider_cache.go）。
 	scoring := NewScoringService(s.stock)
+	var cacheHits, cacheMisses, cacheFetches int
+	var cacheRef *rangeCachingProvider
 	if provider, _ := s.stock.snapshot(); provider != nil && startDate > 0 {
 		windowStart := scoreWindowStart(startDate, scoreLookbackTradingDays)
 		cache := newRangeCachingProvider(provider, windowStart, endDate)
 		scoring.override = cache
 		// 留给紧接着的回测复用 —— 回测要的价格是这个窗口的子集
 		s.setBackfillCache(provider, cache)
+		cacheRef = cache
 		slog.Info("回填启用日线缓存",
 			"windowStart", windowStart, "windowEnd", endDate,
 			"before", fmt.Sprintf("%d 次/只", len(dates)), "after", "1 次/只")
@@ -109,6 +118,7 @@ func (s *PortfolioService) RefreshBackfill(
 		StrategyID: strategyID, StartDate: startDate, EndDate: endDate,
 		Days: len(dates), Dates: dates, PerDay: map[string]int{},
 	}
+	var scoreTotal, saveTotal time.Duration
 
 	for _, date := range dates {
 		// **增量**：已经算过的 (交易日, 代码) 不再重算。
@@ -141,7 +151,9 @@ func (s *PortfolioService) RefreshBackfill(
 		}
 
 		// 逐日调用：ScoreStocks 会按 tradeDate 取"截止该日"的窗口
+		scoreBegan := time.Now()
 		result, err := scoring.ScoreStocks(todo, date, 0, strategyID)
+		scoreTotal += time.Since(scoreBegan)
 		if err != nil {
 			out.Skipped = append(out.Skipped,
 				fmt.Sprintf("%d：%v", date, err))
@@ -152,16 +164,29 @@ func (s *PortfolioService) RefreshBackfill(
 				fmt.Sprintf("%d：该日无有效行情", date))
 			continue
 		}
+		saveBegan := time.Now()
 		if err := s.saveScoringResult(store, result, strategyID); err != nil {
+			saveTotal += time.Since(saveBegan)
 			out.Skipped = append(out.Skipped,
 				fmt.Sprintf("%d：落库失败 %v", date, err))
 			continue
 		}
+		saveTotal += time.Since(saveBegan)
 		out.Scored++
 		out.PerDay[fmt.Sprintf("%d", date)] = len(result.Rows)
 	}
 
 	out.Elapsed = time.Since(began).Round(time.Millisecond).String()
+	if cacheRef != nil {
+		cacheHits, cacheMisses, cacheFetches = cacheRef.stats()
+	}
+	slog.Info("历史回填阶段耗时",
+		"tradingDates", datesElapsed.Round(time.Millisecond),
+		"scoringUniverse", universeElapsed.Round(time.Millisecond),
+		"评分(取数+指标)", scoreTotal.Round(time.Millisecond),
+		"缓存命中", cacheHits, "未命中", cacheMisses, "真实取数", cacheFetches,
+		"落库", saveTotal.Round(time.Millisecond),
+		"合计", out.Elapsed)
 	slog.Info("历史回填完成",
 		"strategy", strategyID, "scored", out.Scored,
 		"tradingDays", out.Days, "skipped", len(out.Skipped), "elapsed", out.Elapsed)

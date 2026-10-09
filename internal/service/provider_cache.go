@@ -31,6 +31,16 @@ type rangeCachingProvider struct {
 
 	mu    sync.Mutex
 	cache map[string][]*stockdb.Quote
+	// hits/misses/fetches 用来观察缓存到底有没有生效 ——
+	// "以为命中了其实没有"是这类缓存最容易出的问题，必须能看见。
+	hits, misses, fetches int
+}
+
+// stats 返回 (命中, 未命中, 真实取数) 次数。
+func (p *rangeCachingProvider) stats() (int, int, int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.hits, p.misses, p.fetches
 }
 
 // newRangeCachingProvider 包装一个数据源，预取窗口为 [from, to]。
@@ -73,8 +83,16 @@ func (p *rangeCachingProvider) DailyHistory(
 		// 并发下可能有别的 worker 先写进去了，保留先到的即可（内容相同）
 		if _, exists := p.cache[code]; !exists {
 			p.cache[code] = full
+			p.fetches++
 		}
 		cached = p.cache[code]
+		p.mu.Unlock()
+		p.mu.Lock()
+		p.misses++
+		p.mu.Unlock()
+	} else {
+		p.mu.Lock()
+		p.hits++
 		p.mu.Unlock()
 	}
 

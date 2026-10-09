@@ -2,6 +2,7 @@ package service
 
 import (
 	"os"
+	"strconv"
 	"testing"
 	"time"
 
@@ -25,9 +26,17 @@ func TestBacktestPhaseTiming(t *testing.T) {
 	}
 	latest := int(universe.TradeDate)
 	start := shiftDays(t, latest, -12)
-	const limit = 300
 
 	// ① 回填
+	//
+	// 允许用环境变量放大规模 —— 用来验证"广度闸门需要接近全市场的样本"
+	// 这一判断（广度判据是"评分≥70 的只数 ≥20"，样本太小就永远凑不够）。
+	limit := 300
+	if v := os.Getenv("FREESTOCK_BACKFILL_LIMIT"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
 	began := time.Now()
 	bf, err := svc.RefreshBackfill(portfolio.StrategyTrendGrowth, start, latest, limit, true)
 	if err != nil {

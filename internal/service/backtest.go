@@ -403,11 +403,30 @@ func (s *PortfolioService) backtestPlanBuilder(
 			marketScopeKey(item),
 		)
 		candidates, universeScores := s.buildCandidatePoolFrom(all, item, cfg, heldCodes)
-		return score.BuildRotationPlan(score.RotationInput{
+		plan := score.BuildRotationPlan(score.RotationInput{
 			Holdings: held, Candidates: candidates, Config: cfg,
 			MarketState: marketState, MaxStockLimit: item.MaxStockCount,
 			UniverseScores: universeScores,
 		})
+
+		// 逐日诊断：回测"零成交"时要能一眼看出是哪道闸门把候选刷没的。
+		adds, exec := 0, 0
+		for _, row := range plan.Rows {
+			if row.Action == score.ActionAdd || row.Action == score.ActionReplaceIn {
+				adds++
+			}
+			if row.IsExecutable {
+				exec++
+			}
+		}
+		slog.Info("回测逐日诊断",
+			"date", day.Date, "state", marketState,
+			"评分行", len(day.Rows), "持仓", len(held),
+			"候选池", len(candidates), "广度可用", len(universeScores),
+			"entryAllowed", plan.EntryAllowed,
+			"计划动作", len(plan.Rows), "可买入", adds, "可执行", exec)
+
+		return plan
 	}
 }
 
