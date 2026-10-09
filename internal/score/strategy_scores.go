@@ -32,6 +32,15 @@ type StrategyScoreInput struct {
 	Repair     RepairFeatures
 	// NearRepair 是 near_term_repair_score（只有超跌/高手/低吸用得到）
 	NearRepair float64
+	// PrevHigh60 是前 60 日最高价（结构分的"突破缺口"档要用）。
+	//
+	// 原实现 portfolio_service.py:1978-2000：
+	//
+	//	gap = (close-prev_high60)/prev_high60*100
+	//	gap ∈ [-2.5, 3] → +6；gap ∈ (3, 8] → +3
+	//
+	// 传 0 会让这一档**整段消失** —— 而命中该档的正是该策略要的强势股。
+	PrevHigh60 float64
 	// MainlineRaw 是 max(mainline_board_score, industry_board_score, board_research_score)。
 	// 本项目没有板块研究分，调用方传 0；公式里它是 max 的一项，取 0 不影响其它两项。
 	MainlineRaw float64
@@ -56,8 +65,10 @@ func ComputeStrategyScores(strategyID string, in StrategyScoreInput) BaseScores 
 // trendGrowthScores 趋势成长（详见 score.go 的五个基础分函数）。
 func trendGrowthScores(in StrategyScoreInput) BaseScores {
 	ind := in.Indicators
-	trend := TrendBase(ind, 0, 0)
-	structure := StructureBase(ind, 0, 0)
+	// 滞后均线与前高**必须传真实值**（原实现 portfolio_service.py:1968-2000）。
+	// 传 0 会让趋势分最后两项退化成 `ma20>0`/`ma60>0`、突破缺口档恒 0。
+	trend := TrendBase(ind, ind.Ma20Lag5, ind.Ma60Lag10)
+	structure := StructureBase(ind, in.PrevHigh60, 0)
 	rs := RSBase(ind)
 	capital := CapitalBase(ind)
 	// 第五项用**修复能力分**（不是近期修复分）
@@ -155,7 +166,7 @@ func expertSimulationScores(in StrategyScoreInput) BaseScores {
 		ma20GapPct = (ind.Close/ind.Ma20 - 1) * 100
 	}
 
-	trendBase := TrendBase(ind, 0, 0)
+	trendBase := TrendBase(ind, ind.Ma20Lag5, ind.Ma60Lag10)
 	mainlineProxy := math.Max(
 		in.MainlineRaw,
 		math.Max(

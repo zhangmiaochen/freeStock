@@ -32,7 +32,7 @@ func TestTrendGrowthEntryPriorityPrefersCalmEntry(t *testing.T) {
 		r.RelativeStrength20D = 40
 	})
 
-	out := PrioritizeEntryPoints([]Row{hot, calm}, StrategyTrendGrowth, "")
+	out := PrioritizeEntryPoints([]Row{hot, calm}, baseConfig(StrategyTrendGrowth))
 	if len(out) != 2 {
 		t.Fatalf("应返回 2 行，实际 %d", len(out))
 	}
@@ -51,7 +51,7 @@ func TestTrendGrowthEntryPriorityRespectsScore(t *testing.T) {
 		r.TotalScore = 92
 		r.StructureScore = 18
 	})
-	out := PrioritizeEntryPoints([]Row{weak, strong}, StrategyTrendGrowth, "")
+	out := PrioritizeEntryPoints([]Row{weak, strong}, baseConfig(StrategyTrendGrowth))
 	if out[0].Code != "B" {
 		t.Errorf("总分与结构分都高的应排前面，实际首位 %s", out[0].Code)
 	}
@@ -60,12 +60,12 @@ func TestTrendGrowthEntryPriorityRespectsScore(t *testing.T) {
 // 非趋势成长策略不重排（原实现只对 trend_growth 走那条分支）。
 func TestPrioritizeOnlyForTrendGrowth(t *testing.T) {
 	rows := []Row{prioRow("B", nil), prioRow("A", nil)}
-	out := PrioritizeEntryPoints(rows, StrategyExpert, "")
+	out := PrioritizeEntryPoints(rows, baseConfig(StrategyExpert))
 	if out[0].Code != "B" {
 		t.Errorf("非趋势成长不该重排，实际首位 %s", out[0].Code)
 	}
 	// 空输入安全
-	if got := PrioritizeEntryPoints(nil, StrategyTrendGrowth, ""); got != nil {
+	if got := PrioritizeEntryPoints(nil, baseConfig(StrategyTrendGrowth)); got != nil {
 		t.Error("空输入应原样返回")
 	}
 }

@@ -221,6 +221,16 @@ type StrategyConfig struct {
 	MarketState string `json:"marketState"`
 	TotalLayers int    `json:"totalLayers"`
 	TargetCount int    `json:"targetPositionCount"`
+	// DesiredPositionCount / DesiredTotalLayers 是**按市场状态折算后**的目标
+	//（原实现 `policy_from_strategy_config`，portfolio_rotation_logic.py:248-262）：
+	//
+	//	熊市：desired_count  = max(1, (target+1)/2)
+	//	      desired_layers = max(1, (total+1)/2)
+	//	其余：原值
+	//
+	// 熊市**减半**是原实现控制风险敞口的核心手段 —— 少建一半只数、少用一半层数。
+	DesiredPositionCount int `json:"desiredPositionCount"`
+	DesiredTotalLayers   int `json:"desiredTotalLayers"`
 
 	ReadyScore             float64 `json:"readyScore"`
 	CandidateScoreFloor    float64 `json:"candidateScoreFloor"`
@@ -305,6 +315,58 @@ const (
 	LowBuyDefaultScopeKey = "main_gem"
 )
 
+// desiredCountFor 按市场状态折算"目标只数"或"目标层数"。
+//
+// 原实现 `policy_from_strategy_config`（portfolio_rotation_logic.py:248-262）：
+//
+//	if state == "bear":
+//	    desired_count  = max(1, (target + 1) // 2)
+//	    desired_layers = max(1, (total + 1) // 2)
+//	else:
+//	    desired_count, desired_layers = target, total
+func desiredCountFor(totalLayers, targetCount int, marketState string, isCount bool) int {
+	base := totalLayers
+	if isCount {
+		base = targetCount
+	}
+	if base < 1 {
+		base = 1
+	}
+	if marketState == StateBear {
+		halved := (base + 1) / 2
+		if halved < 1 {
+			halved = 1
+		}
+		return halved
+	}
+	return base
+}
+
+// LowBuyEntryLayerCount 低吸每只新建仓的层数。
+//
+// 原实现 `_low_buy_entry_layer_count`（portfolio_rotation_logic.py:492-496）：
+//
+//	layers = int(total_layers / max(1, target_count))
+//	return max(1, min(total_layers, layers))
+//
+// ⚠ 分母是**动态目标只数**，不是配置里的 target —— 两者不同时层数会差很多。
+func LowBuyEntryLayerCount(totalLayers, targetCount int) int {
+	if targetCount <= 0 {
+		return 0
+	}
+	if totalLayers < 1 {
+		totalLayers = 1
+	}
+	layers := totalLayers / targetCount
+	if layers < 1 {
+		layers = 1
+	}
+	if layers > totalLayers {
+		layers = totalLayers
+	}
+	return layers
+}
+
 // BuildStrategyConfig 现算策略参数。
 //
 // marketScope 为空时用 main_gem（低吸的默认档）。
@@ -328,6 +390,9 @@ func BuildStrategyConfig(strategyID, marketState string, targetCount, totalLayer
 		MarketState: marketState,
 		TotalLayers: totalLayers,
 		TargetCount: targetCount,
+		// 熊市减半（原实现 :248-252）
+		DesiredPositionCount: desiredCountFor(totalLayers, targetCount, marketState, true),
+		DesiredTotalLayers:   desiredCountFor(totalLayers, targetCount, marketState, false),
 
 		ReadyScore:          readyScoreTable[strategyID][marketState],
 		CandidateScoreFloor: candidateFloorTable[strategyID],

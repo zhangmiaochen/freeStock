@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 )
 
 // 一键应用调仓建议。
@@ -54,6 +55,59 @@ func IsApplyExecutable(action string) bool {
 	return false
 }
 
+// applyTxnReason 是"一键应用调仓建议"写流水时**固定**的 reason。
+//
+// 原实现 portfolio_service.py:922 是硬编码的 `reason="一键应用调仓建议"`，
+// 不写计划行的原因。此前我写的是 `action.Reason`（计划行原因），与原版不同。
+const applyTxnReason = "一键应用调仓建议"
+
+// applySourceSignalID 是应用调仓时流水的来源标识。
+//
+// 原实现 portfolio_service.py:923：`f"{pid}:{latest_trade_date}:{code}"`。
+// 此前写的是常量 "apply_rotation" —— 逐笔无法追溯到"哪次应用的哪只"。
+func applySourceSignalID(portfolioID, tradeDate, code string) string {
+	return portfolioID + ":" + tradeDate + ":" + code
+}
+
+// appendMissingHoldings 把"库里有、但 actions 里没提到"的持仓补成保留项。
+//
+// 对应原实现 `final_codes = 持仓 ∪ 建议行`（portfolio_service.py:888）：
+// 建议行缺失时 `action=""`、`target_layers = current_layers`，重写后是等价的无操作。
+//
+// 没有这一步的话，整表 DELETE + 按 actions INSERT 会把漏传的持仓**静默删掉**，
+// 而且不留任何流水 —— 这是本模块唯一有数据丢失风险的路径。
+func appendMissingHoldings(actions []ApplyAction, existing map[string]Position) []ApplyAction {
+	if len(existing) == 0 {
+		return actions
+	}
+	mentioned := make(map[string]bool, len(actions))
+	for _, action := range actions {
+		if code := BareCode(action.Code); code != "" {
+			mentioned[code] = true
+		}
+	}
+	missing := make([]string, 0)
+	for code := range existing {
+		if !mentioned[code] {
+			missing = append(missing, code)
+		}
+	}
+	// 排序保证结果稳定（原实现用 sorted(...)）
+	sort.Strings(missing)
+	for _, code := range missing {
+		position := existing[code]
+		actions = append(actions, ApplyAction{
+			Code: code, Name: position.Name,
+			// 空 action = 无操作；层数保持当前值 → 重写后完全等价
+			Action:       "",
+			TargetLayers: position.PositionLayers,
+			Price:        position.EntryPrice,
+			Reason:       "建议缺失，保留原持仓",
+		})
+	}
+	return actions
+}
+
 // ApplyRotation 把动作应用到持仓。
 //
 // tradeDate 用于新建仓的建仓日期（YYYYMMDD）。
@@ -90,6 +144,20 @@ func (s *Store) ApplyRotation(portfolioID string, tradeDate string, actions []Ap
 	if _, err := tx.Exec(`DELETE FROM portfolio_position WHERE portfolio_id=?`, portfolioID); err != nil {
 		return nil, fmt.Errorf("清理旧持仓失败：%w", err)
 	}
+
+	// ---- U9 安全兜底：**持仓 ∪ 建议行** ----
+	//
+	// 原实现 portfolio_service.py:888：
+	//
+	//	final_codes = sorted(set(pos_map.keys()) | set(row_map.keys()))
+	//	# 建议里没有的代码 → action=""、target_layers = current_layers → 原样重写
+	//
+	// 也就是说**建议行丢了也不会丢持仓**。这里必须补上这一步：
+	// 整表已经 DELETE 过，只要调用方漏传一只（将来在 service 层加一行过滤就会发生），
+	// 那只持仓就会被**静默删除且不留流水**。
+	//
+	// 这个不变量不能外包给调用方的契约 —— 放在这里成本几乎为零。
+	actions = appendMissingHoldings(actions, existingByCode)
 
 	now := nowText()
 	for _, action := range actions {
@@ -145,10 +213,14 @@ func (s *Store) ApplyRotation(portfolioID string, tradeDate string, actions []Ap
 					PortfolioID: portfolioID, Code: code,
 					Name:      firstNonEmpty(action.Name, previous.Name, code),
 					TradeDate: tradeDate, Action: txnAction(action.Action, "clear"),
-					Price:       action.Price,
+					Price:       round(action.Price, 4),
 					LayersDelta: -currentLayers,
-					WeightDelta: -previous.PositionWeight,
-					Reason:      action.Reason, SourceSignalID: "apply_rotation",
+					// ⚠ 由层数**现算**，不减库里的历史 `position_weight`
+					//（原实现 :909-910/:922 `_weight_from_layers(current_layers, total)`）——
+					// 两者不一致时（手动传过 weight、或 total_layers 被改过）会算错。
+					WeightDelta: round(-weightFromLayers(currentLayers, item.TotalLayers), 4),
+					// U10：流水字段按原实现写死 —— reason 固定、source_signal_id 是 `组合:日期:代码`
+					Reason: applyTxnReason, SourceSignalID: applySourceSignalID(portfolioID, tradeDate, code),
 				}); err != nil {
 					return nil, err
 				}
@@ -252,8 +324,10 @@ func (s *Store) ApplyRotation(portfolioID string, tradeDate string, actions []Ap
 				// **price 用最新收盘价**，不是加权后的成本价（原实现 :918）
 				Price:       round(action.Price, 4),
 				LayersDelta: layerDelta,
-				WeightDelta: round(weight, 4) - previous.PositionWeight,
-				Reason:      action.Reason, SourceSignalID: "apply_rotation",
+				// 同样由**层数现算**（原实现 :909-910/:922），不减库里的历史值
+				WeightDelta: round(weightFromLayers(target, item.TotalLayers)-
+					weightFromLayers(currentLayers, item.TotalLayers), 4),
+				Reason: applyTxnReason, SourceSignalID: applySourceSignalID(portfolioID, tradeDate, code),
 			}); err != nil {
 				return nil, err
 			}

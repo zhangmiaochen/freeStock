@@ -1,6 +1,7 @@
 package portfolio
 
 import (
+	"fmt"
 	"testing"
 )
 
@@ -90,8 +91,67 @@ func TestApplyRotationClear(t *testing.T) {
 	if clearTxn.LayersDelta != -2 {
 		t.Errorf("清仓的层数变化应为 -2，实际 %d", clearTxn.LayersDelta)
 	}
-	if clearTxn.SourceSignalID != "apply_rotation" {
-		t.Errorf("来源应为 apply_rotation: %s", clearTxn.SourceSignalID)
+	// U10：source_signal_id 是 `组合:日期:代码`（原实现 portfolio_service.py:923），
+	// 不是常量 —— 常量的话逐笔无法追溯
+	wantSignal := fmt.Sprintf("%s:%s:%s", item.ID, clearTxn.TradeDate, "600519")
+	if clearTxn.SourceSignalID != wantSignal {
+		t.Errorf("来源应为 %s，实际 %s", wantSignal, clearTxn.SourceSignalID)
+	}
+	// U10：reason 是硬编码的"一键应用调仓建议"，不写计划行原因
+	if clearTxn.Reason != "一键应用调仓建议" {
+		t.Errorf("reason 应为「一键应用调仓建议」，实际 %q", clearTxn.Reason)
+	}
+}
+
+// U9：**建议里没提到的持仓必须被保留**。
+//
+// 原实现 `final_codes = 持仓 ∪ 建议行`（portfolio_service.py:888）——
+// 建议行丢失时按"无操作"重写。没有这层兜底的话，
+// 整表 DELETE + 按 actions INSERT 会把漏传的持仓静默删掉且不留流水。
+func TestApplyRotationPreservesUnmentionedHoldings(t *testing.T) {
+	store := newStore(t)
+	item, _ := store.Create(PortfolioInput{Name: "半自动", Type: "semi_auto", TotalLayers: 10})
+	store.AddPosition(item.ID, PositionInput{Code: "600519", EntryPrice: 100, Layers: intPtr(2)})
+	store.AddPosition(item.ID, PositionInput{Code: "000001", EntryPrice: 10, Layers: intPtr(1)})
+	store.AddPosition(item.ID, PositionInput{Code: "601318", EntryPrice: 50, Layers: intPtr(1)})
+
+	// 只传 600519 的动作 —— 000001 与 601318 **完全没提到**
+	_, err := store.ApplyRotation(item.ID, "20261008", []ApplyAction{
+		applyAction("600519", "clear", 0, 120),
+	})
+	if err != nil {
+		t.Fatalf("应用失败：%v", err)
+	}
+
+	positions, err := store.ListPositions(item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kept := map[string]int{}
+	for _, position := range positions {
+		kept[position.Code] = position.PositionLayers
+	}
+	if _, ok := kept["600519"]; ok {
+		t.Error("600519 应被清仓")
+	}
+	if kept["000001"] != 1 || kept["601318"] != 1 {
+		t.Errorf("没提到的持仓必须被保留（含层数）：实际 %+v", kept)
+	}
+	t.Logf("未提到的持仓被保留：%+v", kept)
+}
+
+// 空 actions 时，所有持仓都应被保留（不能把组合清空）。
+func TestApplyRotationEmptyActionsKeepsAll(t *testing.T) {
+	store := newStore(t)
+	item, _ := store.Create(PortfolioInput{Name: "半自动", Type: "semi_auto", TotalLayers: 10})
+	store.AddPosition(item.ID, PositionInput{Code: "600519", EntryPrice: 100, Layers: intPtr(1)})
+	store.AddPosition(item.ID, PositionInput{Code: "000001", EntryPrice: 10, Layers: intPtr(1)})
+
+	if _, err := store.ApplyRotation(item.ID, "20261008", nil); err != nil {
+		t.Fatalf("应用失败：%v", err)
+	}
+	if count, _ := store.countPositions(item.ID); count != 2 {
+		t.Errorf("空动作不应删除任何持仓，实际剩 %d 只", count)
 	}
 }
 

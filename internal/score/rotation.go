@@ -166,6 +166,8 @@ type Row struct {
 	StockReturn20D      float64 `json:"stockReturn20d"`
 	VolumeRatio20       float64 `json:"volumeRatio20"`
 	VolumeRatio520      float64 `json:"volumeRatio520"`
+	// Amount 是成交额（元）—— 低吸候选排序要用它（U5）
+	Amount float64 `json:"amountYuan"`
 	// Ma5Prev / Ma250Prev 用于低吸候选的"均线上翘"判定（F21）
 	Ma5Prev   float64 `json:"ma5PrevPrice"`
 	Ma250Prev float64 `json:"ma250PrevPrice"`
@@ -260,6 +262,22 @@ func IsFailedOversoldReboundHolding(row Row, marketState string) bool {
 		return true
 	}
 	return false
+}
+
+// atLeastOne 把小于 1 的整数抬到 1。
+func atLeastOne(v int) int {
+	if v < 1 {
+		return 1
+	}
+	return v
+}
+
+// permittedMax 取两数较小者（便于和原实现的 min(...) 逐字对应）。
+func permittedMax(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // CanHoldStrategyRepairPullback 判定是否可豁免结构破坏（仅趋势成长 / 高手模拟）。
@@ -520,6 +538,13 @@ type RotationPlan struct {
 	StrategyID   string            `json:"strategyId"`
 	EntryAllowed bool              `json:"entryAllowed"`
 	Notes        []string          `json:"notes"`
+	// NoActionReasons 解释"**为什么没有建议**"（原实现 `_build_no_action_reasons`，
+	// portfolio_rotation_logic.py:1906-1995）。
+	//
+	// 只在"候选池非空、但没有任何改仓动作"时才有值，最多 3 条。
+	// 没有它的话界面只能显示一个空列表，用户无从判断是"数据没准备好"
+	// 还是"策略判断就是不需要动"。
+	NoActionReasons []string `json:"noActionReasons"`
 }
 
 // RotationInput 是轮动计划的输入。
@@ -596,7 +621,11 @@ func BuildRotationPlan(in RotationInput) RotationPlan {
 
 		switch {
 		// 优先级 1：急涨兑现
-		case ShouldQuickProfitTake(row, state):
+		//
+		// ⚠ **低吸策略永不做急涨兑现**（原实现 :2304/:2312
+		// `quick_profit_take = False if low_buy_strategy else should_quick_profit_take(row, policy)`）。
+		// 不加这个判断的话，低吸组合会出现原版**永不产生**的减仓/清仓行。
+		case !lowBuy && ShouldQuickProfitTake(row, state):
 			if row.PositionLayers >= 2 {
 				out.Action = ActionReduce
 				out.TargetLayers = row.PositionLayers - 1
@@ -605,7 +634,7 @@ func BuildRotationPlan(in RotationInput) RotationPlan {
 				out.TargetLayers = 0
 			}
 			out.DecisionState = StateQuickProfitTake
-			out.Reason = "急涨兑现，锁定利润"
+			out.Reason = "买后短期急涨，先兑现利润"
 
 		// 优先级 2：配对 → 减仓 / 换出
 		case paired:
@@ -648,10 +677,10 @@ func BuildRotationPlan(in RotationInput) RotationPlan {
 			out.TargetLayers = 0
 			if strategyID == StrategyOversold {
 				out.DecisionState = StateOversoldFailedExit
-				out.Reason = "超跌反弹失败，清仓"
+				out.Reason = "超跌修复失败，控制单笔风险"
 			} else {
 				out.DecisionState = StateTrendBreakExit
-				out.Reason = "结构破坏且不可修复，清仓"
+				out.Reason = "结构破坏，强制退出"
 			}
 
 		// 优先级 6：需要等反弹，但今天不是大反弹阳线 → 观察
@@ -659,7 +688,7 @@ func BuildRotationPlan(in RotationInput) RotationPlan {
 			!IsBigReboundCandle(row):
 			out.Action = ActionObserve
 			out.DecisionState = StateHoldForReboundExit
-			out.Reason = "跌破MA30，等待反弹后处理"
+			out.Reason = "跌破30日线，进入结构观察区"
 
 		// 优先级 7：大反弹阳线
 		case NeedsReboundExit(row, strategyID, state, protectStart, protectRetrace) &&
@@ -669,28 +698,28 @@ func BuildRotationPlan(in RotationInput) RotationPlan {
 				out.Action = ActionReduce
 				out.TargetLayers = row.PositionLayers - 1
 				out.DecisionState = StateReboundReduce
-				out.Reason = "大反弹阳线，减一层"
+				out.Reason = "跌破30日线后出现反弹阳线，先降一层"
 			case IsWeakSingleLayerStock(row, cfg):
 				out.Action = ActionClear
 				out.TargetLayers = 0
 				out.DecisionState = StateSingleLayerReboundExit
-				out.Reason = "大反弹阳线但个股弱势，清仓"
+				out.Reason = "单层弱势仓位跌后反弹，直接退出"
 			case row.TotalScore < cfg.ClearScore:
 				out.Action = ActionClear
 				out.TargetLayers = 0
 				out.DecisionState = StateReboundExit
-				out.Reason = "大反弹阳线但评分低于清仓线，清仓"
+				out.Reason = "破位反弹后仍偏弱，建议退出"
 			default:
 				out.Action = ActionObserve
 				out.DecisionState = StateReboundObserve
-				out.Reason = "大反弹阳线，观察"
+				out.Reason = "破位后出现反弹，继续观察能否收复关键均线"
 			}
 
 		// 优先级 8：评分低于预警线 → 观察
 		case row.TotalScore < cfg.WarningScore:
 			out.Action = ActionObserve
 			out.DecisionState = StateScoreObserve
-			out.Reason = "评分低于预警线，观察"
+			out.Reason = "持仓评分低于60，进入观察区"
 
 		// 优先级 9：兜底
 		default:
@@ -765,12 +794,19 @@ func BuildRotationPlan(in RotationInput) RotationPlan {
 		}
 	}
 
-	// 目标只数：低吸用**动态目标数**（原实现 `_low_buy_dynamic_target_count`，:2041），
-	// 其余策略用配置里的固定值。
+	// 目标只数（原实现 :2445-2449）：
+	//
+	//	desired_count = max(0, low_buy_target_count)                      # 低吸
+	//	              = max(1, min(policy.desired_position_count,          # 其余
+	//	                           max_stock_limit))
+	//
+	// ⚠ 非低吸用的是 **desired_position_count**（熊市已减半），不是配置里的 target。
 	desiredCount := cfg.TargetCount
 	if lowBuy {
 		desiredCount = LowBuyDynamicTargetCount(
 			in.LowBuyBreadthReadyCount, cfg.TargetCount, in.MaxStockLimit, cfg.LowBuyPositionMode)
+	} else {
+		desiredCount = permittedMax(cfg.DesiredPositionCount, atLeastOne(in.MaxStockLimit))
 	}
 	if desiredCount < 0 {
 		desiredCount = 0
@@ -779,7 +815,17 @@ func BuildRotationPlan(in RotationInput) RotationPlan {
 	if desiredCount < 1 && !lowBuy {
 		desiredCount = 1
 	}
-	desiredLayers := cfg.TotalLayers
+
+	// 层数总额度（原实现 :2452-2456）：
+	//
+	//	低吸 → min(total_layers, desired_count * max(1, low_buy_entry_layers))
+	//	其余 → policy.desired_total_layers（熊市已减半）
+	perStockLayers := 0
+	desiredLayers := cfg.DesiredTotalLayers
+	if lowBuy {
+		perStockLayers = LowBuyEntryLayerCount(cfg.TotalLayers, desiredCount)
+		desiredLayers = permittedMax(cfg.TotalLayers, desiredCount*atLeastOne(perStockLayers))
+	}
 	if desiredLayers < 1 {
 		desiredLayers = defaultTotalLayers
 	}
@@ -812,6 +858,18 @@ func BuildRotationPlan(in RotationInput) RotationPlan {
 			if added >= addNeed || freeLayers <= 0 {
 				break
 			}
+			// **低吸每天最多新增 `low_buy_daily_max_new_adds` 只**（默认 1）。
+			// 原实现 :2489 `if low_buy_strategy and len(added_rows) >= low_buy_daily_max_new_adds: break`。
+			// 少了它低吸一天能建好几只，仓位会瞬间铺满。
+			if lowBuy {
+				dailyMax := cfg.LowBuyDailyMaxNewAdds
+				if dailyMax < 1 {
+					dailyMax = 1
+				}
+				if added >= dailyMax {
+					break
+				}
+			}
 			if usedCandidate[candidate.Code] {
 				continue
 			}
@@ -819,7 +877,27 @@ func BuildRotationPlan(in RotationInput) RotationPlan {
 			if !ok {
 				continue
 			}
-			target := initialEntryLayers(candidate, cfg, freeLayers)
+			// 建仓层数按策略分流（原实现 :2467-2481）：
+			//
+			//	低吸    → min(max(1, low_buy_entry_layers), free_layers)
+			//	超跌    → min(2 if score>=70 else 1, free_layers)
+			//	其余    → min(initial_entry_layers(...), free_layers)
+			//
+			// ⚠ 低吸用的是 `_low_buy_entry_layer_count`，**不是** `initial_entry_layers`
+			// —— 两者的低吸口径不同（前者按动态目标只数分摊总层数）。
+			target := 0
+			switch {
+			case lowBuy:
+				target = lowBuyEntryLayers(cfg, desiredCount, freeLayers)
+			case cfg.StrategyID == StrategyOversold:
+				layers := 1
+				if candidate.TotalScore >= 70 {
+					layers = 2
+				}
+				target = permittedMax(layers, freeLayers)
+			default:
+				target = initialEntryLayers(candidate, cfg, freeLayers)
+			}
 			// 不能超出剩余层数额度
 			if target > freeLayers {
 				target = freeLayers
@@ -863,7 +941,8 @@ func BuildRotationPlan(in RotationInput) RotationPlan {
 				plannedLayersAfterAdd += row.LayersDelta
 			}
 		}
-		layerRoom := cfg.TotalLayers - plannedLayersAfterAdd
+		// 基数是**熊市折算后**的层数额度（原实现 :2532 policy.desired_total_layers）
+		layerRoom := cfg.DesiredTotalLayers - plannedLayersAfterAdd
 		if layerRoom > 0 {
 			type layeringCandidate struct {
 				idx  int
@@ -926,6 +1005,66 @@ func BuildRotationPlan(in RotationInput) RotationPlan {
 		}
 	}
 
+	// ---- overflow 补位 ----
+	//
+	// 原实现 portfolio_rotation_logic.py:2575-2625。
+	// 组合没填满时，用**更严**的门槛再补几只，避免长期半仓。
+	overflowPositionLimit := overflowPositionLimitForState(state)
+	overflowMaxOpenCount := in.MaxStockLimit + overflowPositionLimit
+	plannedOpenCount, plannedTotalLayers, plannedOpenCodes := plannedRotationState(plan.Rows)
+	heldCodes := make(map[string]bool, len(in.Holdings))
+	for _, row := range in.Holdings {
+		heldCodes[row.Code] = true
+	}
+	overflowFreeLayers := cfg.DesiredTotalLayers - plannedTotalLayers
+	if overflowFreeLayers < 0 {
+		overflowFreeLayers = 0
+	}
+	minFillTarget := minimumFillLayers(cfg.DesiredTotalLayers)
+	if cfg.AllowNewAdds && !lowBuy &&
+		in.MaxStockLimit >= 5 && overflowPositionLimit > 0 &&
+		plannedOpenCount < overflowMaxOpenCount &&
+		(overflowFreeLayers >= overflowFreeLayersTrigger || plannedTotalLayers < minFillTarget) {
+		overflowSlots := overflowMaxOpenCount - plannedOpenCount
+		for _, candidate := range in.Candidates {
+			if overflowSlots <= 0 {
+				break
+			}
+			if candidate.Code == "" || usedCandidate[candidate.Code] ||
+				heldCodes[candidate.Code] || plannedOpenCodes[candidate.Code] {
+				continue
+			}
+			if !overflowCandidateQualityOK(candidate, cfg) {
+				continue
+			}
+			plan.Rows = append(plan.Rows, RotationRow{
+				Code: candidate.Code, Name: candidate.Name,
+				Action: ActionAdd, ActionLabel: ActionLabel(ActionAdd),
+				Score:  candidate.TotalScore,
+				RankNo: nextRank,
+				Reason: "补位建仓",
+				// 补位行的 score_gap / 候选字段全为 0（原实现如此）
+				SourceType:    "candidate",
+				CurrentLayers: 0,
+				// **补位恒 1 层**（原实现 `"target_layers": 1`）
+				TargetLayers:  1,
+				LayersDelta:   1,
+				DecisionState: StateCandidateEntry,
+			})
+			nextRank++
+			usedCandidate[candidate.Code] = true
+			plannedOpenCodes[candidate.Code] = true
+			plannedOpenCount++
+			plannedTotalLayers++
+			overflowSlots--
+			overflowFreeLayers--
+			// 已填满且空闲层数低于触发线 → 停（原实现 :2621-2622）
+			if plannedTotalLayers >= minFillTarget && overflowFreeLayers < overflowFreeLayersTrigger {
+				break
+			}
+		}
+	}
+
 	// ---- 广度闸门（3.7）----
 	plan.EntryAllowed = true
 	if !lowBuy {
@@ -939,6 +1078,13 @@ func BuildRotationPlan(in RotationInput) RotationPlan {
 	sortRotationRows(plan.Rows)
 	applyBehavior(&plan.Rows, cfg)
 	plan.Notes = buildNotes(plan, in)
+	// "为什么没有建议"（只在候选池非空且无任何改仓动作时有值）
+	plan.NoActionReasons = buildNoActionReasons(noActionInput{
+		plan: plan, in: in, cfg: cfg,
+		lowBuy: lowBuy, desiredCount: desiredCount, desiredLayers: desiredLayers,
+		currentCount: plannedCount, currentLayers: plannedLayers,
+		addNeed: addNeed, freeLayers: freeLayers,
+	})
 	return plan
 }
 

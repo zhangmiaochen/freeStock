@@ -1,6 +1,9 @@
 package score
 
-import "sort"
+import (
+	"sort"
+	"strings"
+)
 
 // 候选池的"入场优先级"重排。
 //
@@ -73,45 +76,112 @@ func trendGrowthEntryPriority(rows []Row) []float64 {
 
 // PrioritizeEntryPoints 按策略对候选做入场优先级重排（原实现 :1646-1698）。
 //
-// 目前只实现**趋势成长**那一支（六项加权复合分）。
-// 低吸那一支需要 `_low_buy_entry_score_series` 与 `amount_yuan` 列，
-// 本项目 `Row` 里没有这两个 —— 不做假的排序，直接原样返回。
-func PrioritizeEntryPoints(rows []Row, strategyID, lowBuySortMode string) []Row {
+//	趋势成长 → 六项加权百分位复合分（DESC，越大越好）
+//	低吸     → 按 low_buy_sort_mode 三选一（见 prioritizeLowBuy）
+//	其余     → 原样返回（超跌/高手原实现不做这一步）
+func PrioritizeEntryPoints(rows []Row, cfg StrategyConfig) []Row {
 	if len(rows) == 0 {
 		return rows
 	}
-	// 原实现会检查"整表同一策略"（`strategy_values.eq(...).all()`）；
-	// 这里由调用方保证 —— 候选池本来就是按单一策略取出来的。
-	_ = lowBuySortMode
-
-	switch strategyID {
+	switch cfg.StrategyID {
 	case StrategyTrendGrowth:
-		out := make([]Row, len(rows))
-		copy(out, rows)
-		priority := trendGrowthEntryPriority(out)
-		index := make(map[int]float64, len(out))
-		for i := range out {
-			index[i] = priority[i]
-		}
-		sort.SliceStable(out, func(a, b int) bool {
-			if index[a] != index[b] {
-				return index[a] > index[b]
-			}
-			if out[a].TotalScore != out[b].TotalScore {
-				return out[a].TotalScore > out[b].TotalScore
-			}
-			if out[a].StructureScore != out[b].StructureScore {
-				return out[a].StructureScore > out[b].StructureScore
-			}
-			if out[a].RelativeStrength20D != out[b].RelativeStrength20D {
-				return out[a].RelativeStrength20D > out[b].RelativeStrength20D
-			}
-			if out[a].RepairScore != out[b].RepairScore {
-				return out[a].RepairScore > out[b].RepairScore
-			}
-			return out[a].Code < out[b].Code
-		})
-		return out
+		return prioritizeTrendGrowth(rows)
+	case StrategyTrendLowBuy:
+		return prioritizeLowBuy(rows, cfg)
 	}
 	return rows
+}
+
+// prioritizeTrendGrowth 趋势成长的重排。
+func prioritizeTrendGrowth(rows []Row) []Row {
+	out := make([]Row, len(rows))
+	copy(out, rows)
+	priority := trendGrowthEntryPriority(out)
+	index := make(map[int]float64, len(out))
+	for i := range out {
+		index[i] = priority[i]
+	}
+	sort.SliceStable(out, func(a, b int) bool {
+		if index[a] != index[b] {
+			return index[a] > index[b]
+		}
+		if out[a].TotalScore != out[b].TotalScore {
+			return out[a].TotalScore > out[b].TotalScore
+		}
+		if out[a].StructureScore != out[b].StructureScore {
+			return out[a].StructureScore > out[b].StructureScore
+		}
+		if out[a].RelativeStrength20D != out[b].RelativeStrength20D {
+			return out[a].RelativeStrength20D > out[b].RelativeStrength20D
+		}
+		if out[a].RepairScore != out[b].RepairScore {
+			return out[a].RepairScore > out[b].RepairScore
+		}
+		return out[a].Code < out[b].Code
+	})
+	return out
+}
+
+// prioritizeLowBuy 低吸候选的排序（原实现 `prioritize_trend_growth_entry_points`
+// 的低吸分支，:1650-1683）。
+//
+// 三种模式（`low_buy_sort_mode`）：
+//
+//	amount_entry（默认）→ 成交额 DESC → 优先级分 ASC → 代码 ASC
+//	deep_amount         → 20日回撤 ASC → 成交额 DESC → 优先级分 ASC → 代码 ASC
+//	board_norm_amount   → **市场内**成交额百分位 DESC → 优先级分 ASC → 代码 ASC
+//
+// ⚠ 优先级分（`LowBuyEntryScore`）是**惩罚项**，排序用 **ASC**（越小越好），
+// 与趋势成长的 DESC 相反。
+func prioritizeLowBuy(rows []Row, cfg StrategyConfig) []Row {
+	out := make([]Row, len(rows))
+	copy(out, rows)
+
+	// amount_rank = 1 - 成交额百分位（原实现 `_low_buy_entry_score_series`）
+	amounts := make([]float64, len(out))
+	for i := range out {
+		amounts[i] = out[i].Amount
+	}
+	priority := make([]float64, len(out))
+	for i := range out {
+		amountRank := 1 - RankPct(amounts, amounts[i])
+		priority[i] = LowBuyEntryScore(out[i], cfg.LowBuyBreadthReadyCount, amountRank)
+	}
+
+	// board_norm_amount 需要"市场内"的成交额百分位
+	marketRank := make([]float64, len(out))
+	if strings.EqualFold(cfg.LowBuySortMode, "board_norm_amount") {
+		byMarket := map[string][]float64{}
+		for i := range out {
+			byMarket[out[i].Market] = append(byMarket[out[i].Market], out[i].Amount)
+		}
+		for i := range out {
+			marketRank[i] = RankPct(byMarket[out[i].Market], out[i].Amount)
+		}
+	}
+
+	sort.SliceStable(out, func(a, b int) bool {
+		switch strings.ToLower(cfg.LowBuySortMode) {
+		case "deep_amount":
+			if out[a].DrawdownFromHigh20 != out[b].DrawdownFromHigh20 {
+				return out[a].DrawdownFromHigh20 < out[b].DrawdownFromHigh20
+			}
+			if out[a].Amount != out[b].Amount {
+				return out[a].Amount > out[b].Amount
+			}
+		case "board_norm_amount":
+			if marketRank[a] != marketRank[b] {
+				return marketRank[a] > marketRank[b]
+			}
+		default: // amount_entry
+			if out[a].Amount != out[b].Amount {
+				return out[a].Amount > out[b].Amount
+			}
+		}
+		if priority[a] != priority[b] {
+			return priority[a] < priority[b]
+		}
+		return out[a].Code < out[b].Code
+	})
+	return out
 }

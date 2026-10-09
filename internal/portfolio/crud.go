@@ -8,8 +8,6 @@ import (
 	"sort"
 	"strings"
 	"time"
-
-	"freestock/internal/market"
 )
 
 // PricePoint 是某只股票的最新收盘价。
@@ -38,13 +36,27 @@ type PriceSource interface {
 // 必须带 json tag：Wails 按 tag 生成 TS 绑定，没有 tag 时字段名会原样变成
 // PascalCase（Name / ScopeValue），与前端的 camelCase 约定不一致。
 type PortfolioInput struct {
-	Name                string     `json:"name"`
-	Type                string     `json:"type"`
-	StrategyID          string     `json:"strategyId"`
-	BenchmarkCode       string     `json:"benchmarkCode"`
-	Status              string     `json:"status"`
-	TargetPositionCount int        `json:"targetPositionCount"`
-	MaxStockCount       int        `json:"maxStockCount"`
+	Name          string `json:"name"`
+	Type          string `json:"type"`
+	StrategyID    string `json:"strategyId"`
+	BenchmarkCode string `json:"benchmarkCode"`
+	Status        string `json:"status"`
+	// TargetPositionCount / MaxStockCount 用指针区分"未提供"与"显式传 0"。
+	//
+	// 原实现 portfolio_service.py:3607-3608：
+	//
+	//	target_count = max(1, _safe_int(payload["target_position_count"],
+	//	                                _safe_int(base["target_position_count"], 5)))
+	//	max_count    = max(target_count, _safe_int(payload["max_stock_count"],
+	//	                                _safe_int(base["max_stock_count"], target_count)))
+	//
+	// `_safe_int(0, 默认)` 返回 **0**（0 是合法整数），再被 `max(1, ...)` 抬到 1。
+	// 所以"显式传 0"和"字段缺失"结果不同：
+	//
+	//	target：未提供 → 旧值或 5；显式 0 → 1
+	//	max   ：未提供 → 旧值或 target；显式 0 → target
+	TargetPositionCount *int       `json:"targetPositionCount"`
+	MaxStockCount       *int       `json:"maxStockCount"`
 	TotalLayers         int        `json:"totalLayers"`
 	ScopeType           string     `json:"scopeType"`
 	ScopeValue          ScopeValue `json:"scopeValue"`
@@ -82,10 +94,23 @@ type PositionInput struct {
 // IsSupportedAShareCode 校验是否是受支持的 A 股代码。
 //
 // 对应 Python 的 `is_supported_a_share_ts_code`（market_data.py:182-191）：
-// 6 位数字 + 前缀白名单。这里复用 market.KeyOf 的前缀表，但**排除基金**
-// （159/5xx 等虽然 market.KeyOf 认得，但不是 A 股）。
+// 6 位数字 + **前缀白名单**。
 //
-// 放宽会导致写入 AAPL / 1234 / 000001SH 这类脏代码，之后所有行情查询都静默失败。
+// ⚠ **不能复用 `market.KeyOf`** —— 它带"首字符兜底"
+// （`'4'/'8'/'9'→BSE`、`'6'→SHMain`、`'0'→SZMain`、`'3'→ChiNext`），
+// 会放行原版明确拒绝的代码：
+//
+//	900901  沪 B 股
+//	430047 / 920001  北交所
+//	302xxx / 004xxx  不存在的号段
+//	任意 6xxxxx
+//
+// 原实现（market_data.py:43-58）只认这几段：
+//
+//	沪市  600 / 601 / 603 / 605 / 688 / 689
+//	深市  000 / 001 / 002 / 003 / 300 / 301
+//
+// 放行脏代码的后果：写入后所有行情查询**静默失败**，用户以为建仓成功了。
 func IsSupportedAShareCode(code string) bool {
 	bare := BareCode(code)
 	if len(bare) != 6 {
@@ -96,11 +121,20 @@ func IsSupportedAShareCode(code string) bool {
 			return false
 		}
 	}
-	switch market.KeyOf(bare) {
-	case market.KeySHMain, market.KeySZMain, market.KeyChiNext, market.KeySTAR, market.KeyBSE:
+	switch bare[:3] {
+	case "600", "601", "603", "605", "688", "689", // 沪市（含科创板）
+		"000", "001", "002", "003", "300", "301": // 深市（含创业板）
 		return true
 	}
 	return false
+}
+
+// NormalizePortfolioInput 是 `normalizeInput` 的导出包装（`existing` 为 nil 即"新建"）。
+//
+// 自动建组合（`create_auto_portfolio`）要用同一套归一化 —— 否则它落库的
+// 默认值/别名解析会与手动创建不一致。
+func NormalizePortfolioInput(in PortfolioInput) (Portfolio, error) {
+	return normalizeInput(in, nil)
 }
 
 // normalizeInput 把入参归一化成可落库的组合。
@@ -136,25 +170,43 @@ func normalizeInput(in PortfolioInput, existing *Portfolio) (Portfolio, error) {
 	strategyID := NormalizeStrategy(pick(in.StrategyID, old.StrategyID), portfolioType)
 
 	benchmark := strings.TrimSpace(pick(in.BenchmarkCode, old.BenchmarkCode))
+	// 基准代码要**归一化**（原实现 :3621 走 `_normalize_ts_code`）：
+	// 大写 + 6 位纯数字补 .SH/.SZ。不补的话填 `000300` 会存成裸码，
+	// 之后去行情/指数里取基准就取不到。
+	benchmark = NormalizeBenchmarkCode(benchmark)
 	if benchmark == "" {
 		benchmark = defaultBenchmark
 	}
 
-	// 整数：0 视为"未提供"，回落到旧值；负数视为显式传入，由 max(1, ..) 兜底
-	target := in.TargetPositionCount
-	if target == 0 {
+	// 目标只数（原实现 :3607）：
+	//
+	//	payload 有值 → max(1, 该值)          # **显式 0 → 1**
+	//	payload 缺省 → max(1, 旧值 or 5)
+	target := 0
+	if in.TargetPositionCount != nil {
+		target = *in.TargetPositionCount
+	} else {
 		target = old.TargetPositionCount
-	}
-	if target == 0 {
-		target = 5
+		if target == 0 {
+			target = 5
+		}
 	}
 	if target < 1 {
 		target = 1
 	}
 
-	maxCount := in.MaxStockCount
-	if maxCount == 0 {
+	// 最大只数（原实现 :3608）：**下限是 target**
+	//
+	//	payload 有值 → max(target, 该值)     # **显式 0 → target**
+	//	payload 缺省 → max(target, 旧值 or target)
+	maxCount := 0
+	if in.MaxStockCount != nil {
+		maxCount = *in.MaxStockCount
+	} else {
 		maxCount = old.MaxStockCount
+		if maxCount == 0 {
+			maxCount = target
+		}
 	}
 	if maxCount < target {
 		maxCount = target
@@ -301,12 +353,13 @@ func (s *Store) Get(id string) (Portfolio, error) {
 
 // List 列出全部组合。
 //
-// 排序（原实现 portfolio_service.py:3029-3040）：
-// **未归档优先** → updated_at 降序 → portfolio_id 升序。
-// 此前只按 created_at 降序 —— 归档组合会混在活跃组合中间。
+// 排序（原实现 portfolio_service.py:3035）：
+// `CASE status WHEN 'active' THEN 0 ELSE 1 END` → **只有 active 在最前**，
+// paused 与 archived 一起排在后面（不是"只有 archived 靠后"）。
+// 此前写成 `status='archived' THEN 1 ELSE 0` → paused 会与 active 混排。
 func (s *Store) List() ([]Portfolio, error) {
 	rows, err := s.db.Query(portfolioSelect + `
-		ORDER BY CASE WHEN p.status = 'archived' THEN 1 ELSE 0 END ASC,
+		ORDER BY CASE WHEN p.status = 'active' THEN 0 ELSE 1 END ASC,
 		         p.updated_at DESC, p.portfolio_id ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("读取组合列表失败：%w", err)
@@ -412,6 +465,14 @@ func scopeLabel(scopeType string, value ScopeValue) string {
 //
 // 这是原项目 _weight_from_layers 的 1:1 复刻：
 // 分母是 total_layers（层数上限），不是市值也不是成本。
+// WeightFromLayers 由层数换算权重（百分比）。
+//
+// 导出给 service 层的自动建组合用 —— 它落库的 `position_weight` 必须与
+// 手动建仓用同一个公式。
+func WeightFromLayers(layers, totalLayers int) float64 {
+	return weightFromLayers(layers, totalLayers)
+}
+
 func weightFromLayers(layers, totalLayers int) float64 {
 	if totalLayers < 1 {
 		totalLayers = 1
@@ -575,11 +636,27 @@ func (s *Store) DeletePosition(portfolioID, code string) error {
 		return fmt.Errorf("删除持仓失败：%w", err)
 	}
 
+	// 流水日期：**最新评分日 → 建仓日 → 今天**（原实现 portfolio_service.py:576
+	// `latest_strength_date or entry_date or now`）。
+	// 直接写"今天"的话，周末/盘前清仓会落一个非交易日的流水。
+	tradeDate := ""
+	if item, err := s.Get(portfolioID); err == nil {
+		if date, err := s.LatestStrengthDate(item.StrategyID); err == nil && date > 0 {
+			tradeDate = fmt.Sprintf("%d", date)
+		}
+	}
+	if tradeDate == "" {
+		tradeDate = NormalizeDate(existing.EntryDate)
+	}
+	if tradeDate == "" {
+		tradeDate = time.Now().Format("20060102")
+	}
+
 	return s.insertTxn(Transaction{
 		PortfolioID:    portfolioID,
 		Code:           bare,
 		Name:           existing.Name,
-		TradeDate:      time.Now().Format("20060102"),
+		TradeDate:      tradeDate,
 		Action:         "clear",
 		Price:          existing.EntryPrice,
 		LayersDelta:    -existing.PositionLayers,

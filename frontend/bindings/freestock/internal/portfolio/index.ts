@@ -3,6 +3,9 @@
 
 export {
     ApplyResult,
+    BacktestDaily,
+    BacktestRun,
+    BacktestTrade,
     Detail,
     Overview,
     Portfolio,
@@ -11,6 +14,7 @@ export {
     PositionInput,
     PricePoint,
     ScopeValue,
+    ScoreSnapshot,
     Summary,
     Transaction
 } from "./models.js";

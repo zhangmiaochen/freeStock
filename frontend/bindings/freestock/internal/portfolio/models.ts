@@ -58,6 +58,278 @@ export class ApplyResult {
 }
 
 /**
+ * BacktestDaily 是回测净值曲线的一天。
+ */
+export class BacktestDaily {
+    "runId": string;
+    "tradeDate": string;
+    "totalValue": number;
+    "cash": number;
+    "positionValue": number;
+    "dailyReturn": number;
+    "cumulativeReturn": number;
+    "benchmarkValue": number;
+    "benchmarkReturn": number;
+    "positionCount": number;
+
+    /** Creates a new BacktestDaily instance. */
+    constructor($$source: Partial<BacktestDaily> = {}) {
+        if (!("runId" in $$source)) {
+            this["runId"] = "";
+        }
+        if (!("tradeDate" in $$source)) {
+            this["tradeDate"] = "";
+        }
+        if (!("totalValue" in $$source)) {
+            this["totalValue"] = 0;
+        }
+        if (!("cash" in $$source)) {
+            this["cash"] = 0;
+        }
+        if (!("positionValue" in $$source)) {
+            this["positionValue"] = 0;
+        }
+        if (!("dailyReturn" in $$source)) {
+            this["dailyReturn"] = 0;
+        }
+        if (!("cumulativeReturn" in $$source)) {
+            this["cumulativeReturn"] = 0;
+        }
+        if (!("benchmarkValue" in $$source)) {
+            this["benchmarkValue"] = 0;
+        }
+        if (!("benchmarkReturn" in $$source)) {
+            this["benchmarkReturn"] = 0;
+        }
+        if (!("positionCount" in $$source)) {
+            this["positionCount"] = 0;
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new BacktestDaily instance from a string or object.
+     */
+    static createFrom($$source: any = {}): BacktestDaily {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new BacktestDaily($$parsedSource as Partial<BacktestDaily>);
+    }
+}
+
+/**
+ * BacktestRun 是一次回测的元信息与绩效。
+ */
+export class BacktestRun {
+    "runId": string;
+    "portfolioId": string;
+    "portfolioName": string;
+    "strategyId": string;
+    "strategyLabel": string;
+    "portfolioType": string;
+    "portfolioTypeLabel": string;
+    "benchmarkCode": string;
+    "startDate": string;
+    "endDate": string;
+    "rebalanceFrequency": string;
+    "initialCapital": number;
+    "status": string;
+    "totalReturn": number;
+    "annualReturn": number;
+    "maxDrawdown": number;
+    "sharpeRatio": number;
+    "totalTrades": number;
+    "avgPositionCount": number;
+    "finalValue": number;
+    "summaryJson": string;
+    "createdAt": string;
+    "updatedAt": string;
+    "finishedAt": string;
+
+    /** Creates a new BacktestRun instance. */
+    constructor($$source: Partial<BacktestRun> = {}) {
+        if (!("runId" in $$source)) {
+            this["runId"] = "";
+        }
+        if (!("portfolioId" in $$source)) {
+            this["portfolioId"] = "";
+        }
+        if (!("portfolioName" in $$source)) {
+            this["portfolioName"] = "";
+        }
+        if (!("strategyId" in $$source)) {
+            this["strategyId"] = "";
+        }
+        if (!("strategyLabel" in $$source)) {
+            this["strategyLabel"] = "";
+        }
+        if (!("portfolioType" in $$source)) {
+            this["portfolioType"] = "";
+        }
+        if (!("portfolioTypeLabel" in $$source)) {
+            this["portfolioTypeLabel"] = "";
+        }
+        if (!("benchmarkCode" in $$source)) {
+            this["benchmarkCode"] = "";
+        }
+        if (!("startDate" in $$source)) {
+            this["startDate"] = "";
+        }
+        if (!("endDate" in $$source)) {
+            this["endDate"] = "";
+        }
+        if (!("rebalanceFrequency" in $$source)) {
+            this["rebalanceFrequency"] = "";
+        }
+        if (!("initialCapital" in $$source)) {
+            this["initialCapital"] = 0;
+        }
+        if (!("status" in $$source)) {
+            this["status"] = "";
+        }
+        if (!("totalReturn" in $$source)) {
+            this["totalReturn"] = 0;
+        }
+        if (!("annualReturn" in $$source)) {
+            this["annualReturn"] = 0;
+        }
+        if (!("maxDrawdown" in $$source)) {
+            this["maxDrawdown"] = 0;
+        }
+        if (!("sharpeRatio" in $$source)) {
+            this["sharpeRatio"] = 0;
+        }
+        if (!("totalTrades" in $$source)) {
+            this["totalTrades"] = 0;
+        }
+        if (!("avgPositionCount" in $$source)) {
+            this["avgPositionCount"] = 0;
+        }
+        if (!("finalValue" in $$source)) {
+            this["finalValue"] = 0;
+        }
+        if (!("summaryJson" in $$source)) {
+            this["summaryJson"] = "";
+        }
+        if (!("createdAt" in $$source)) {
+            this["createdAt"] = "";
+        }
+        if (!("updatedAt" in $$source)) {
+            this["updatedAt"] = "";
+        }
+        if (!("finishedAt" in $$source)) {
+            this["finishedAt"] = "";
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new BacktestRun instance from a string or object.
+     */
+    static createFrom($$source: any = {}): BacktestRun {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new BacktestRun($$parsedSource as Partial<BacktestRun>);
+    }
+}
+
+/**
+ * BacktestTrade 是回测里的一笔成交。
+ */
+export class BacktestTrade {
+    "tradeId": string;
+    "runId": string;
+    "portfolioId": string;
+    "tsCode": string;
+    "name": string;
+    "action": string;
+    "tradeDate": string;
+    "price": number;
+    "shares": number;
+    "amount": number;
+    "commission": number;
+    "tax": number;
+    "totalCost": number;
+    "profitLoss": number;
+    "profitLossPct": number;
+    "positionWeight": number;
+    "score": number;
+    "reason": string;
+    "createdAt": string;
+
+    /** Creates a new BacktestTrade instance. */
+    constructor($$source: Partial<BacktestTrade> = {}) {
+        if (!("tradeId" in $$source)) {
+            this["tradeId"] = "";
+        }
+        if (!("runId" in $$source)) {
+            this["runId"] = "";
+        }
+        if (!("portfolioId" in $$source)) {
+            this["portfolioId"] = "";
+        }
+        if (!("tsCode" in $$source)) {
+            this["tsCode"] = "";
+        }
+        if (!("name" in $$source)) {
+            this["name"] = "";
+        }
+        if (!("action" in $$source)) {
+            this["action"] = "";
+        }
+        if (!("tradeDate" in $$source)) {
+            this["tradeDate"] = "";
+        }
+        if (!("price" in $$source)) {
+            this["price"] = 0;
+        }
+        if (!("shares" in $$source)) {
+            this["shares"] = 0;
+        }
+        if (!("amount" in $$source)) {
+            this["amount"] = 0;
+        }
+        if (!("commission" in $$source)) {
+            this["commission"] = 0;
+        }
+        if (!("tax" in $$source)) {
+            this["tax"] = 0;
+        }
+        if (!("totalCost" in $$source)) {
+            this["totalCost"] = 0;
+        }
+        if (!("profitLoss" in $$source)) {
+            this["profitLoss"] = 0;
+        }
+        if (!("profitLossPct" in $$source)) {
+            this["profitLossPct"] = 0;
+        }
+        if (!("positionWeight" in $$source)) {
+            this["positionWeight"] = 0;
+        }
+        if (!("score" in $$source)) {
+            this["score"] = 0;
+        }
+        if (!("reason" in $$source)) {
+            this["reason"] = "";
+        }
+        if (!("createdAt" in $$source)) {
+            this["createdAt"] = "";
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new BacktestTrade instance from a string or object.
+     */
+    static createFrom($$source: any = {}): BacktestTrade {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new BacktestTrade($$parsedSource as Partial<BacktestTrade>);
+    }
+}
+
+/**
  * Detail 是组合详情（组合 + 持仓 + 汇总），一次查询返回。
  */
 export class Detail {
@@ -329,8 +601,25 @@ export class PortfolioInput {
     "strategyId": string;
     "benchmarkCode": string;
     "status": string;
-    "targetPositionCount": number;
-    "maxStockCount": number;
+
+    /**
+     * TargetPositionCount / MaxStockCount 用指针区分"未提供"与"显式传 0"。
+     * 
+     * 原实现 portfolio_service.py:3607-3608：
+     * 
+     * 	target_count = max(1, _safe_int(payload["target_position_count"],
+     * 	                                _safe_int(base["target_position_count"], 5)))
+     * 	max_count    = max(target_count, _safe_int(payload["max_stock_count"],
+     * 	                                _safe_int(base["max_stock_count"], target_count)))
+     * 
+     * `_safe_int(0, 默认)` 返回 **0**（0 是合法整数），再被 `max(1, ...)` 抬到 1。
+     * 所以"显式传 0"和"字段缺失"结果不同：
+     * 
+     * 	target：未提供 → 旧值或 5；显式 0 → 1
+     * 	max   ：未提供 → 旧值或 target；显式 0 → target
+     */
+    "targetPositionCount": number | null;
+    "maxStockCount": number | null;
     "totalLayers": number;
     "scopeType": string;
     "scopeValue": ScopeValue;
@@ -354,10 +643,10 @@ export class PortfolioInput {
             this["status"] = "";
         }
         if (!("targetPositionCount" in $$source)) {
-            this["targetPositionCount"] = 0;
+            this["targetPositionCount"] = null;
         }
         if (!("maxStockCount" in $$source)) {
-            this["maxStockCount"] = 0;
+            this["maxStockCount"] = null;
         }
         if (!("totalLayers" in $$source)) {
             this["totalLayers"] = 0;
@@ -660,6 +949,114 @@ export class ScopeValue {
             $$parsedSource["markets"] = $$createField2_0($$parsedSource["markets"]);
         }
         return new ScopeValue($$parsedSource as Partial<ScopeValue>);
+    }
+}
+
+/**
+ * ScoreSnapshot 是组合层面的评分与动作统计。
+ */
+export class ScoreSnapshot {
+    "portfolioId": string;
+    "tradeDate": string;
+    "strategyId": string;
+    "strategyLabel": string;
+    "portfolioType": string;
+    "portfolioTypeLabel": string;
+    "executionMode": string;
+    "executionModeLabel": string;
+    "allowApplyRotation": boolean;
+    "requireManualConfirmation": boolean;
+    "portfolioScore": number;
+    "healthLabel": string;
+    "positionCount": number;
+    "candidateCount": number;
+    "keepCount": number;
+    "warningCount": number;
+    "replaceCount": number;
+    "addCount": number;
+    "clearCount": number;
+    "actionSummaryJson": string;
+    "totalReturnPct": number;
+    "maxDrawdownPct": number;
+
+    /** Creates a new ScoreSnapshot instance. */
+    constructor($$source: Partial<ScoreSnapshot> = {}) {
+        if (!("portfolioId" in $$source)) {
+            this["portfolioId"] = "";
+        }
+        if (!("tradeDate" in $$source)) {
+            this["tradeDate"] = "";
+        }
+        if (!("strategyId" in $$source)) {
+            this["strategyId"] = "";
+        }
+        if (!("strategyLabel" in $$source)) {
+            this["strategyLabel"] = "";
+        }
+        if (!("portfolioType" in $$source)) {
+            this["portfolioType"] = "";
+        }
+        if (!("portfolioTypeLabel" in $$source)) {
+            this["portfolioTypeLabel"] = "";
+        }
+        if (!("executionMode" in $$source)) {
+            this["executionMode"] = "";
+        }
+        if (!("executionModeLabel" in $$source)) {
+            this["executionModeLabel"] = "";
+        }
+        if (!("allowApplyRotation" in $$source)) {
+            this["allowApplyRotation"] = false;
+        }
+        if (!("requireManualConfirmation" in $$source)) {
+            this["requireManualConfirmation"] = false;
+        }
+        if (!("portfolioScore" in $$source)) {
+            this["portfolioScore"] = 0;
+        }
+        if (!("healthLabel" in $$source)) {
+            this["healthLabel"] = "";
+        }
+        if (!("positionCount" in $$source)) {
+            this["positionCount"] = 0;
+        }
+        if (!("candidateCount" in $$source)) {
+            this["candidateCount"] = 0;
+        }
+        if (!("keepCount" in $$source)) {
+            this["keepCount"] = 0;
+        }
+        if (!("warningCount" in $$source)) {
+            this["warningCount"] = 0;
+        }
+        if (!("replaceCount" in $$source)) {
+            this["replaceCount"] = 0;
+        }
+        if (!("addCount" in $$source)) {
+            this["addCount"] = 0;
+        }
+        if (!("clearCount" in $$source)) {
+            this["clearCount"] = 0;
+        }
+        if (!("actionSummaryJson" in $$source)) {
+            this["actionSummaryJson"] = "";
+        }
+        if (!("totalReturnPct" in $$source)) {
+            this["totalReturnPct"] = 0;
+        }
+        if (!("maxDrawdownPct" in $$source)) {
+            this["maxDrawdownPct"] = 0;
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new ScoreSnapshot instance from a string or object.
+     */
+    static createFrom($$source: any = {}): ScoreSnapshot {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new ScoreSnapshot($$parsedSource as Partial<ScoreSnapshot>);
     }
 }
 

@@ -46,7 +46,10 @@ export const menuGroups: MenuGroup[] = [
   },
   {
     label: "组合管理",
-    items: [{ title: "组合管理", to: "/portfolio", icon: Briefcase }],
+    items: [
+      { title: "组合管理", to: "/portfolio", icon: Briefcase },
+      { title: "组合回测", to: "/backtest", icon: ChartLine },
+    ],
   },
   {
     label: "系统",

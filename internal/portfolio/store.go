@@ -124,6 +124,30 @@ const DefaultBenchmark = "000300.SH"
 // defaultBenchmark 是包内使用的别名。
 const defaultBenchmark = DefaultBenchmark
 
+// NormalizeBenchmarkCode 归一化基准代码。
+//
+// 对应原实现 portfolio_service.py:201-207 的 `_normalize_ts_code`：
+// 大写、去空格；6 位纯数字按首位补交易所后缀。
+// 不补的话填 `000300` 会存成裸码，之后去行情/指数里取基准就取不到。
+func NormalizeBenchmarkCode(value string) string {
+	code := strings.ToUpper(strings.TrimSpace(value))
+	if code == "" || strings.Contains(code, ".") || len(code) != 6 {
+		return code
+	}
+	for _, ch := range code {
+		if ch < '0' || ch > '9' {
+			return code
+		}
+	}
+	switch code[0] {
+	case '6', '9':
+		return code + ".SH"
+	case '0', '3':
+		return code + ".SZ"
+	}
+	return code
+}
+
 // maxManualLayers 是**手动新增持仓**时层数的上限。
 //
 // 原项目把它硬编码成 2（`min(2, max(1, ...))`），而界面上允许输入到 999、
@@ -358,15 +382,19 @@ func NormalizeStatus(value string) string {
 }
 
 // NormalizeScopeType 归一化范围类型。无法识别 → all。
+//
+// 别名集对齐 portfolio_service.py:3644-3655，**包含复数形式**
+// （`industries` / `concepts`）—— 少了它们会静默降级为"全市场"，
+// 候选池与调仓建议全变而且没有任何提示。
 func NormalizeScopeType(value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case ScopeAll, "all_market", "market":
 		return ScopeAll
 	case ScopeManualCodes, "codes", "manual":
 		return ScopeManualCodes
-	case ScopeIndustry:
+	case ScopeIndustry, "industries":
 		return ScopeIndustry
-	case ScopeConcept:
+	case ScopeConcept, "concepts":
 		return ScopeConcept
 	}
 	return ScopeAll
@@ -605,6 +633,14 @@ func (s *Store) migrate() error {
 	if err := s.migrateStrength(); err != nil {
 		return err
 	}
+	// 回测三张表（见 backtest.go）
+	if _, err := s.db.Exec(backtestSchema); err != nil {
+		return fmt.Errorf("建回测表失败：%w", err)
+	}
+	// 四张留档表（见 snapshot.go）
+	if _, err := s.db.Exec(snapshotSchema); err != nil {
+		return fmt.Errorf("建留档表失败：%w", err)
+	}
 	return nil
 }
 
@@ -631,4 +667,14 @@ func newPortfolioID() string {
 // newTxnID 生成流水 ID。
 func newTxnID() string {
 	return newID("txn")
+}
+
+// NewBacktestRunID 生成回测 ID（原项目前缀是 `btr`，见 portfolio_service.py:1030）。
+func NewBacktestRunID() string {
+	return newID("btr")
+}
+
+// newBacktestTradeID 生成回测成交 ID。
+func newBacktestTradeID() string {
+	return newID("btt")
 }

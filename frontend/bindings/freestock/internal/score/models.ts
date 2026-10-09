@@ -152,6 +152,16 @@ export class RotationPlan {
     "entryAllowed": boolean;
     "notes": string[];
 
+    /**
+     * NoActionReasons 解释"**为什么没有建议**"（原实现 `_build_no_action_reasons`，
+     * portfolio_rotation_logic.py:1906-1995）。
+     * 
+     * 只在"候选池非空、但没有任何改仓动作"时才有值，最多 3 条。
+     * 没有它的话界面只能显示一个空列表，用户无从判断是"数据没准备好"
+     * 还是"策略判断就是不需要动"。
+     */
+    "noActionReasons": string[];
+
     /** Creates a new RotationPlan instance. */
     constructor($$source: Partial<RotationPlan> = {}) {
         if (!("rows" in $$source)) {
@@ -175,6 +185,9 @@ export class RotationPlan {
         if (!("notes" in $$source)) {
             this["notes"] = [];
         }
+        if (!("noActionReasons" in $$source)) {
+            this["noActionReasons"] = [];
+        }
 
         Object.assign(this, $$source);
     }
@@ -187,6 +200,7 @@ export class RotationPlan {
         const $$createField1_0 = $$createType3;
         const $$createField2_0 = $$createType5;
         const $$createField6_0 = $$createType6;
+        const $$createField7_0 = $$createType6;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("rows" in $$parsedSource) {
             $$parsedSource["rows"] = $$createField0_0($$parsedSource["rows"]);
@@ -199,6 +213,9 @@ export class RotationPlan {
         }
         if ("notes" in $$parsedSource) {
             $$parsedSource["notes"] = $$createField6_0($$parsedSource["notes"]);
+        }
+        if ("noActionReasons" in $$parsedSource) {
+            $$parsedSource["noActionReasons"] = $$createField7_0($$parsedSource["noActionReasons"]);
         }
         return new RotationPlan($$parsedSource as Partial<RotationPlan>);
     }
@@ -385,6 +402,11 @@ export class Row {
     "volumeRatio520": number;
 
     /**
+     * Amount 是成交额（元）—— 低吸候选排序要用它（U5）
+     */
+    "amountYuan": number;
+
+    /**
      * Ma5Prev / Ma250Prev 用于低吸候选的"均线上翘"判定（F21）
      */
     "ma5PrevPrice": number;
@@ -516,6 +538,9 @@ export class Row {
         if (!("volumeRatio520" in $$source)) {
             this["volumeRatio520"] = 0;
         }
+        if (!("amountYuan" in $$source)) {
+            this["amountYuan"] = 0;
+        }
         if (!("ma5PrevPrice" in $$source)) {
             this["ma5PrevPrice"] = 0;
         }
@@ -578,6 +603,19 @@ export class StrategyConfig {
     "marketState": string;
     "totalLayers": number;
     "targetPositionCount": number;
+
+    /**
+     * DesiredPositionCount / DesiredTotalLayers 是**按市场状态折算后**的目标
+     * （原实现 `policy_from_strategy_config`，portfolio_rotation_logic.py:248-262）：
+     * 
+     * 	熊市：desired_count  = max(1, (target+1)/2)
+     * 	      desired_layers = max(1, (total+1)/2)
+     * 	其余：原值
+     * 
+     * 熊市**减半**是原实现控制风险敞口的核心手段 —— 少建一半只数、少用一半层数。
+     */
+    "desiredPositionCount": number;
+    "desiredTotalLayers": number;
     "readyScore": number;
     "candidateScoreFloor": number;
     "maxLayersPerStock": number;
@@ -630,6 +668,12 @@ export class StrategyConfig {
         }
         if (!("targetPositionCount" in $$source)) {
             this["targetPositionCount"] = 0;
+        }
+        if (!("desiredPositionCount" in $$source)) {
+            this["desiredPositionCount"] = 0;
+        }
+        if (!("desiredTotalLayers" in $$source)) {
+            this["desiredTotalLayers"] = 0;
         }
         if (!("readyScore" in $$source)) {
             this["readyScore"] = 0;

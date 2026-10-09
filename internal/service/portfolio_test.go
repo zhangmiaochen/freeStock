@@ -26,7 +26,7 @@ func TestPortfolioServiceCreateAndDetail(t *testing.T) {
 
 	created, err := svc.CreatePortfolio(portfolio.PortfolioInput{
 		Name: "测试组合", Type: "semi_auto", StrategyID: portfolio.StrategyTrendLowBuy,
-		TargetPositionCount: 3, TotalLayers: (10),
+		TargetPositionCount: intPtr(3), TotalLayers: (10),
 		ScopeType: portfolio.ScopeIndustry, ScopeValue: portfolio.ScopeValue{Items: []string{"银行"}},
 	})
 	if err != nil {

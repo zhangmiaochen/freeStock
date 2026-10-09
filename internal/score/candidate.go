@@ -133,11 +133,14 @@ func buildReplacementPairs(in RotationInput, protectStart, protectRetrace float6
 				}
 			}
 
-			reason := "换入更强标的（分差 " + ftoa(gap, 1) + "）"
+			// 配对原因（原实现 :2221/2230/2236 + `replacement_reason` :1547-1560）：
+			// force_clear / rebound 两种有专属文案，其余走 `replacement_reason`
+			// 的四选一（按分差绝对值取最大，**平局取第一个**）。
+			reason := replacementReason(hold, cand)
 			if forceClear {
 				reason = "结构破坏，换入更强标的"
 			} else if reboundReady {
-				reason = "跌破MA30且候选更强，换股"
+				reason = "破位反弹后切换到更强候选"
 			}
 
 			totalGap := round(cand.TotalScore-hold.TotalScore, 4)
@@ -229,17 +232,29 @@ func CandidateQualityOK(row Row, cfg StrategyConfig, marketState string, replace
 	}
 
 	// 各策略的分项下限
+	//
+	// `signal_bonus`：原实现（portfolio_rotation_logic.py:1151-1169）
+	// `min_score = base - (2.0 if 有新鲜信号 else 0.0)`。
+	//
+	// ⚠ **本项目没有 ML 信号数据，`SignalType` 恒为空** → 正确值是 **0**，不是 −2。
+	// 此前三处一律写死 `- 2`，等于给所有候选**无条件放宽 2 分** ——
+	// 与"有信号才放宽"的语义正好相反。
+	signalBonus := 0.0
+	if row.SignalType == "buy" && row.SignalAge <= signalMaxAgeForState(marketState) {
+		signalBonus = 2.0
+	}
+
 	var minScore, minTrend, minStructure, minRS, minRS20 float64
 	switch cfg.StrategyID {
 	case StrategyOversold:
-		minScore = cfg.ReadyScore - 2
+		minScore = cfg.ReadyScore - signalBonus
 		minTrend, minStructure, minRS, minRS20 = 14, 8, 7, -6
 	case StrategyExpert:
 		base := 60.0
 		if marketState == StateRange {
 			base = 62
 		}
-		minScore = math.Max(cfg.ReadyScore, base) - 2
+		minScore = math.Max(cfg.ReadyScore, base) - signalBonus
 		minTrend = 15
 		if marketState == StateBull {
 			minTrend = 16
@@ -250,7 +265,7 @@ func CandidateQualityOK(row Row, cfg StrategyConfig, marketState string, replace
 		if marketState == StateRange {
 			base = 72
 		}
-		minScore = math.Max(cfg.ReadyScore, base) - 2
+		minScore = math.Max(cfg.ReadyScore, base) - signalBonus
 		minTrend = 18
 		if marketState == StateBull {
 			minTrend = 19
@@ -472,6 +487,36 @@ func lowBuyDrawdownBounds(breadthReadyCount int) (float64, float64) {
 	return -28.0, -3.0
 }
 
+// replacementReason 给出"换股理由"的四个标签（原实现 `replacement_reason` :1547-1560）。
+//
+//	趋势与结构更优     → |趋势差| + |结构差|
+//	RS优势更强         → |RS 差|
+//	修复能力更强       → |修复分差|
+//	综合评分显著领先   → max(0, 候选总分 - 持仓总分)
+//
+// 取最大者；**平局取第一个**（Python 的 `max(dict.items(), key=...)`
+// 在等值时返回插入序最靠前的那个）。
+func replacementReason(hold, cand Row) string {
+	trendGap := math.Abs(cand.TrendScore - hold.TrendScore)
+	structureGap := math.Abs(cand.StructureScore - hold.StructureScore)
+	rsGap := math.Abs(cand.RSScore - hold.RSScore)
+	repairGap := math.Abs(cand.RepairScore - hold.RepairScore)
+	totalGap := math.Max(0, cand.TotalScore-hold.TotalScore)
+
+	best := "趋势与结构更优"
+	bestValue := trendGap + structureGap
+	if rsGap > bestValue {
+		best, bestValue = "RS优势更强", rsGap
+	}
+	if repairGap > bestValue {
+		best, bestValue = "修复能力更强", repairGap
+	}
+	if totalGap > bestValue {
+		best = "综合评分显著领先"
+	}
+	return best
+}
+
 // sortCandidates 按候选池排序规则排序（4.2）。
 //
 //	total_score DESC, signal_priority ASC, active_signal_score DESC,
@@ -516,26 +561,54 @@ func signalPriority(row Row) int {
 	return 2
 }
 
-// initialEntryLayers 计算建仓层数（3.3）。
+// initialEntryLayers 计算建仓层数。
 //
-// 低吸用 clip(int(total_layers/target), 1, total_layers)，其余默认 1 层。
+// 原实现 `initial_entry_layers`（portfolio_rotation_logic.py:1438-1544）。
+// 按策略分派（**顺序不能换**，前面的先返回）：
+//
+//	低吸       → max(1, min(2, max_layers_per_stock))
+//	max_layers_per_stock <= 1 → 1
+//	高手模拟   → 1
+//	超跌反弹   → min(2 if score>=70 else 1, max_layers_per_stock)
+//	趋势成长 且 **震荡市** → min(2, max_layers_per_stock)
+//	（bull_ready / range_ready / *_fill_ready 四组依赖 ML 信号 → 本项目不可达）
+//	其余       → 1
+//
+// ⚠ 此前非低吸**恒返回 1** —— 原版"趋势成长在震荡市首次建仓 2 层"、
+// "超跌反弹高分建 2 层"都被压成了 1 层，仓位直接少一半。
+//
+// freeLayers / remainingSlotNeed 在原实现里是给那四组信号条件用的，
+// 本项目不可达，故不参与判定。
 func initialEntryLayers(row Row, cfg StrategyConfig, freeLayers int) int {
-	_ = row
 	_ = freeLayers
 	if isLowBuyStrategy(cfg.StrategyID) {
-		if cfg.TargetCount <= 0 {
-			return 1
+		return atLeastOne(permittedMax(2, cfg.MaxLayersPerStock))
+	}
+	if cfg.MaxLayersPerStock <= 1 {
+		return 1
+	}
+	switch cfg.StrategyID {
+	case StrategyExpert:
+		return 1
+	case StrategyOversold:
+		layers := 1
+		if row.TotalScore >= 70 {
+			layers = 2
 		}
-		layers := cfg.TotalLayers / cfg.TargetCount
-		if layers < 1 {
-			layers = 1
+		return permittedMax(layers, cfg.MaxLayersPerStock)
+	case StrategyTrendGrowth:
+		if cfg.MarketState == StateRange {
+			return permittedMax(2, cfg.MaxLayersPerStock)
 		}
-		if layers > cfg.TotalLayers {
-			layers = cfg.TotalLayers
-		}
-		return layers
 	}
 	return 1
+}
+
+// lowBuyEntryLayers 低吸建仓的层数（原实现 :2470
+// `min(max(1, low_buy_entry_layers), free_layers)`）。
+func lowBuyEntryLayers(cfg StrategyConfig, desiredCount, freeLayers int) int {
+	layers := atLeastOne(LowBuyEntryLayerCount(cfg.TotalLayers, desiredCount))
+	return permittedMax(layers, freeLayers)
 }
 
 // ---------------------------------------------------------------------------

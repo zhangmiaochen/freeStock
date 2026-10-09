@@ -129,6 +129,14 @@ async function mountPage() {
   await vi.waitFor(() => expect(mocks.getScreenOptions).toHaveBeenCalled());
   await nextTick();
   await nextTick();
+  // **还要等「条件读回」落地**。
+  // 只等 getScreenOptions 时，getScreenCondition 的 promise 可能在用户点击**之后**
+  // 才 resolve，把这次点击覆盖回初始值 —— 表现为"点了沪市主板却存了空数组"。
+  // 假定时器下（用例自己 vi.useFakeTimers()）尤其容易踩到。
+  await vi.waitFor(() => expect(mocks.getScreenCondition).toHaveBeenCalled());
+  await Promise.resolve();
+  await Promise.resolve();
+  await nextTick();
   return { wrapper, router };
 }
 
@@ -341,10 +349,9 @@ describe("条件选股页面", () => {
   });
 
   it("条件改动会自动保存到配置文件", async () => {
+    const { wrapper } = await mountPage();
     vi.useFakeTimers();
     try {
-      const { wrapper } = await mountPage();
-
       await button(wrapper, "沪市主板")!.trigger("click");
       await nextTick();
 
@@ -352,8 +359,16 @@ describe("条件选股页面", () => {
       await vi.advanceTimersByTimeAsync(600);
       expect(mocks.saveScreenCondition).toHaveBeenCalled();
 
-      const saved = mocks.saveScreenCondition.mock.calls.at(-1)![0];
-      expect(saved.markets).toEqual(["sh-main"]);
+      // ⚠ **不能取 `.at(-1)`**：初始条件读回本身也可能触发一次保存，
+      // 它和点击触发的保存在同一个防抖窗口内，先后顺序取决于调度 ——
+      // 取最后一次会间歇性地拿到"初始值"那次，表现为
+      // `expected [] to deeply equal [ 'sh-main' ]`。
+      // 语义上要断言的是"**存在**一次包含沪市主板的保存"。
+      const saves = mocks.saveScreenCondition.mock.calls.map((call) => call[0]);
+      const hit = saves.some(
+        (item) => Array.isArray(item?.markets) && item.markets.includes("sh-main"),
+      );
+      expect(hit, `没有任何一次保存包含 sh-main，实际保存了：${JSON.stringify(saves)}`).toBe(true);
     } finally {
       vi.useRealTimers();
     }

@@ -56,6 +56,7 @@ type StrengthRow struct {
 	StockReturn20D      float64 `json:"stockReturn20d"`
 	VolumeRatio20       float64 `json:"volumeRatio20"`
 	VolumeRatio520      float64 `json:"volumeRatio520"`
+	Amount              float64 `json:"amountYuan"`
 	Ma5Prev             float64 `json:"ma5PrevPrice"`
 	Ma250Prev           float64 `json:"ma250PrevPrice"`
 	IndustryReturn20D   float64 `json:"industryReturn20d"`
@@ -97,6 +98,7 @@ CREATE TABLE IF NOT EXISTS stock_strength (
   stock_return_20d      REAL NOT NULL DEFAULT 0,
   volume_ratio_20       REAL NOT NULL DEFAULT 0,
   volume_ratio_5_20     REAL NOT NULL DEFAULT 0,
+  amount_yuan           REAL NOT NULL DEFAULT 0,
   ma5_prev_price        REAL NOT NULL DEFAULT 0,
   ma250_prev_price      REAL NOT NULL DEFAULT 0,
   industry_return_20d   REAL NOT NULL DEFAULT 0,
@@ -130,14 +132,14 @@ func (s *Store) SaveStrength(tradeDate int64, strategyID string, rows []Strength
 		INSERT INTO stock_strength (
 			trade_date, strategy_id, ts_code, name, industry, market,
 			total_score, trend_score, structure_score, rs_score, capital_score, repair_score,
-			close_price, high_price, low_price, open_price, pct_chg,
+			close_price, high_price, low_price, open_price, pct_chg, amount_yuan,
 			ma5_price, ma20_price, ma30_price, ma60_price, ma120_price, ma250_price,
 			relative_strength_20d, drawdown_from_high_20, drawdown_from_high_120,
 			rebound_from_low_60, stock_return_3d, stock_return_5d, stock_return_10d,
 			stock_return_20d, volume_ratio_20, volume_ratio_5_20,
 			ma5_prev_price, ma250_prev_price,
 			industry_return_20d, benchmark_return_20d, created_at
-		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		return fmt.Errorf("准备评分写入失败：%w", err)
 	}
@@ -151,7 +153,7 @@ func (s *Store) SaveStrength(tradeDate int64, strategyID string, rows []Strength
 			row.TradeDate, row.StrategyID, row.Code, row.Name, row.Industry, row.Market,
 			row.TotalScore, row.TrendScore, row.StructureScore, row.RSScore,
 			row.CapitalScore, row.RepairScore,
-			row.Close, row.High, row.Low, row.Open, row.PctChg,
+			row.Close, row.High, row.Low, row.Open, row.PctChg, row.Amount,
 			row.Ma5, row.Ma20, row.Ma30, row.Ma60, row.Ma120, row.Ma250,
 			row.RelativeStrength20D, row.DrawdownFromHigh20, row.DrawdownFromHigh120,
 			row.ReboundFromLow60, row.StockReturn3D, row.StockReturn5D, row.StockReturn10D,
@@ -222,7 +224,7 @@ func (s *Store) StrengthCount(tradeDate int64, strategyID string) (int, error) {
 const strengthSelect = `
 	SELECT trade_date, strategy_id, ts_code, name, industry, market,
 	       total_score, trend_score, structure_score, rs_score, capital_score, repair_score,
-	       close_price, high_price, low_price, open_price, pct_chg,
+	       close_price, high_price, low_price, open_price, pct_chg, amount_yuan,
 	       ma5_price, ma20_price, ma30_price, ma60_price, ma120_price, ma250_price,
 	       relative_strength_20d, drawdown_from_high_20, drawdown_from_high_120,
 	       rebound_from_low_60, stock_return_3d, stock_return_5d, stock_return_10d,
@@ -237,7 +239,7 @@ func scanStrength(row scanner) (StrengthRow, error) {
 		&out.TradeDate, &out.StrategyID, &out.Code, &out.Name, &out.Industry, &out.Market,
 		&out.TotalScore, &out.TrendScore, &out.StructureScore, &out.RSScore,
 		&out.CapitalScore, &out.RepairScore,
-		&out.Close, &out.High, &out.Low, &out.Open, &out.PctChg,
+		&out.Close, &out.High, &out.Low, &out.Open, &out.PctChg, &out.Amount,
 		&out.Ma5, &out.Ma20, &out.Ma30, &out.Ma60, &out.Ma120, &out.Ma250,
 		&out.RelativeStrength20D, &out.DrawdownFromHigh20, &out.DrawdownFromHigh120,
 		&out.ReboundFromLow60, &out.StockReturn3D, &out.StockReturn5D, &out.StockReturn10D,
@@ -245,6 +247,55 @@ func scanStrength(row scanner) (StrengthRow, error) {
 		&out.Ma5Prev, &out.Ma250Prev, &out.IndustryReturn20D, &out.BenchmarkReturn20D,
 	)
 	return out, err
+}
+
+// LoadStrengthRange 读取某个日期区间内、某策略的全部评分，按日期升序。
+//
+// 回测要把整个区间的评分一次性读出来（逐日查库会变成 N 次查询）。
+func (s *Store) LoadStrengthRange(strategyID string, startDate, endDate int64) ([]StrengthRow, error) {
+	rows, err := s.db.Query(
+		strengthSelect+` WHERE strategy_id=? AND trade_date>=? AND trade_date<=?
+		ORDER BY trade_date ASC, total_score DESC, ts_code ASC`,
+		strategyID, startDate, endDate,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("读取区间评分失败：%w", err)
+	}
+	defer rows.Close()
+
+	var out []StrengthRow
+	for rows.Next() {
+		item, err := scanStrength(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+// StrengthDatesInRange 返回区间内**有评分**的交易日（升序）。
+func (s *Store) StrengthDatesInRange(strategyID string, startDate, endDate int64) ([]int64, error) {
+	rows, err := s.db.Query(
+		`SELECT DISTINCT trade_date FROM stock_strength
+		 WHERE strategy_id=? AND trade_date>=? AND trade_date<=?
+		 ORDER BY trade_date ASC`,
+		strategyID, startDate, endDate,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("读取评分日期失败：%w", err)
+	}
+	defer rows.Close()
+
+	var out []int64
+	for rows.Next() {
+		var date int64
+		if err := rows.Scan(&date); err != nil {
+			return nil, fmt.Errorf("扫描评分日期失败：%w", err)
+		}
+		out = append(out, date)
+	}
+	return out, rows.Err()
 }
 
 // LoadStrength 读取某日某策略的评分，按总分降序。
@@ -346,6 +397,7 @@ func (s *Store) migrateStrength() error {
 		"stock_return_3d REAL NOT NULL DEFAULT 0",
 		"stock_return_20d REAL NOT NULL DEFAULT 0",
 		"volume_ratio_5_20 REAL NOT NULL DEFAULT 0",
+		"amount_yuan REAL NOT NULL DEFAULT 0",
 		"ma5_prev_price REAL NOT NULL DEFAULT 0",
 		"ma250_prev_price REAL NOT NULL DEFAULT 0",
 		"industry_return_20d REAL NOT NULL DEFAULT 0",

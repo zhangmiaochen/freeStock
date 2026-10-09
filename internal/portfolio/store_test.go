@@ -179,7 +179,7 @@ func TestCreatePortfolioValidation(t *testing.T) {
 
 	// 最大持仓数不能小于目标持仓数
 	item, err := store.Create(PortfolioInput{
-		Name: "组合A", TargetPositionCount: 8, MaxStockCount: 3,
+		Name: "组合A", TargetPositionCount: intPtr(8), MaxStockCount: intPtr(3),
 	})
 	if err != nil {
 		t.Fatalf("创建失败: %v", err)
@@ -191,20 +191,38 @@ func TestCreatePortfolioValidation(t *testing.T) {
 	// 目标持仓数下限 1 —— 注意负数**不回落**到默认值
 	// （Python 的 `payload.get(x) or base.get(x) or 5` 里 -5 是 truthy，
 	//  再经 `max(1, ...)` 得 1）
-	item, err = store.Create(PortfolioInput{Name: "组合B", TargetPositionCount: -5})
+	item, err = store.Create(PortfolioInput{Name: "组合B", TargetPositionCount: intPtr(-5)})
 	if err != nil {
 		t.Fatalf("创建失败: %v", err)
 	}
 	if item.TargetPositionCount != 1 {
 		t.Errorf("负数目标数应被 max(1,..) 兜到 1，实际 %d", item.TargetPositionCount)
 	}
-	// 显式传 0 视为"未提供" → 回落默认 5
-	item, err = store.Create(PortfolioInput{Name: "组合C", TargetPositionCount: 0})
+	// **显式传 0 → max(1, 0) = 1**（原实现 :3607；0 是合法整数，不被当作"缺省"）
+	item, err = store.Create(PortfolioInput{Name: "组合C", TargetPositionCount: intPtr(0)})
+	if err != nil {
+		t.Fatalf("创建失败: %v", err)
+	}
+	if item.TargetPositionCount != 1 {
+		t.Errorf("显式传 0 应被 max(1,..) 抬到 1，实际 %d", item.TargetPositionCount)
+	}
+	// **字段缺省（nil）才回落到默认 5**
+	item, err = store.Create(PortfolioInput{Name: "组合D"})
 	if err != nil {
 		t.Fatalf("创建失败: %v", err)
 	}
 	if item.TargetPositionCount != 5 {
-		t.Errorf("传 0 应回落到默认 5，实际 %d", item.TargetPositionCount)
+		t.Errorf("缺省应回落默认 5，实际 %d", item.TargetPositionCount)
+	}
+	// max_stock_count 显式传 0 → max(target, 0) = target
+	item, err = store.Create(PortfolioInput{
+		Name: "组合E", TargetPositionCount: intPtr(4), MaxStockCount: intPtr(0),
+	})
+	if err != nil {
+		t.Fatalf("创建失败: %v", err)
+	}
+	if item.MaxStockCount != 4 {
+		t.Errorf("max_stock_count 传 0 应等于 target(4)，实际 %d", item.MaxStockCount)
 	}
 }
 
@@ -218,7 +236,7 @@ func TestUpdatePreservesOmittedFields(t *testing.T) {
 	created, err := store.Create(PortfolioInput{
 		Name: "原名", Type: "semi_auto", StrategyID: StrategyTrendLowBuy,
 		BenchmarkCode: "000905.SH", Status: "paused",
-		TargetPositionCount: 8, MaxStockCount: 12, TotalLayers: (20),
+		TargetPositionCount: intPtr(8), MaxStockCount: intPtr(12), TotalLayers: (20),
 		ScopeType: ScopeIndustry, ScopeValue: ScopeValue{Items: []string{"银行", "证券"}},
 		Notes: "重要备注",
 	})
@@ -306,7 +324,7 @@ func TestUpdateAndListPortfolios(t *testing.T) {
 
 	updated, err := store.Update(created.ID, PortfolioInput{
 		Name: "新名称", Type: "semi_auto", StrategyID: StrategyTrendLowBuy,
-		TargetPositionCount: 3, TotalLayers: (20),
+		TargetPositionCount: intPtr(3), TotalLayers: (20),
 	})
 	if err != nil {
 		t.Fatalf("更新失败: %v", err)
@@ -620,7 +638,7 @@ func TestPersistsAcrossReopen(t *testing.T) {
 	}
 	item, _ := store.Create(PortfolioInput{
 		Name: "持久化组合", Type: "semi_auto", StrategyID: StrategyTrendLowBuy,
-		TotalLayers: (20), TargetPositionCount: 3,
+		TotalLayers: (20), TargetPositionCount: intPtr(3),
 		ScopeType: ScopeIndustry, ScopeValue: ScopeValue{Items: []string{"银行", "证券"}, Markets: []string{"main"}},
 		Notes: "备注内容",
 	})

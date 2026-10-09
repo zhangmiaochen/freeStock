@@ -39,6 +39,9 @@ import type { DatasetStatus, Partition } from "../../bindings/freestock/internal
 import type { BollPrefs, KlinePrefs, MaPrefs, MacdPrefs } from "../../bindings/freestock/internal/config/models";
 // 组合管理的类型定义在 portfolio 包里，Wails 按包生成模型
 import type {
+  BacktestDaily,
+  BacktestRun,
+  BacktestTrade,
   Detail as PortfolioDetail,
   Overview as PortfolioOverview,
   Portfolio,
@@ -49,6 +52,17 @@ import type {
   Summary as PortfolioSummary,
   Transaction as PortfolioTransaction,
 } from "../../bindings/freestock/internal/portfolio/models";
+// 回测相关的类型定义在 backtest 包
+import type { Metrics as BacktestMetrics } from "../../bindings/freestock/internal/backtest/models";
+// 回测的服务层入参/出参
+import type {
+  AutoPortfolioRequest,
+  AutoPortfolioResult,
+  BackfillResult,
+  BacktestPayload,
+  BacktestRequest,
+  BacktestRunResult,
+} from "../../bindings/freestock/internal/service/models";
 import type {
   AppliedChange,
   ApplyResult,
@@ -238,5 +252,32 @@ export const api = {
     /** 一键应用建议（手动组合会被拒绝） */
     applyRotation: (portfolioID: string) =>
       PortfolioService.ApplyRotation(portfolioID) as Promise<ApplyResult>,
+
+    // ---- 阶段三：回测 ----
+    /**
+     * 历史回填：给一个日期区间内的每个交易日打分并落库。
+     * **回测的前提** —— 没有历史评分就跑不了回测。
+     */
+    refreshBackfill: (strategyId: string, startDate: number, endDate: number, limit: number) =>
+      PortfolioService.RefreshBackfill(strategyId, startDate, endDate, limit) as Promise<BackfillResult>,
+    /** 跑一次回测（区间内必须有已回填的历史评分） */
+    createBacktest: (req: BacktestRequest) =>
+      PortfolioService.CreateBacktest(req) as Promise<BacktestRunResult>,
+    /** 读一次回测的完整结果 */
+    getBacktest: (runId: string) =>
+      PortfolioService.GetBacktestPayload(runId) as Promise<BacktestPayload>,
+    /** 列出回测记录（portfolioId 为空时列全部） */
+    listBacktests: (portfolioId: string) =>
+      PortfolioService.ListBacktests(portfolioId) as Promise<BacktestRun[]>,
+    /** 删除一次回测 */
+    deleteBacktest: (runId: string) => PortfolioService.DeleteBacktest(runId),
+
+    // ---- 自动建组合 ----
+    /** 预演自动组合（不落库）：按策略与范围给出首批初始持仓 */
+    previewAutoPortfolio: (req: AutoPortfolioRequest) =>
+      PortfolioService.PreviewAutoPortfolio(req) as Promise<AutoPortfolioResult>,
+    /** 创建自动组合并落库 */
+    createAutoPortfolio: (req: AutoPortfolioRequest) =>
+      PortfolioService.CreateAutoPortfolio(req) as Promise<AutoPortfolioResult>,
   },
 };

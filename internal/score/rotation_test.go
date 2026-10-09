@@ -969,29 +969,40 @@ func TestAddQuotaIsEnforced(t *testing.T) {
 
 	adds := 0
 	totalLayers := 0
+	overflowAdds := 0
 	for _, row := range plan.Rows {
 		if row.Action == ActionAdd {
 			adds++
 			totalLayers += row.TargetLayers
+			if row.Reason == "补位建仓" {
+				overflowAdds++
+			}
 		}
 	}
-	if adds > cfg.TargetCount {
-		t.Errorf("建仓数不该超过目标持仓数 %d，实际 %d", cfg.TargetCount, adds)
+	// 基础建仓不超过目标只数
+	base := adds - overflowAdds
+	if base > cfg.TargetCount {
+		t.Errorf("基础建仓数不该超过目标持仓数 %d，实际 %d", cfg.TargetCount, base)
+	}
+	// **overflow 补位会刻意超出目标**，上限是 max_stock_limit + 7（原实现 :2047）
+	maxOpen := 5 + 7
+	if adds > maxOpen {
+		t.Errorf("含补位的建仓总数不该超过 %d，实际 %d", maxOpen, adds)
 	}
 	if totalLayers > cfg.TotalLayers {
 		t.Errorf("建仓层数不该超过总层数 %d，实际 %d", cfg.TotalLayers, totalLayers)
 	}
-	t.Logf("50 只候选 → 建仓 %d 只、共 %d 层（上限 %d 只 / %d 层）",
-		adds, totalLayers, cfg.TargetCount, cfg.TotalLayers)
+	t.Logf("50 只候选 → 建仓 %d 只（其中补位 %d 只）、共 %d 层（上限 %d 只 / %d 层）",
+		adds, overflowAdds, totalLayers, cfg.TargetCount, cfg.TotalLayers)
 }
 
-// 已有持仓占满额度时不该再建仓。
+// 已有持仓占满**基础**额度时：不再走正常建仓，但 overflow 补位仍会补
+// （这正是补位的目的 —— 组合没填满就补上）。
 func TestAddQuotaRespectsExistingHoldings(t *testing.T) {
 	cfg := BuildStrategyConfig(StrategyTrendGrowth, StateRange, 3, 10, 3, "")
 	holdings := []Row{
 		hold("600519", nil), hold("000001", nil), hold("601318", nil),
 	}
-	// 三只都已占满 target=3
 	var candidates []Row
 	for i := 0; i < 20; i++ {
 		row := cand("Y"+ftoa(float64(i), 0), 95)
@@ -1003,12 +1014,29 @@ func TestAddQuotaRespectsExistingHoldings(t *testing.T) {
 		Config: cfg, MarketState: StateRange, MaxStockLimit: 5,
 	})
 
+	baseAdds, overflowAdds := 0, 0
 	for _, row := range plan.Rows {
-		// 只看**真正的新建仓**（配对换入行在 partial_rotate 下动作名也是 add）
-		if row.Action == ActionAdd && !row.FromPair {
-			t.Errorf("额度已满（3/3）时不该建仓: %+v", row)
+		if row.Action != ActionAdd || row.FromPair {
+			continue
 		}
+		if row.Reason == "补位建仓" {
+			overflowAdds++
+			// 补位行恒 1 层、score_gap 与候选字段为 0
+			if row.TargetLayers != 1 || row.LayersDelta != 1 || row.ScoreGap != 0 {
+				t.Errorf("补位行应恒 1 层且候选字段为 0: %+v", row)
+			}
+			continue
+		}
+		baseAdds++
 	}
+	if baseAdds != 0 {
+		t.Errorf("基础额度已满（3/3）时不该有正常建仓，实际 %d", baseAdds)
+	}
+	// 补位上限 = max_stock_limit + 7 - 已开只数
+	if overflowAdds > 5+7-3 {
+		t.Errorf("补位只数超上限，实际 %d", overflowAdds)
+	}
+	t.Logf("额度已满时：基础建仓 %d 只、补位 %d 只", baseAdds, overflowAdds)
 }
 
 // 熊市且 allow_new_adds=false 时不该建仓。

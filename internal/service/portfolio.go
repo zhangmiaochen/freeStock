@@ -3,7 +3,6 @@ package service
 import (
 	"fmt"
 	"log/slog"
-	"sort"
 	"sync"
 
 	"freestock/internal/portfolio"
@@ -230,12 +229,10 @@ func (s *PortfolioService) GetPortfolioDetail(id string) (*portfolio.Detail, err
 	if err != nil {
 		return nil, err
 	}
-	sort.SliceStable(detail.Positions, func(i, j int) bool {
-		if detail.Positions[i].PositionWeight != detail.Positions[j].PositionWeight {
-			return detail.Positions[i].PositionWeight > detail.Positions[j].PositionWeight
-		}
-		return detail.Positions[i].Code < detail.Positions[j].Code
-	})
+	// ⚠ **不要在这里重排**。原实现（portfolio_service.py:745-755）直接用 SQL
+	// 的排序结果，SQL 里是 `position_weight DESC, entry_date ASC, ts_code ASC`。
+	// 这里再排一次会把 `entry_date` 那一维丢掉 ——
+	// 同权重、不同建仓日的持仓顺序将与原版不同。
 	return &detail, nil
 }
 
@@ -278,11 +275,21 @@ func (s *PortfolioService) AddPosition(portfolioID string, in portfolio.Position
 
 	// 建仓价没给时用最新收盘价补（对应 Python `entry_price <= 0` 时取当日 close_price）。
 	// 仍取不到就让 store 层报错 —— 0 成本会让浮盈保护永不触发。
+	//
+	// ⚠ **必须传组合自己的策略**（原实现 portfolio_service.py:514
+	// `self._strength_rows_for_codes(latest_trade_date, [code], portfolio.get("strategy_id"))`）。
+	// 传空串会被 LatestClose 硬编码成 trend_growth —— 那非趋势成长的组合
+	// 会拿到**别的策略**评分日的收盘价，且与同组合详情页取价不同源，浮盈立刻失真。
 	if in.EntryPrice <= 0 && code != "" && s.stock != nil {
-		if prices, err := s.LatestClose([]string{code}, ""); err == nil {
+		strategyID := ""
+		if item, err := store.Get(portfolioID); err == nil {
+			strategyID = item.StrategyID
+		}
+		if prices, err := s.LatestClose([]string{code}, strategyID); err == nil {
 			if point, ok := prices[code]; ok && point.Close > 0 {
 				in.EntryPrice = point.Close
-				slog.Info("建仓价缺省，已用最新收盘价补", "code", code, "price", point.Close)
+				slog.Info("建仓价缺省，已用最新收盘价补",
+					"code", code, "price", point.Close, "strategy", strategyID)
 			}
 		}
 	}

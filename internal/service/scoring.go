@@ -255,9 +255,11 @@ func (s *ScoringService) ScoreStocks(codes []string, tradeDate int, limit int, s
 
 		// 按策略算五项分（四个策略的公式完全不同，见 strategy_scores.go）
 		scores := score.ComputeStrategyScores(strategyID, score.StrategyScoreInput{
-			Indicators:  ind,
-			Repair:      in.repair,
-			NearRepair:  in.nearRepair,
+			Indicators: ind,
+			Repair:     in.repair,
+			NearRepair: in.nearRepair,
+			// **这个字段之前算了却从没被读** —— 结构分的"突破缺口"档因此整段失效
+			PrevHigh60:  in.prevHigh60,
 			MainlineRaw: 0, // 本项目没有板块研究分
 		})
 		trend, structure := scores.Trend, scores.Structure
@@ -276,7 +278,7 @@ func (s *ScoringService) ScoreStocks(codes []string, tradeDate int, limit int, s
 			// 参考实现的这一列也是这么混用的。
 			RepairScore: repairColumnValue(strategyID, scores, in),
 
-			Close: ind.Close, High: ind.High, Low: ind.Low, Open: ind.Open,
+			Close: ind.Close, High: ind.High, Low: ind.Low, Open: ind.Open, Amount: ind.Amount,
 			Ma5: ind.Ma5, Ma20: ind.Ma20, Ma30: ind.Ma30,
 			Ma60: ind.Ma60, Ma120: ind.Ma120, Ma250: ind.Ma250,
 			PctChg: ind.PctChg,

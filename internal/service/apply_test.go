@@ -8,8 +8,9 @@ import (
 	"freestock/internal/score"
 )
 
-// intPtr 造一个 *int —— PositionInput.Layers 用指针区分"未提供"与"显式 0"。
-func intPtr(v int) *int { return &v }
+// intPtr / floatPtr 由生产代码提供（见 auto_portfolio.go）——
+// 它们不是测试专用：`PortfolioInput` / `PositionInput` 的指针字段
+// 在业务代码里也要构造。
 
 // 一键应用建议的端到端：刷新评分 → 生成建议 → 应用 → 持仓被正确改写。
 //
@@ -22,7 +23,7 @@ func TestApplyRotationEndToEnd(t *testing.T) {
 
 	created, err := svc.CreatePortfolio(portfolio.PortfolioInput{
 		Name: "应用测试组合", Type: "auto", StrategyID: score.StrategyTrendGrowth,
-		TargetPositionCount: 3, MaxStockCount: 5, TotalLayers: (10),
+		TargetPositionCount: intPtr(3), MaxStockCount: intPtr(5), TotalLayers: (10),
 		ScopeType: portfolio.ScopeAll,
 	})
 	if err != nil {
@@ -118,15 +119,21 @@ func TestApplyRotationEndToEnd(t *testing.T) {
 	}
 
 	// 流水应记录本次应用
+	//
+	// U10：`source_signal_id` 是 `组合:日期:代码`（原实现 portfolio_service.py:923），
+	// 不再是常量 "apply_rotation"。
 	txns := after.Transactions
 	applied := 0
 	for _, txn := range txns {
-		if txn.SourceSignalID == "apply_rotation" {
+		if strings.HasPrefix(txn.SourceSignalID, created.ID+":") {
 			applied++
+			if txn.Reason != "一键应用调仓建议" {
+				t.Errorf("reason 应为「一键应用调仓建议」，实际 %q", txn.Reason)
+			}
 		}
 	}
 	if applied == 0 {
-		t.Error("应写入 apply_rotation 来源的流水")
+		t.Errorf("应写入以 `组合:日期:代码` 为来源的流水（前缀 %s:）", created.ID)
 	}
 	t.Logf("应用后持仓 %d 只，新增流水 %d 条", len(after.Positions), applied)
 }

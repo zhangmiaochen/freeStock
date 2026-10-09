@@ -167,6 +167,10 @@ type Indicators struct {
 	Ma5Prev   float64 `json:"ma5PrevPrice"`
 	Ma10Prev  float64 `json:"ma10PrevPrice"`
 	Ma250Prev float64 `json:"ma250PrevPrice"`
+	// Ma20Lag5 / Ma60Lag10 是 `ma20.shift(5)` / `ma60.shift(10)`，
+	// 供趋势分的最后两个滞后项使用
+	Ma20Lag5  float64 `json:"ma20Lag5Price"`
+	Ma60Lag10 float64 `json:"ma60Lag10Price"`
 
 	VolumeRatio20  float64 `json:"volumeRatio20"`
 	VolumeRatio520 float64 `json:"volumeRatio520"`
@@ -243,6 +247,15 @@ func ComputeIndicators(bars []Bar) (Indicators, bool) {
 	}
 	if v, ok := rollingMean(closes[:len(closes)-1], 250, 250); ok {
 		out.Ma250Prev = round(v, 4)
+	}
+	// **滞后均线**：`ma20.shift(5)` / `ma60.shift(10)`（原实现 portfolio_service.py:1717-1718）。
+	// 趋势分的最后两项 `2*(ma20>ma20_lag5) + 2*(ma60>ma60_lag10)` 要用它 ——
+	// 之前调用方传 0，那两个条件退化成 `ma20>0`/`ma60>0`（均线走平时虚高 2~4 分）。
+	if v, ok := rollingMean(closes[:len(closes)-5], 20, 20); ok {
+		out.Ma20Lag5 = round(v, 4)
+	}
+	if v, ok := rollingMean(closes[:len(closes)-10], 60, 60); ok {
+		out.Ma60Lag10 = round(v, 4)
 	}
 
 	// 量比

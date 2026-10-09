@@ -21,6 +21,10 @@
 
 所以：**不要在每个 HTTP 请求里起一个 `cne query` 子进程。** 这是本文唯一必须记住的一条。
 
+正确读法（§4）：**短开一个只读 DuckDB 连接直读 cne 的库，查完立刻关闭** ——
+单次 0.10–0.14s，而且**永远读到最新的视图定义**，不需要复制、不需要维护副本。
+起子进程 9–12s vs 直读 0.1s，差两个数量级。
+
 ---
 
 ## 1. 实测：端到端耗时
@@ -125,42 +129,43 @@ def query(config_path, sql, dataset, symbol, refresh):
 
 ## 4. 本项目可用的三种读法（按推荐度）
 
-### ✅ 方案 A（推荐）：导出视图定义，在自己库里建一次，长期持有连接
+### ✅ 方案 A（首选）：短开只读连接，直读 cne 的文件
 
-DuckDB 的视图是**持久化对象**，而且 `duckdb_views()` / `duckdb_functions()` 能把定义整体读出来。
-所以本项目可以：**从 cne 已建好的库里把定义导出来，在自己的 DuckDB（或 `:memory:`）里建一次，
-然后长期复用同一个连接。**
+**不复制、不重建**：每次（或每批）查询时 `duckdb.connect(cne_db, read_only=True)`，查完立刻关闭。
+cne 的 `.duckdb` 里已经持久化了全部视图，只读打开就能直接用。
 
-**完整配方（含参考代码）见 §5，已实测跑通**：导出 73 个视图 + 2 个宏，在自己库里 2 轮收敛、
-一次性约 4.4 秒；随后 `财务 单股 0.17s`、`日线 单股 0.68s`、`daily_bars count 1.24s`。
+实测（同一个财务查询）：
 
-实测收益：
-
-| 方式 | 单次查询耗时 |
+| 方式 | 单次耗时 |
 |---|---|
-| 每次起 `cne query` 子进程 | **9–12s** |
-| 自建一次后复用连接 | **0.00–2.6s**（多数 0.2–1.3s） |
+| **每次短开只读连接** | **0.10 – 0.14s**（打开 0.018s + 查询 ~0.1s） |
+| 长连接（自己建好层） | 0.07 – 0.10s |
 
-> ⚠️ **不要直接长期持有 cne 的那个 `.duckdb` 文件**：DuckDB 不允许「只读连接 + 读写连接」同时打开同一文件。
+**两者只差约 0.03 秒，但方案 A 换来两个关键好处**：
+
+1. **永远是最新定义** —— cne 升级改了视图 SQL、或数据发布了新 revision，你下次读到的就是新的，
+   **不存在"要不要更新副本"的问题**（详见 §5.4）；
+2. **零维护** —— 不需要复制、不需要检测失效、不需要重建。
+
+> ⚠️ **唯一的代价是"读者与写者互斥"**：DuckDB 不允许同一文件的只读连接与读写连接并存。
 > 实测：持有一个只读连接后，再开读写连接会得到
 > `ConnectionException: Can't open a connection to same database file with a different configuration than existing connections`。
-> 也就是说**你持有只读连接期间，`cne query` / 任何写视图的命令都会失败**。
+> 也就是说**你正在读的那一瞬间，cne 无法重建它的视图**（反之亦然）。
 >
-> 所以方案 A 要求把定义**复制到自己的库里**，而不是共用 cne 的文件。
+> 规避方式：**把连接开得尽量短**（打开→查询→关闭，约 0.1 秒），并对
+> `duckdb.connect` 的失败做一次重试。只读连接彼此可以并发（实测多个只读连接共存无冲突），
+> 所以高并发时用连接池，不要用长连接独占。
 
-### ⚠️ 方案 B：复制 cne 已建好的 `.duckdb`（快，但会静默读到旧数据）
+### ⚠️ 方案 B：复制视图定义到自己库里（快，但**必须自己处理失效**）
 
-实测：直接打开 cne 建好的文件，全新只读连接里已有 **73 个 VIEW**，无需重建：
+把 73 个视图 + 2 个宏的定义导出，在自己的 DuckDB（或 `:memory:`）里重建，然后长期复用。
+好处是**完全不受 cne 写入影响**（不碰 cne 的文件）；代价是**你必须自己检测上游变化**，
+否则会安静地读旧数据、用旧语义。
 
-| 查询 | 耗时 |
-|---|---|
-| `count(*) from daily_bars` | 1.36s |
-| `financial_statement_items where symbol='600519.SH'` | 0.18s |
+实测：导出 73 视图 + 2 宏，在自己的库里 **2 轮收敛、一次性约 4.4 秒**；
+随后 `财务 单股 0.17s`、`日线 单股 0.68s`、`daily_bars count 1.24s`。
 
-**但有一个必须知道的陷阱**：视图的 SQL 里**固化了当时的 revision 路径**
-（`meta/revisions/data/daily_bars/<hash>/`）。数据湖一旦发布新版本，指针会变，
-而**你手上这份副本仍指向旧 revision —— 不会报错，只会安静地给你旧数据**。
-若用这种方式，必须在湖更新后重新取（例如比较 `meta/revisions` 下的指针文件时间）。
+**配方与失效检测见 §5。选这条路之前，先读 §5.4。**
 
 ### ❌ 方案 C（要避开）：请求路径里起 `cne query` 子进程
 
@@ -170,6 +175,10 @@ DuckDB 的视图是**持久化对象**，而且 `duckdb_views()` / `duckdb_funct
 ---
 
 ## 5. 可直接实现的配方（已实测跑通）
+
+> **先读 §5.4。** 本节是「方案 B：复制视图层」的实现与失效处理；
+> 如果你能用 §4 的方案 A（短连接直读），**根本不需要这一节** —— 也就没有"要不要更新"的问题。
+> 选方案 B 意味着你接手了「跟随上游变化」这件事，下节给出可自动化的做法。
 
 思路：**导出定义 → 在自己的库里按「重试到收敛」重放 → 之后长期复用连接。**
 
@@ -245,6 +254,94 @@ print(target.execute(
    `Parser Error: syntax error at or near "["`。
 4. **`duckdb_functions()` 里混着 DuckDB 自带宏**（`histogram`、`duckdb_logs_parsed` 等，
    `internal=true`、`db=system`），必须用 `internal = false` 过滤。
+
+### 5.4 ⚠️ cne 升级 / 数据更新后，这份副本要不要更新？——**要，而且要自动检测**
+
+这是方案 B 的**唯一硬伤**。副本是「某一时刻的定义快照」，上游一变它就不对了。
+会变的有三类，**危险程度递增**：
+
+| 触发 | 表现 | 危险度 |
+|---|---|---|
+| ① 数据发布新 revision | 视图 SQL 里固化的 `meta/revisions/data/<数据集>/<hash>/` 路径变了 | 中：**安静地读到旧数据**，不报错 |
+| ② cne 升级改了视图 SQL | 例如复权锚点、去重 `QUALIFY` 的排序键、OTC 过滤规则变了 | **高：语义漂移**。你会继续用旧算法算出**看起来正常但和 Python 对不上**的数字 |
+| ③ 数据集增删 | 视图从 73 个变成 75 个 | 中：新数据集查不到（会报错，反而安全）；删掉的不报错但已无意义 |
+
+②对本项目尤其致命 —— 你们做的正是「复刻一致性」，而这类不一致**不会抛异常**，
+只会让 `复刻一致性审计` 里辛苦对齐的公式悄悄偏掉。
+
+#### 好消息：三类触发可以共用一个信号
+
+实测：**revision 路径就嵌在视图 SQL 里**（如 `.../meta/revisions/data/daily_bars/f59679f0`），
+所以「数据更新」和「定义升级」都会改变视图 SQL 本身。
+于是只要对**全部视图 + 宏的定义**取一个哈希，就能一次覆盖三种情况：
+
+```python
+import hashlib, duckdb
+
+def definitions_fingerprint(cne_db: str) -> tuple[str, int, int]:
+    """只读打开 -> 导出 -> 哈希 -> 立刻关闭（实测 0.05–0.09s）"""
+    con = duckdb.connect(cne_db, read_only=True)
+    try:
+        views = con.execute(
+            "select view_name, sql from duckdb_views() where schema_name='main' order by view_name"
+        ).fetchall()
+        macros = con.execute(
+            "select function_name, parameters, macro_definition from duckdb_functions() "
+            "where function_type='table_macro' and internal=false order by function_name"
+        ).fetchall()
+    finally:
+        con.close()
+    blob = repr(views) + repr(macros)
+    return hashlib.sha256(blob.encode()).hexdigest()[:16], len(views), len(macros)
+```
+
+实测结果：
+
+| 项 | 值 |
+|---|---|
+| 指纹（当前湖） | `4156d52c6b2e61ed` |
+| 视图 / 宏 | 73 / 2 |
+| 检查耗时 | **0.05 – 0.09s**（可放心在启动时与定时任务里跑） |
+| 内容未变时 | 指纹稳定（连测两次一致） |
+
+#### ❌ 不要用文件 mtime 当信号
+
+实测：跑一条**无关的** `cne query`（`select 1`），`.duckdb` 的 mtime 就从 `10:52:01` 变成 `10:55:50`，
+而**定义指纹完全没变** —— cne 每次命令都会重写这个文件。
+所以 mtime 只能当「值得去算一次指纹」的廉价提示，**不能作为判断依据**。
+
+#### 落地写法
+
+```python
+CACHED = load_cached_fingerprint()          # 持久化，随进程/服务重启保留
+
+def ensure_layer():
+    fp, nviews, nmacros = definitions_fingerprint(CNE_DB)
+    if fp == CACHED:
+        return                                  # 未变化，什么都不做（这才是常态）
+    build_own_layer()                            # 变了才重建（约 4.4s）
+    save_cached_fingerprint(fp)
+    log(f"视图层已重建: {fp} views={nviews} macros={nmacros}")
+```
+
+四条必须遵守的纪律：
+
+1. **只在指纹变化时重建**，不要每次启动都重建（否则白付 4.4 秒）。
+2. **读 cne 的文件必须「短开短关」**：只读连接与 cne 的写入互斥（见 §4 警告），
+   拿完定义立刻 `close()`，不要长期持有。
+3. **打开失败要重试并保留现有层**：cne 正在写时会 `ConnectionException`。
+   这时**继续用旧层**并打好 `stale` 标记与告警，**不要清空、也不要静默当作最新**。
+4. **升级 cne 后必须先跑一次任意 cne 命令**（例如 `cne status --datasets`）：
+   因为视图是 cne 命令**运行时**重建的，升级后如果一次 cne 命令都没跑过，
+   它的 `.duckdb` 里仍然是旧定义，你的指纹自然也读不到变化。
+   可以把 `cnequity` 版本一起记录：版本变了就提示"请先跑一次 cne 命令"。
+
+#### 如果不想接手这些：回到方案 A
+
+短连接直读（§4 方案 A）每查一次多花约 **0.03 秒**，换来**永远不需要判断"要不要更新"**。
+对绝大多数场景这是更划算的交易 —— 只有当查询 QPS 很高、或绝对不能容忍与 cne 的读写互斥时，
+才值得选方案 B 并承担上面的失效检测。
+
 
 
 ---

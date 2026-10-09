@@ -48,6 +48,12 @@ export const routes = [
     meta: { title: "组合管理", subtitle: "组合、持仓与浮动盈亏" },
   },
   {
+    path: "/backtest",
+    name: "backtest",
+    component: () => import("@/views/BacktestView.vue"),
+    meta: { title: "组合回测", subtitle: "用历史评分与日线复盘策略表现" },
+  },
+  {
     path: "/settings",
     name: "settings",
     component: () => import("@/views/DataSourceView.vue"),

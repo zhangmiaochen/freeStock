@@ -70,12 +70,37 @@ export function Close(): $CancellablePromise<void> {
 }
 
 /**
+ * CreateAutoPortfolio 创建自动组合并落库（组合 + 持仓 + 买入流水）。
+ */
+export function CreateAutoPortfolio(req: $models.AutoPortfolioRequest): $CancellablePromise<$models.AutoPortfolioResult | null> {
+    return $Call.ByID(2435164801, req).then(($result: any) => {
+        return $$createType7($result);
+    });
+}
+
+/**
+ * CreateBacktest 跑一次回测并落库。
+ */
+export function CreateBacktest(req: $models.BacktestRequest): $CancellablePromise<$models.BacktestRunResult | null> {
+    return $Call.ByID(2843897475, req).then(($result: any) => {
+        return $$createType9($result);
+    });
+}
+
+/**
  * CreatePortfolio 新建组合。
  */
 export function CreatePortfolio($in: portfolio$0.PortfolioInput): $CancellablePromise<portfolio$0.Portfolio | null> {
     return $Call.ByID(3176039300, $in).then(($result: any) => {
-        return $$createType7($result);
+        return $$createType11($result);
     });
+}
+
+/**
+ * DeleteBacktest 删除一次回测（级联清净值与成交）。
+ */
+export function DeleteBacktest(runID: string): $CancellablePromise<void> {
+    return $Call.ByID(3893636744, runID);
 }
 
 /**
@@ -93,6 +118,15 @@ export function DeletePosition(portfolioID: string, code: string): $CancellableP
 }
 
 /**
+ * GetBacktestPayload 读一次回测的完整结果。
+ */
+export function GetBacktestPayload(runID: string): $CancellablePromise<$models.BacktestPayload | null> {
+    return $Call.ByID(52369291, runID).then(($result: any) => {
+        return $$createType13($result);
+    });
+}
+
+/**
  * GetDatabasePath 返回组合库文件路径（界面显示用）。
  */
 export function GetDatabasePath(): $CancellablePromise<string> {
@@ -104,7 +138,7 @@ export function GetDatabasePath(): $CancellablePromise<string> {
  */
 export function GetPortfolioDetail(id: string): $CancellablePromise<portfolio$0.Detail | null> {
     return $Call.ByID(3155250749, id).then(($result: any) => {
-        return $$createType9($result);
+        return $$createType15($result);
     });
 }
 
@@ -113,7 +147,7 @@ export function GetPortfolioDetail(id: string): $CancellablePromise<portfolio$0.
  */
 export function GetPortfolioOptions(): $CancellablePromise<$models.PortfolioOptions | null> {
     return $Call.ByID(2468696434).then(($result: any) => {
-        return $$createType11($result);
+        return $$createType17($result);
     });
 }
 
@@ -122,7 +156,16 @@ export function GetPortfolioOptions(): $CancellablePromise<$models.PortfolioOpti
  */
 export function GetPortfolioOverview(): $CancellablePromise<portfolio$0.Overview | null> {
     return $Call.ByID(357445967).then(($result: any) => {
-        return $$createType13($result);
+        return $$createType19($result);
+    });
+}
+
+/**
+ * GetScoreSnapshots 读某组合的评分留档（供界面看历史建议）。
+ */
+export function GetScoreSnapshots(portfolioID: string, limit: number): $CancellablePromise<portfolio$0.ScoreSnapshot[]> {
+    return $Call.ByID(3689569491, portfolioID, limit).then(($result: any) => {
+        return $$createType21($result);
     });
 }
 
@@ -131,7 +174,7 @@ export function GetPortfolioOverview(): $CancellablePromise<portfolio$0.Overview
  */
 export function GetStrengthSummary(strategyID: string): $CancellablePromise<$models.StrengthSummary | null> {
     return $Call.ByID(1979789275, strategyID).then(($result: any) => {
-        return $$createType15($result);
+        return $$createType23($result);
     });
 }
 
@@ -148,7 +191,16 @@ export function GetStrengthSummary(strategyID: string): $CancellablePromise<$mod
  */
 export function LatestClose(codes: string[], strategyID: string): $CancellablePromise<{ [_ in string]?: portfolio$0.PricePoint }> {
     return $Call.ByID(898950825, codes, strategyID).then(($result: any) => {
-        return $$createType17($result);
+        return $$createType25($result);
+    });
+}
+
+/**
+ * ListBacktests 列出回测记录。
+ */
+export function ListBacktests(portfolioID: string): $CancellablePromise<portfolio$0.BacktestRun[]> {
+    return $Call.ByID(2191167028, portfolioID).then(($result: any) => {
+        return $$createType27($result);
     });
 }
 
@@ -157,7 +209,29 @@ export function LatestClose(codes: string[], strategyID: string): $CancellablePr
  */
 export function ListPortfolios(): $CancellablePromise<portfolio$0.Portfolio[]> {
     return $Call.ByID(4287571721).then(($result: any) => {
-        return $$createType18($result);
+        return $$createType28($result);
+    });
+}
+
+/**
+ * PreviewAutoPortfolio 预演自动组合（不落库）。
+ */
+export function PreviewAutoPortfolio(req: $models.AutoPortfolioRequest): $CancellablePromise<$models.AutoPortfolioResult | null> {
+    return $Call.ByID(594776161, req).then(($result: any) => {
+        return $$createType7($result);
+    });
+}
+
+/**
+ * RefreshBackfill 批量给 [startDate, endDate] 区间内每个交易日打分。
+ * 
+ * limit 与 RefreshStrength 同义（>0 时只评股票列表前 limit 只，保护数据源）。
+ * **回测时建议传足够大的 limit**（如 1000+），否则候选池太小、
+ * 回测出来的组合和实盘建议不是一回事。
+ */
+export function RefreshBackfill(strategyID: string, startDate: number, endDate: number, limit: number): $CancellablePromise<$models.BackfillResult | null> {
+    return $Call.ByID(1067070197, strategyID, startDate, endDate, limit).then(($result: any) => {
+        return $$createType30($result);
     });
 }
 
@@ -174,7 +248,7 @@ export function ListPortfolios(): $CancellablePromise<portfolio$0.Portfolio[]> {
  */
 export function RefreshStrength(strategyID: string, limit: number): $CancellablePromise<$models.RefreshResult | null> {
     return $Call.ByID(3438224358, strategyID, limit).then(($result: any) => {
-        return $$createType20($result);
+        return $$createType32($result);
     });
 }
 
@@ -183,7 +257,7 @@ export function RefreshStrength(strategyID: string, limit: number): $Cancellable
  */
 export function UpdatePortfolio(id: string, $in: portfolio$0.PortfolioInput): $CancellablePromise<portfolio$0.Portfolio | null> {
     return $Call.ByID(30553471, id, $in).then(($result: any) => {
-        return $$createType7($result);
+        return $$createType11($result);
     });
 }
 
@@ -194,18 +268,30 @@ const $$createType2 = $models.ApplyResult.createFrom;
 const $$createType3 = $Create.Nullable($$createType2);
 const $$createType4 = $models.PlanResult.createFrom;
 const $$createType5 = $Create.Nullable($$createType4);
-const $$createType6 = portfolio$0.Portfolio.createFrom;
+const $$createType6 = $models.AutoPortfolioResult.createFrom;
 const $$createType7 = $Create.Nullable($$createType6);
-const $$createType8 = portfolio$0.Detail.createFrom;
+const $$createType8 = $models.BacktestRunResult.createFrom;
 const $$createType9 = $Create.Nullable($$createType8);
-const $$createType10 = $models.PortfolioOptions.createFrom;
+const $$createType10 = portfolio$0.Portfolio.createFrom;
 const $$createType11 = $Create.Nullable($$createType10);
-const $$createType12 = portfolio$0.Overview.createFrom;
+const $$createType12 = $models.BacktestPayload.createFrom;
 const $$createType13 = $Create.Nullable($$createType12);
-const $$createType14 = $models.StrengthSummary.createFrom;
+const $$createType14 = portfolio$0.Detail.createFrom;
 const $$createType15 = $Create.Nullable($$createType14);
-const $$createType16 = portfolio$0.PricePoint.createFrom;
-const $$createType17 = $Create.Map($Create.Any, $$createType16);
-const $$createType18 = $Create.Array($$createType6);
-const $$createType19 = $models.RefreshResult.createFrom;
-const $$createType20 = $Create.Nullable($$createType19);
+const $$createType16 = $models.PortfolioOptions.createFrom;
+const $$createType17 = $Create.Nullable($$createType16);
+const $$createType18 = portfolio$0.Overview.createFrom;
+const $$createType19 = $Create.Nullable($$createType18);
+const $$createType20 = portfolio$0.ScoreSnapshot.createFrom;
+const $$createType21 = $Create.Array($$createType20);
+const $$createType22 = $models.StrengthSummary.createFrom;
+const $$createType23 = $Create.Nullable($$createType22);
+const $$createType24 = portfolio$0.PricePoint.createFrom;
+const $$createType25 = $Create.Map($Create.Any, $$createType24);
+const $$createType26 = portfolio$0.BacktestRun.createFrom;
+const $$createType27 = $Create.Array($$createType26);
+const $$createType28 = $Create.Array($$createType10);
+const $$createType29 = $models.BackfillResult.createFrom;
+const $$createType30 = $Create.Nullable($$createType29);
+const $$createType31 = $models.RefreshResult.createFrom;
+const $$createType32 = $Create.Nullable($$createType31);

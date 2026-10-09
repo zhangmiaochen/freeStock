@@ -19,7 +19,7 @@ func TestBuildPlanEndToEnd(t *testing.T) {
 	// 建一个组合 + 几个真实持仓
 	created, err := svc.CreatePortfolio(portfolio.PortfolioInput{
 		Name: "端到端组合", Type: "semi_auto", StrategyID: score.StrategyTrendGrowth,
-		TargetPositionCount: 3, MaxStockCount: 5, TotalLayers: (10),
+		TargetPositionCount: intPtr(3), MaxStockCount: intPtr(5), TotalLayers: (10),
 		ScopeType: portfolio.ScopeAll,
 	})
 	if err != nil {

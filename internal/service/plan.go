@@ -61,7 +61,24 @@ func (s *PortfolioService) RefreshStrength(strategyID string, limit int) (*Refre
 		return nil, err
 	}
 
-	// 行业与市场：从板块归属补
+	// 行业与市场从板块归属补，然后落库（回填复用同一段）
+	if err := s.saveScoringResult(store, result, strategyID); err != nil {
+		return nil, err
+	}
+	slog.Info("本次评分含持仓", "heldIncluded", heldCount)
+	return &RefreshResult{
+		TradeDate: result.TradeDate, Saved: len(result.Rows), Skipped: result.Skipped,
+		Limit: limit, MarketState: result.MarketState,
+		Unavailable: result.Unavailable,
+	}, nil
+}
+
+// saveScoringResult 把一次评分结果落库（评分表 + 市场状态）。
+//
+// 抽出来是因为**历史回填**要复用同一段 —— 之前它内联在 RefreshStrength 里。
+func (s *PortfolioService) saveScoringResult(
+	store *portfolio.Store, result *ScoringResult, strategyID string,
+) error {
 	rows := make([]portfolio.StrengthRow, 0, len(result.Rows))
 	industryByCode := map[string]string{}
 	scoredCodes := make([]string, 0, len(result.Rows))
@@ -93,7 +110,8 @@ func (s *PortfolioService) RefreshStrength(strategyID string, limit int) (*Refre
 			CapitalScore: row.CapitalScore, RepairScore: row.RepairScore,
 
 			Close: row.Close, High: row.High, Low: row.Low, Open: row.Open, PctChg: row.PctChg,
-			Ma5: row.Ma5, Ma20: row.Ma20, Ma30: row.Ma30,
+			Amount: row.Amount,
+			Ma5:    row.Ma5, Ma20: row.Ma20, Ma30: row.Ma30,
 			Ma60: row.Ma60, Ma120: row.Ma120, Ma250: row.Ma250,
 
 			RelativeStrength20D: row.RelativeStrength20D,
@@ -114,7 +132,7 @@ func (s *PortfolioService) RefreshStrength(strategyID string, limit int) (*Refre
 	}
 
 	if err := store.SaveStrength(int64(result.TradeDate), strategyID, rows); err != nil {
-		return nil, err
+		return err
 	}
 	// 市场状态跟着评分一起存
 	if err := store.SaveMarketState(portfolio.MarketStateRow{
@@ -126,19 +144,13 @@ func (s *PortfolioService) RefreshStrength(strategyID string, limit int) (*Refre
 		ProxyRet20: result.MarketState.ProxyRet20,
 		Days:       result.MarketState.Days,
 	}); err != nil {
-		return nil, err
+		return err
 	}
 
 	slog.Info("评分已物化",
 		"strategy", strategyID, "tradeDate", result.TradeDate,
-		"saved", len(rows), "heldIncluded", heldCount,
-		"marketState", result.MarketState.State)
-
-	return &RefreshResult{
-		TradeDate: result.TradeDate, Saved: len(rows), Skipped: result.Skipped,
-		Limit: limit, MarketState: result.MarketState,
-		Unavailable: result.Unavailable,
-	}, nil
+		"saved", len(rows), "marketState", result.MarketState.State)
+	return nil
 }
 
 // scoringUniverse 决定这次要评哪些股票：股票列表前 limit 只 + 所有持仓代码。
@@ -398,7 +410,12 @@ func (s *PortfolioService) BuildPlan(portfolioID string) (*PlanResult, error) {
 		maxDrawdown = math.Abs(minDrawdown)
 	}
 
-	return &PlanResult{
+	// ---- 落档：把"当时看到的东西"存一份 ----
+	//
+	// 原实现 `_rebuild_portfolio_view`（portfolio_service.py:2437+）会覆盖写四张表。
+	// 不落档的话，事后无法回答"系统在某天建议过什么"，
+	// 也没法对账（按建议操作了，结果如何）。
+	result := &PlanResult{
 		PortfolioID: item.ID, PortfolioName: item.Name,
 		StrategyID: strategyID, StrategyLabel: item.StrategyLabel,
 		Config: cfg, MarketState: marketState,
@@ -410,7 +427,13 @@ func (s *PortfolioService) BuildPlan(portfolioID string) (*PlanResult, error) {
 		Holdings:       holdingRows,
 		Candidates:     candidates,
 		Notes:          notes,
-	}, nil
+	}
+	// 落档失败**不影响建议本身** —— 记日志即可，
+	// 不要因为存档问题让用户看不到建议。
+	if err := s.savePlanSnapshots(store, item, result); err != nil {
+		slog.Warn("写入调仓建议留档失败", "portfolio", item.ID, "err", err)
+	}
+	return result, nil
 }
 
 // buildCandidatePool 组装候选池。
@@ -421,6 +444,8 @@ func (s *PortfolioService) BuildPlan(portfolioID string) (*PlanResult, error) {
 //  3. 剔除 ST、剔除已持仓
 //  4. 评分下限（低吸是 0，靠自己的结构条件）
 //  5. 排序，取 head(max(80, target*12)) —— 参考实现的硬编码
+//
+// buildCandidatePool 从库里读当日评分再建候选池（实盘建议用）。
 func (s *PortfolioService) buildCandidatePool(
 	store *portfolio.Store,
 	item portfolio.Portfolio,
@@ -433,12 +458,20 @@ func (s *PortfolioService) buildCandidatePool(
 	if err != nil {
 		return nil, nil, err
 	}
+	rows, scores := s.buildCandidatePoolFrom(all, item, cfg, holdingCodes)
+	return rows, scores, nil
+}
 
-	// 广度闸门要在**全量评分**上数（范围过滤前），见 score.RotationInput.UniverseScores
-	universeScores := make([]float64, 0, len(all))
-	for _, strength := range all {
-		universeScores = append(universeScores, strength.TotalScore)
-	}
+// buildCandidatePoolFrom 用**已加载好的评分行**建候选池。
+//
+// 抽出来是因为**回测要逐日复用同一段逻辑** —— 它不能每天去查一次库
+// （回测要把整个区间的评分一次性读出来）。
+func (s *PortfolioService) buildCandidatePoolFrom(
+	all []portfolio.StrengthRow,
+	item portfolio.Portfolio,
+	cfg score.StrategyConfig,
+	holdingCodes []string,
+) ([]score.Row, []float64) {
 
 	held := map[string]bool{}
 	for _, code := range holdingCodes {
@@ -457,15 +490,19 @@ func (s *PortfolioService) buildCandidatePool(
 		markets[market] = true
 	}
 
-	out := make([]score.Row, 0, len(all))
+	// ---- ① 范围 + 市场过滤 ----
+	//
+	// ⚠ 这一步的集合就是**广度闸门用的帧**（原实现 portfolio_service.py:2469
+	// `score_frame = self._attach_signal_candidates(self._scope_filter(...))`
+	// 再作为 `daily_strength` 传给 `build_rotation_plan`），
+	// `market_breadth_status` 是在**范围过滤后**的帧上数 universe/ready 的。
+	//
+	// 此前 Go 用**全量**评分算 universeScores（未过范围）——
+	// 窄范围组合（自定义 20 只、行业范围）在原版里 `universe < 100` → 闸门**不启用**，
+	// 在 Go 里却按全市场数千只启用，行为正好相反。
+	scoped := make([]portfolio.StrengthRow, 0, len(all))
+	universeScores := make([]float64, 0, len(all))
 	for _, strength := range all {
-		if held[strength.Code] {
-			continue
-		}
-		// 剔除 ST（参考实现按名称含 "ST" 判断）
-		if strings.Contains(strings.ToUpper(strength.Name), "ST") {
-			continue
-		}
 		// 范围过滤（行业/概念走数据湖成员表，与持仓侧同一口径）
 		switch item.ScopeType {
 		case portfolio.ScopeManualCodes:
@@ -485,6 +522,20 @@ func (s *PortfolioService) buildCandidatePool(
 		if len(markets) > 0 && !markets[strength.Market] {
 			continue
 		}
+		scoped = append(scoped, strength)
+		universeScores = append(universeScores, strength.TotalScore)
+	}
+
+	// ---- ② 候选池过滤（剔 ST、剔已持仓、分数下限）----
+	out := make([]score.Row, 0, len(scoped))
+	for _, strength := range scoped {
+		if held[strength.Code] {
+			continue
+		}
+		// 剔除 ST（参考实现按名称含 "ST" 判断）
+		if strings.Contains(strings.ToUpper(strength.Name), "ST") {
+			continue
+		}
 		// 分数下限
 		if strength.TotalScore < cfg.CandidateScoreFloor {
 			continue
@@ -495,15 +546,28 @@ func (s *PortfolioService) buildCandidatePool(
 	// 入场优先级重排（原实现 :1646-1698）——
 	// 趋势成长按六项加权百分位复合分重排，**不是**简单按总分。
 	// 必须在 head 截断**之前**做，否则取到的是不同的前 80 名。
-	out = score.PrioritizeEntryPoints(out, item.StrategyID, cfg.LowBuySortMode)
+	out = score.PrioritizeEntryPoints(out, cfg)
 
-	// ⚠ **先 head 截断、后过质量门槛**（原实现 :2064-2080）：
+	// ---- ③ 低吸：先过质量门槛，**再**截断 ----
 	//
-	//	candidate_pool = select_candidate_pool(...)        # 只做 floor/剔ST/剔已持仓/排序
-	//	candidate_ranked = candidate_pool.head(max(80, target*12))
-	//	# candidate_quality_ok 是在**逐处使用**时才调的（:2465）
+	// 原实现 :2072-2079 对低吸是特例：
 	//
-	// 反过来（先过滤再截断）会从第 80 名之外补人 —— 那些原实现根本看不到。
+	//	candidate_pool = candidate_pool.loc[quality_mask]   # 先逐行候选质量过滤
+	//	candidate_ranked = candidate_pool.head(...)         # 再截断
+	//
+	// 其余策略是"先截断、后在使用处过滤"（:2080 + :2465）。
+	// 低吸**不能**照抄后者 —— 否则 head-80 取的是"全池前 80 名再过滤"，
+	// 与"前 80 个**合格**候选"是不同的集合，可能几乎无合格候选 → 长期不建仓。
+	if cfg.StrategyID == portfolio.StrategyTrendLowBuy {
+		kept := out[:0]
+		for _, row := range out {
+			if ok, _ := score.CandidateQualityOK(row, cfg, cfg.MarketState, false); ok {
+				kept = append(kept, row)
+			}
+		}
+		out = kept
+	}
+
 	head := 80
 	if size := item.TargetPositionCount * 12; size > head {
 		head = size
@@ -511,7 +575,7 @@ func (s *PortfolioService) buildCandidatePool(
 	if len(out) > head {
 		out = out[:head]
 	}
-	return out, universeScores, nil
+	return out, universeScores
 }
 
 // inPortfolioScope 判定一只股票是否在组合的选股范围内。
@@ -666,7 +730,8 @@ func strengthToRow(strength portfolio.StrengthRow) score.Row {
 		CapitalScore: strength.CapitalScore, RepairScore: strength.RepairScore,
 
 		Close: strength.Close, High: strength.High, Low: strength.Low, Open: strength.Open, PctChg: strength.PctChg,
-		Ma5: strength.Ma5, Ma20: strength.Ma20, Ma30: strength.Ma30,
+		Amount: strength.Amount,
+		Ma5:    strength.Ma5, Ma20: strength.Ma20, Ma30: strength.Ma30,
 		Ma60: strength.Ma60, Ma120: strength.Ma120, Ma250: strength.Ma250,
 
 		RelativeStrength20D: strength.RelativeStrength20D,
@@ -889,10 +954,13 @@ func (s *PortfolioService) ApplyRotation(portfolioID string) (*ApplyResult, erro
 
 	// 价格表：持仓与候选都能查到现价
 	priceByCode := map[string]float64{}
+	// 持仓成本表：取不到现价时用它兜底（原实现 :906 回退成本价）
+	entryByCode := map[string]float64{}
 	for _, row := range plan.Holdings {
 		if row.CurrentPrice > 0 {
 			priceByCode[row.Code] = row.CurrentPrice
 		}
+		entryByCode[row.Code] = row.EntryPrice
 	}
 	for _, row := range plan.Candidates {
 		if row.Close > 0 {
@@ -924,12 +992,26 @@ func (s *PortfolioService) ApplyRotation(portfolioID string) (*ApplyResult, erro
 
 		price := priceByCode[row.Code]
 		if price <= 0 {
-			// 拿不到价格：持仓行仍要保留（否则会被删除），但不动层数
+			// 拿不到现价：持仓行仍要保留（否则会被整表重写删掉），
+			// 但**保留的方式是照原动作执行、用成本价兜底**，
+			// 而不是把 clear/reduce 偷偷改成"保持不动"。
+			//
+			// 原实现 :896-899/:906/:912 —— `target` 只看 action；
+			// `latest_price` 取不到时回退**成本价**，动作照执行、流水照写。
+			//
+			// 之前的写法是把 TargetLayers 覆盖成 CurrentLayers，但 **Action 仍是 clear**
+			// → 落库时走"层数没变"分支：票没被清掉、界面却提示成功、
+			// last_action 写成 'clear'、且本次零流水。
 			if isHolding {
+				fallback := row.TargetLayers
+				if fallback < 1 && row.Action != score.ActionClear {
+					fallback = row.CurrentLayers
+				}
 				actions = append(actions, portfolio.ApplyAction{
 					Code: row.Code, Name: row.Name, Action: row.Action,
-					TargetLayers: row.CurrentLayers,
-					Reason:       "缺少现价，保持原样",
+					TargetLayers: fallback,
+					Price:        entryByCode[row.Code], // 成本价兜底（可能是 0）
+					Reason:       row.Reason,
 				})
 			}
 			continue
