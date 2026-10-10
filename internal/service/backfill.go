@@ -208,6 +208,27 @@ func (s *PortfolioService) RefreshBackfill(
 	slog.Info("历史回填完成",
 		"strategy", strategyID, "scored", out.Scored,
 		"tradingDays", out.Days, "skipped", len(out.Skipped), "elapsed", out.Elapsed)
+
+	// **回填结束后回收空闲页。**
+	//
+	// 回填对每个交易日做 `DELETE + INSERT`（先删后插是为了不残留幽灵行），
+	// 这是空闲页的主要来源 —— 实测库曾涨到 470MB，其中 338MB 是空洞。
+	// 开了 INCREMENTAL 自动回收之后，调一次 incremental_vacuum 才会
+	// 真正把页还给文件系统。
+	//
+	// 失败只告警：库仍然可用，回收是维护动作。
+	if free, total, err := store.FreePages(); err == nil && free > 0 {
+		began := time.Now()
+		if err := store.IncrementalVacuum(); err != nil {
+			slog.Warn("回收空闲页失败（不影响使用）", "err", err)
+		} else {
+			after, totalAfter, _ := store.FreePages()
+			slog.Info("回填空闲页回收完成",
+				"freeBefore", free, "freeAfter", after,
+				"totalBefore", total, "totalAfter", totalAfter,
+				"elapsed", time.Since(began).Round(time.Millisecond))
+		}
+	}
 	return out, nil
 }
 

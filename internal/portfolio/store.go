@@ -599,7 +599,97 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+
+	// 把库切到 INCREMENTAL 自动回收（一次性；已是该模式时直接跳过）。
+	// 失败**不阻断开库** —— 回收是维护动作，不该让整个应用起不来。
+	if err := store.ensureAutoVacuum(); err != nil {
+		slog.Warn("切换组合库自动回收失败（不影响使用）", "err", err)
+	}
 	return store, nil
+}
+
+// IncrementalVacuum 把空闲页归还给文件系统。
+//
+// 只在 auto_vacuum = INCREMENTAL（=2）下有意义：那时 SQLite 会把释放的页
+// 挂到 freelist 并登记在指针映射里，调用本方法才能真正缩小文件。
+// 其它模式下它是空操作（返回 nil，但什么都不回收）。
+//
+// 回填对每个交易日做 DELETE + INSERT，是空闲页的主要来源，
+// 所以在回填结束后调一次最合适。
+func (s *Store) IncrementalVacuum() error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	var mode int64
+	if err := s.db.QueryRow("PRAGMA auto_vacuum").Scan(&mode); err != nil {
+		return err
+	}
+	if mode != 2 {
+		return nil // 不是 INCREMENTAL，做了也没用
+	}
+	if _, err := s.db.Exec("PRAGMA incremental_vacuum"); err != nil {
+		return fmt.Errorf("回收空闲页失败：%w", err)
+	}
+	return nil
+}
+
+// FreePages 返回 (空闲页数, 总页数)，供日志/界面判断是否需要回收。
+func (s *Store) FreePages() (free int64, total int64, err error) {
+	if s == nil || s.db == nil {
+		return 0, 0, nil
+	}
+	if err = s.db.QueryRow("PRAGMA freelist_count").Scan(&free); err != nil {
+		return
+	}
+	err = s.db.QueryRow("PRAGMA page_count").Scan(&total)
+	return
+}
+
+// ensureAutoVacuum 把库切到 INCREMENTAL 自动回收模式（**一次性**）。
+//
+// 为什么需要：auto_vacuum 默认是 0（NONE）—— 删除大量行后腾出的页
+// **留在文件里永不归还**。实测用户的库曾到 470MB，其中 338MB 是空洞；
+// 回填每跑一次就再制造一批。
+//
+// 切换模式**必须跟随一次 VACUUM** 才生效（SQLite 的规定），所以这里是一次性
+// 的重活：只在"还不是 INCREMENTAL"时做一次，之后每次开库直接跳过。
+//
+// 做成"开库时自愈"而不是"让用户手动跑命令"，是因为手动步骤迟早会被忘掉，
+// 而这个问题会随回填反复出现。
+func (s *Store) ensureAutoVacuum() error {
+	var mode int64
+	if err := s.db.QueryRow("PRAGMA auto_vacuum").Scan(&mode); err != nil {
+		return err
+	}
+	if mode == 2 {
+		return nil // 已是 INCREMENTAL
+	}
+
+	free, total, err := s.FreePages()
+	if err != nil {
+		return err
+	}
+	if total < 8192 { // < 32MB，新库没有空洞，不值得为它跑 VACUUM
+		return nil
+	}
+
+	began := time.Now()
+	slog.Info("组合库切换到 INCREMENTAL 自动回收（一次性）",
+		"autoVacuum", mode, "freePages", free, "totalPages", total)
+
+	if _, err := s.db.Exec("PRAGMA auto_vacuum = INCREMENTAL"); err != nil {
+		return fmt.Errorf("设置 auto_vacuum 失败：%w", err)
+	}
+	if _, err := s.db.Exec("VACUUM"); err != nil {
+		return fmt.Errorf("VACUUM 失败：%w", err)
+	}
+
+	after, totalAfter, _ := s.FreePages()
+	slog.Info("组合库自动回收已开启",
+		"freePagesBefore", free, "freePagesAfter", after,
+		"totalPagesBefore", total, "totalPagesAfter", totalAfter,
+		"elapsed", time.Since(began).Round(time.Millisecond))
+	return nil
 }
 
 // DB 暴露底层连接，**仅供诊断与维护**（行数统计、quick_check、VACUUM、
