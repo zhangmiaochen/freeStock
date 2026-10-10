@@ -418,6 +418,120 @@ export class RunSummary {
 }
 
 /**
+ * ScheduleChange 是一处计划任务改动。
+ */
+export class ScheduleChange {
+    "task": string;
+
+    /**
+     * Action: change（要改时间）/ keep（时间已对）/ not-registered（任务不存在）
+     */
+    "action": string;
+    "from"?: string;
+    "to"?: string;
+    "reason"?: string;
+
+    /** Creates a new ScheduleChange instance. */
+    constructor($$source: Partial<ScheduleChange> = {}) {
+        if (!("task" in $$source)) {
+            this["task"] = "";
+        }
+        if (!("action" in $$source)) {
+            this["action"] = "";
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new ScheduleChange instance from a string or object.
+     */
+    static createFrom($$source: any = {}): ScheduleChange {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new ScheduleChange($$parsedSource as Partial<ScheduleChange>);
+    }
+}
+
+/**
+ * SchedulePlan 是**将要执行的改动预览**。
+ * 
+ * ⚠ 用户明确要求："只改现有两个任务，且改动前弹确认"。
+ * 所以这里分成两步：
+ * 
+ * 	PreviewSchedule —— 只算、只查，绝不执行，把要跑的命令原样摆出来给人看
+ * 	ApplySchedule   —— 只有 confirmed=true 才执行，且只执行 Action=="change"
+ * 
+ * **不新建、不删除**（因此没有 CreateTask/DeleteTask 的调用点）。
+ * 理由（方案 §5.1）：CNEquity 侧已经装好这两个任务，再建一套就是双跑 +
+ * 抢 cne 的写入锁；而删掉它则会破坏 CNEquity 自己的用法。
+ */
+export class SchedulePlan {
+    "changes": ScheduleChange[];
+
+    /**
+     * Commands 是**将要执行的原始 schtasks 命令**，给用户在确认框里看。
+     * 界面上原样展示 —— 让用户知道自己机器上会发生什么。
+     */
+    "commands": string[];
+
+    /**
+     * Warnings 是不阻塞但需要知道的问题
+     */
+    "warnings": string[];
+
+    /**
+     * HasChanges 表示是否有实际改动要做
+     */
+    "hasChanges": boolean;
+
+    /**
+     * Summary 是人类可读的一句话
+     */
+    "summary": string;
+
+    /** Creates a new SchedulePlan instance. */
+    constructor($$source: Partial<SchedulePlan> = {}) {
+        if (!("changes" in $$source)) {
+            this["changes"] = [];
+        }
+        if (!("commands" in $$source)) {
+            this["commands"] = [];
+        }
+        if (!("warnings" in $$source)) {
+            this["warnings"] = [];
+        }
+        if (!("hasChanges" in $$source)) {
+            this["hasChanges"] = false;
+        }
+        if (!("summary" in $$source)) {
+            this["summary"] = "";
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new SchedulePlan instance from a string or object.
+     */
+    static createFrom($$source: any = {}): SchedulePlan {
+        const $$createField0_0 = $$createType8;
+        const $$createField1_0 = $$createType6;
+        const $$createField2_0 = $$createType6;
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        if ("changes" in $$parsedSource) {
+            $$parsedSource["changes"] = $$createField0_0($$parsedSource["changes"]);
+        }
+        if ("commands" in $$parsedSource) {
+            $$parsedSource["commands"] = $$createField1_0($$parsedSource["commands"]);
+        }
+        if ("warnings" in $$parsedSource) {
+            $$parsedSource["warnings"] = $$createField2_0($$parsedSource["warnings"]);
+        }
+        return new SchedulePlan($$parsedSource as Partial<SchedulePlan>);
+    }
+}
+
+/**
  * ScheduleState 是界面上要显示的整体状态。
  */
 export class ScheduleState {
@@ -467,8 +581,8 @@ export class ScheduleState {
      * Creates a new ScheduleState instance from a string or object.
      */
     static createFrom($$source: any = {}): ScheduleState {
-        const $$createField0_0 = $$createType7;
-        const $$createField1_0 = $$createType7;
+        const $$createField0_0 = $$createType9;
+        const $$createField1_0 = $$createType9;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("daily" in $$parsedSource) {
             $$parsedSource["daily"] = $$createField0_0($$parsedSource["daily"]);
@@ -536,7 +650,7 @@ export class Status {
      */
     static createFrom($$source: any = {}): Status {
         const $$createField7_0 = $$createType6;
-        const $$createField8_0 = $$createType9;
+        const $$createField8_0 = $$createType11;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("logTail" in $$parsedSource) {
             $$parsedSource["logTail"] = $$createField7_0($$parsedSource["logTail"]);
@@ -665,6 +779,8 @@ const $$createType3 = RunSummary.createFrom;
 const $$createType4 = DatasetResult.createFrom;
 const $$createType5 = $Create.Array($$createType4);
 const $$createType6 = $Create.Array($Create.Any);
-const $$createType7 = TaskInfo.createFrom;
-const $$createType8 = StepInfo.createFrom;
-const $$createType9 = $Create.Array($$createType8);
+const $$createType7 = ScheduleChange.createFrom;
+const $$createType8 = $Create.Array($$createType7);
+const $$createType9 = TaskInfo.createFrom;
+const $$createType10 = StepInfo.createFrom;
+const $$createType11 = $Create.Array($$createType10);

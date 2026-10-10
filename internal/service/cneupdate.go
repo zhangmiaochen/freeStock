@@ -228,6 +228,29 @@ func (s *CneUpdateService) CancelCatchUp() error {
 	return s.runner().CancelCatchUp()
 }
 
+// PreviewSchedule 算出把两个计划任务改到目标时间需要做什么，**不执行任何操作**。
+//
+// 用户明确要求"改动前弹确认"，所以必须分成两步：先预览（含原始 schtasks
+// 命令），用户确认后才调 ApplySchedule。
+func (s *CneUpdateService) PreviewSchedule(dailyAt, staleAt string) (*cne.SchedulePlan, error) {
+	return cne.PreviewSchedule(dailyAt, staleAt)
+}
+
+// ApplySchedule 执行计划任务的改动。
+//
+// ⚠ **必须 confirmed=true**。界面要把 PreviewSchedule 的结果（含原始命令）
+// 展示给用户，确认后才带 confirmed=true 调这里。
+//
+// **只改现有的两个任务，不新建、不删除**：
+//   - 新建 → 与 CNEquity 侧双跑、抢 cne 的写入锁（方案 §5.1）
+//   - 删除 → 破坏 CNEquity 自己的用法
+func (s *CneUpdateService) ApplySchedule(plan *cne.SchedulePlan, confirmed bool) (*cne.SchedulePlan, error) {
+	if !confirmed {
+		return nil, errors.New("未经确认：请先展示改动预览，确认后再执行")
+	}
+	return cne.ApplySchedule(plan, true)
+}
+
 // RecentRuns 读最近的运行记录（来自 cne 的 manifest.db）。
 //
 // ⚠ **这是判断"这次更新到底成没成"的唯一可靠方式**。

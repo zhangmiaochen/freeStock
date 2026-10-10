@@ -26,6 +26,22 @@ import * as config$0 from "../config/models.js";
 import * as $models from "./models.js";
 
 /**
+ * ApplySchedule 执行计划任务的改动。
+ * 
+ * ⚠ **必须 confirmed=true**。界面要把 PreviewSchedule 的结果（含原始命令）
+ * 展示给用户，确认后才带 confirmed=true 调这里。
+ * 
+ * **只改现有的两个任务，不新建、不删除**：
+ *   - 新建 → 与 CNEquity 侧双跑、抢 cne 的写入锁（方案 §5.1）
+ *   - 删除 → 破坏 CNEquity 自己的用法
+ */
+export function ApplySchedule(plan: cne$0.SchedulePlan | null, confirmed: boolean): $CancellablePromise<cne$0.SchedulePlan | null> {
+    return $Call.ByID(1675612066, plan, confirmed).then(($result: any) => {
+        return $$createType1($result);
+    });
+}
+
+/**
  * CancelCatchUp 请求停止补跑。
  * 
  * 语义是"**当前这一天跑完后不再继续**"，不中途掐断正在跑的那天 ——
@@ -47,7 +63,7 @@ export function CancelUpdate(): $CancellablePromise<void> {
  */
 export function CatchUpState(): $CancellablePromise<cne$0.CatchUpState> {
     return $Call.ByID(2972324642).then(($result: any) => {
-        return $$createType0($result);
+        return $$createType2($result);
     });
 }
 
@@ -60,7 +76,7 @@ export function CatchUpState(): $CancellablePromise<cne$0.CatchUpState> {
  */
 export function CheckFreshness(): $CancellablePromise<cne$0.FreshnessReport | null> {
     return $Call.ByID(1299744870).then(($result: any) => {
-        return $$createType2($result);
+        return $$createType4($result);
     });
 }
 
@@ -69,7 +85,7 @@ export function CheckFreshness(): $CancellablePromise<cne$0.FreshnessReport | nu
  */
 export function GetUpdatePrefs(): $CancellablePromise<$models.UpdatePrefsInfo> {
     return $Call.ByID(3588240232).then(($result: any) => {
-        return $$createType3($result);
+        return $$createType5($result);
     });
 }
 
@@ -79,7 +95,7 @@ export function GetUpdatePrefs(): $CancellablePromise<$models.UpdatePrefsInfo> {
  */
 export function LatestRunResult(): $CancellablePromise<cne$0.RunDetail | null> {
     return $Call.ByID(2761471014).then(($result: any) => {
-        return $$createType5($result);
+        return $$createType7($result);
     });
 }
 
@@ -95,7 +111,19 @@ export function LatestRunResult(): $CancellablePromise<cne$0.RunDetail | null> {
  */
 export function ManualUpdate(kind: string, tradeDate: string): $CancellablePromise<$models.JobInfo | null> {
     return $Call.ByID(4236573058, kind, tradeDate).then(($result: any) => {
-        return $$createType7($result);
+        return $$createType9($result);
+    });
+}
+
+/**
+ * PreviewSchedule 算出把两个计划任务改到目标时间需要做什么，**不执行任何操作**。
+ * 
+ * 用户明确要求"改动前弹确认"，所以必须分成两步：先预览（含原始 schtasks
+ * 命令），用户确认后才调 ApplySchedule。
+ */
+export function PreviewSchedule(dailyAt: string, staleAt: string): $CancellablePromise<cne$0.SchedulePlan | null> {
+    return $Call.ByID(390689910, dailyAt, staleAt).then(($result: any) => {
+        return $$createType1($result);
     });
 }
 
@@ -109,7 +137,7 @@ export function ManualUpdate(kind: string, tradeDate: string): $CancellablePromi
  */
 export function RecentRuns(limit: number): $CancellablePromise<cne$0.RunSummary[]> {
     return $Call.ByID(393987276, limit).then(($result: any) => {
-        return $$createType9($result);
+        return $$createType11($result);
     });
 }
 
@@ -129,7 +157,7 @@ export function RecentRuns(limit: number): $CancellablePromise<cne$0.RunSummary[
  */
 export function ScheduleState(): $CancellablePromise<cne$0.ScheduleState | null> {
     return $Call.ByID(4153802545).then(($result: any) => {
-        return $$createType11($result);
+        return $$createType13($result);
     });
 }
 
@@ -142,7 +170,7 @@ export function ScheduleState(): $CancellablePromise<cne$0.ScheduleState | null>
  */
 export function SetUpdatePrefs(prefs: config$0.UpdatePrefs): $CancellablePromise<$models.UpdatePrefsInfo> {
     return $Call.ByID(1336538668, prefs).then(($result: any) => {
-        return $$createType3($result);
+        return $$createType5($result);
     });
 }
 
@@ -161,7 +189,7 @@ export function SetUpdatePrefs(prefs: config$0.UpdatePrefs): $CancellablePromise
  */
 export function StartCatchUp(): $CancellablePromise<$models.CatchUpInfo | null> {
     return $Call.ByID(1149046919).then(($result: any) => {
-        return $$createType13($result);
+        return $$createType15($result);
     });
 }
 
@@ -170,24 +198,26 @@ export function StartCatchUp(): $CancellablePromise<$models.CatchUpInfo | null> 
  */
 export function UpdateStatus(): $CancellablePromise<cne$0.Status | null> {
     return $Call.ByID(1563115678).then(($result: any) => {
-        return $$createType15($result);
+        return $$createType17($result);
     });
 }
 
 // Private type creation functions
-const $$createType0 = cne$0.CatchUpState.createFrom;
-const $$createType1 = cne$0.FreshnessReport.createFrom;
-const $$createType2 = $Create.Nullable($$createType1);
-const $$createType3 = $models.UpdatePrefsInfo.createFrom;
-const $$createType4 = cne$0.RunDetail.createFrom;
-const $$createType5 = $Create.Nullable($$createType4);
-const $$createType6 = $models.JobInfo.createFrom;
+const $$createType0 = cne$0.SchedulePlan.createFrom;
+const $$createType1 = $Create.Nullable($$createType0);
+const $$createType2 = cne$0.CatchUpState.createFrom;
+const $$createType3 = cne$0.FreshnessReport.createFrom;
+const $$createType4 = $Create.Nullable($$createType3);
+const $$createType5 = $models.UpdatePrefsInfo.createFrom;
+const $$createType6 = cne$0.RunDetail.createFrom;
 const $$createType7 = $Create.Nullable($$createType6);
-const $$createType8 = cne$0.RunSummary.createFrom;
-const $$createType9 = $Create.Array($$createType8);
-const $$createType10 = cne$0.ScheduleState.createFrom;
-const $$createType11 = $Create.Nullable($$createType10);
-const $$createType12 = $models.CatchUpInfo.createFrom;
+const $$createType8 = $models.JobInfo.createFrom;
+const $$createType9 = $Create.Nullable($$createType8);
+const $$createType10 = cne$0.RunSummary.createFrom;
+const $$createType11 = $Create.Array($$createType10);
+const $$createType12 = cne$0.ScheduleState.createFrom;
 const $$createType13 = $Create.Nullable($$createType12);
-const $$createType14 = cne$0.Status.createFrom;
+const $$createType14 = $models.CatchUpInfo.createFrom;
 const $$createType15 = $Create.Nullable($$createType14);
+const $$createType16 = cne$0.Status.createFrom;
+const $$createType17 = $Create.Nullable($$createType16);

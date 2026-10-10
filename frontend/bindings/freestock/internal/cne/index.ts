@@ -8,6 +8,8 @@ export {
     FreshnessReport,
     RunDetail,
     RunSummary,
+    ScheduleChange,
+    SchedulePlan,
     ScheduleState,
     Status,
     StepInfo,
