@@ -89,3 +89,32 @@ func probeTaskService() error {
 	}
 	return nil
 }
+
+// probeAppCompat 查注册表里给这个 exe 设的兼容性标志。
+//
+//	位置（每个用户）：HKCU\Software\Microsoft\Windows NT\CurrentVersion\
+//	                  AppCompatFlags\Layers
+//
+// 值名 = exe 全路径，值 = 形如 "~ WIN8RTM" 的标志串。
+//
+// 为什么查：设了兼容模式的 exe 会让 Windows 设置 __COMPAT_LAYER，
+// 而**子进程会继承它**；某些 shim 做文件系统虚拟化，把 System32 访问
+// 重定向到 VirtualStore，于是 schtasks 报"找不到指定的路径"。
+// 这能解释"同一个目录里 sc 能跑、schtasks 不能"这种反常现象。
+func probeAppCompat(p func(string, ...any), exe string) {
+	path := `HKCU\Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers`
+	out, err := hiddenCommand("reg", "query", path, "/v", exe).CombinedOutput()
+	text := decodeConsole(out)
+	if err != nil {
+		// 查不到通常意味着"没设过"，这是正常的
+		if strings.Contains(text, "找不到") || strings.Contains(text, "cannot find") ||
+			strings.Contains(text, "unable to find") {
+			p("  注册表兼容性标志: 未设置（正常）")
+		} else {
+			p("  注册表兼容性标志: 查不到（%s）", strings.TrimSpace(firstLineOf(text)))
+		}
+		return
+	}
+	p("  ⚠ **该 exe 设了兼容性标志**：%s", strings.TrimSpace(firstLineOf(text)))
+	p("     这会让子进程继承 __COMPAT_LAYER，可能触发文件系统虚拟化")
+}

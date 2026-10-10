@@ -86,34 +86,88 @@ func Diagnose() string {
 		if err != nil {
 			status = fmt.Sprintf("**失败**: %v", err)
 		}
-		firstLine := strings.TrimSpace(decodeConsole(out))
-		if i := strings.IndexByte(firstLine, '\n'); i > 0 {
-			firstLine = firstLine[:i]
-		}
+		body := strings.TrimSpace(decodeConsole(out))
 		p("  %-46s %s", label, status)
-		if firstLine != "" {
-			p("      输出: %s", strings.TrimSpace(firstLine))
+		if body != "" {
+			// ⚠ 输出**前 3 行**都要打出来 —— 只看首行会漏掉关键线索
+			lines := strings.Split(body, "\n")
+			if len(lines) > 3 {
+				lines = lines[:3]
+			}
+			for _, ln := range lines {
+				p("      | %s", strings.TrimSpace(ln))
+			}
 		}
 	}
 
-	// 都不设 Dir、都不设 CREATE_NO_WINDOW —— 最原始的形态
-	probe("schtasks（不设Dir/不设标志）", "", false, "schtasks", "/query", "/tn", TaskDaily, "/fo", "LIST")
-	// 只设 CREATE_NO_WINDOW
-	probe("schtasks（只设 CREATE_NO_WINDOW）", "", true, "schtasks", "/query", "/tn", TaskDaily, "/fo", "LIST")
-	// 只设 Dir
-	probe("schtasks（只设 Dir=neutralDir）", neutralDir(), false, "schtasks", "/query", "/tn", TaskDaily, "/fo", "LIST")
-	// 两个都设（hiddenCommand 的形态）
-	probe("schtasks（Dir+标志，即 hiddenCommand）", neutralDir(), true, "schtasks", "/query", "/tn", TaskDaily, "/fo", "LIST")
-	// Dir 设成 System32
-	probe("schtasks（Dir=System32）", filepath.Join(os.Getenv("SystemRoot"), "System32"), false,
-		"schtasks", "/query", "/tn", TaskDaily, "/fo", "LIST")
-	// 完全显式指定 exe 路径
+	// ⚠ **区分性探针**。
+	//
+	// 之前全部用了 `/tn <任务名>`，所以看不出失败是发生在
+	// "程序根本跑不起来" 还是 "按名字找不到任务" —— 这两者的修法完全不同。
+	//
+	// 关键对照：**`sc query Schedule` 能成功**（同一个 System32、同样的调用方式），
+	// 说明进程环境、PATH、Dir、标志、权限都不是原因，
+	// 问题出在 schtasks 这个程序特有的行为上。
 	sys := filepath.Join(os.Getenv("SystemRoot"), "System32")
-	probe("schtasks.exe 全路径（不设Dir/不设标志）", "", false, filepath.Join(sys, "schtasks.exe"),
-		"/query", "/tn", TaskDaily, "/fo", "LIST")
+	schtasksExe := filepath.Join(sys, "schtasks.exe")
+
+	// ① 程序能不能跑：只打帮助，不碰任务
+	probe("schtasks /?（只验证程序能否运行）", "", false, "schtasks", "/?")
+	probe("schtasks.exe 全路径 /?", "", false, schtasksExe, "/?")
+	// ② 列出全部任务（不按名字找）
+	probe("schtasks /query（列出全部，不按名字）", "", false, "schtasks", "/query", "/fo", "LIST")
+	// ③ 按名字查一个一定不存在的任务 —— 看它的报错是否不同
+	probe("schtasks /query /tn 不存在的任务", "", false,
+		"schtasks", "/query", "/tn", "cne-definitely-not-exist-xyz", "/fo", "LIST")
+	// ④ 按名字查真实任务
+	probe("schtasks /query /tn "+TaskDaily, "", false, "schtasks", "/query", "/tn", TaskDaily, "/fo", "LIST")
+	// ⑤ 经 cmd
+	probe("cmd /c schtasks /query", "", false, "cmd", "/c", "schtasks /query")
+	// ⑥ 对照：同样在 System32 的另一个工具
+	probe("sc query Schedule（对照，已知能成功）", "", false, "sc", "query", "Schedule")
+	probe("where schtasks（对照）", "", false, "where", "schtasks")
+	// ⑦ PowerShell 的等价物
+	probe("powershell Get-ScheduledTask", "", false, "powershell", "-NoProfile", "-NonInteractive",
+		"-Command", "Get-ScheduledTask -TaskName '"+TaskDaily+"' | Select-Object -ExpandProperty TaskName")
+	probe("powershell Get-Service Schedule（对照）", "", false, "powershell", "-NoProfile", "-NonInteractive",
+		"-Command", "(Get-Service Schedule).Status")
 
 	p("")
-	// ⑤ 会话与令牌 —— 这两项决定"能不能访问任务计划程序服务"
+	// ⑤ **兼容性 shim** —— 这条很容易被忽略，但能解释"同一个 System32 里
+	// 有的程序能跑、有的报找不到路径"。
+	//
+	// 如果 exe 被设了「兼容模式」，Windows 会设置 __COMPAT_LAYER 环境变量，
+	// 而它**会被子进程继承**；某些 shim 会做**文件系统虚拟化**，
+	// 把 System32 的访问重定向到 %LOCALAPPDATA%\VirtualStore ——
+	// 那里当然没有 schtasks，于是报"系统找不到指定的路径"。
+	p("")
+	p("=== 兼容性 shim（重点）===")
+	layer := os.Getenv("__COMPAT_LAYER")
+	if layer == "" {
+		p("  __COMPAT_LAYER: 未设置（正常）")
+	} else {
+		p("  ⚠ **__COMPAT_LAYER = %q** —— 进程带着兼容性 shim，子进程会继承", layer)
+	}
+	// 注册表里对这个 exe 设的兼容性标志
+	if exe, err := os.Executable(); err == nil {
+		probeAppCompat(p, exe)
+	}
+	// VirtualStore 里有没有被重定向过去的东西
+	if local := os.Getenv("LOCALAPPDATA"); local != "" {
+		vs := filepath.Join(local, "VirtualStore", "Windows", "System32")
+		if _, err := os.Stat(vs); err == nil {
+			files, _ := os.ReadDir(vs)
+			p("  ⚠ VirtualStore\\Windows\\System32 存在，里面有 %d 项 —— 说明发生过重定向", len(files))
+			for i, f := range files {
+				if i >= 5 {
+					break
+				}
+				p("      %s", f.Name())
+			}
+		}
+	}
+
+	// ⑥ 会话与令牌 —— 这两项决定"能不能访问任务计划程序服务"
 	p("")
 	p("=== 进程上下文 ===")
 	p("  会话 ID: %d", processSessionID())

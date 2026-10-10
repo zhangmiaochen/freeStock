@@ -4,6 +4,4 @@ package cne
 
 import "testing"
 
-func TestDiagnoseReport(t *testing.T) {
-	t.Log("\n" + Diagnose())
-}
+func TestDiagnoseReport(t *testing.T) { t.Log("\n" + Diagnose()) }
