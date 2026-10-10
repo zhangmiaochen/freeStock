@@ -54,6 +54,17 @@ func ApplyRecommendedSettings(taskName string) error {
 		return nil
 	}
 
+	// ⚠ 与 runSchtasks 同样的完整性预检：低完整性下 COM 不可用，
+	// Get-ScheduledTask 会报"系统找不到指定的路径"，完全看不出真实原因。
+	if lv := integrityLevel(); strings.Contains(strings.ToLower(lv), "low") {
+		return fmt.Errorf(
+			"调整 %s 的设置失败，而且**根因很可能是完整性级别**：\n"+
+				"  当前进程完整性级别 = %s（低完整性无法激活 COM 服务器）\n"+
+				"  修：icacls \"<项目目录>\" /setintegritylevel (OI)(CI)M /T\n"+
+				"  原始错误：%v（%s）",
+			taskName, lv, err, strings.TrimSpace(decodeConsole(out)))
+	}
+
 	// 与 runSchtasks 同样加一次**裸调用**兜底（不设 Dir、不设标志、不碰 Env）。
 	// PowerShell 的 Get-ScheduledTask 之前也报 ERROR_PATH_NOT_FOUND(0x80070003)，
 	// 所以它和 schtasks 很可能是同一个原因。

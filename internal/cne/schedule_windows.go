@@ -250,6 +250,29 @@ func runSchtasks(args ...string) ([]byte, error) {
 		return out2, nil
 	}
 
+	// ⚠ **先查一个非常隐蔽、但完全能解释这种现象的原因：完整性级别。**
+	//
+	// 实测（用户机器）：整个项目目录被打上了 "Low Mandatory Level" 标签，
+	// 于是从它启动的进程都是低完整性；而低完整性进程**无法激活需要 Medium
+	// 完整性的 COM 服务器** —— schtasks / Get-ScheduledTask 走的就是 COM，
+	// 报错恰好是 `ERROR_PATH_NOT_FOUND`（"系统找不到指定的路径"）。
+	//
+	// 那种报错**完全看不出是权限标签问题**，我为此排查了六轮。
+	// 所以在报错前先看一眼：如果是 Low，直接把原因说出来。
+	if lv := integrityLevel(); strings.Contains(strings.ToLower(lv), "low") {
+		return out, fmt.Errorf(
+			"schtasks 失败，而且**根因很可能是完整性级别**：\n"+
+				"  当前进程完整性级别 = %s\n"+
+				"  低完整性进程无法激活需要 Medium 完整性的 COM 服务器，"+
+				"而 schtasks / Get-ScheduledTask 走的正是 COM —— 报错却只是"+
+				"「系统找不到指定的路径」，看不出来是这个问题。\n"+
+				"  常见原因：**exe 所在目录或 exe 本身被打上了 Low 完整性标签**。\n"+
+				"  查：icacls \"<目录>\" | findstr Mandatory\n"+
+				"  修：icacls \"<目录>\" /setintegritylevel (OI)(CI)M /T\n"+
+				"  （另外：低完整性下 COM、WMI、部分 RPC 都会失败，不只是计划任务）\n"+
+				"  原始错误：%v（%s）",
+			lv, err, strings.TrimSpace(decodeConsole(out)))
+	}
 	dir := neutralDir()
 	_, statErr := os.Stat(dir)
 	lookPath, lookErr := exec.LookPath("schtasks")
