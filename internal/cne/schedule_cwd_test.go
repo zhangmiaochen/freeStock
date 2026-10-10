@@ -125,3 +125,50 @@ func TestAllCommandsGetWorkingDir(t *testing.T) {
 		}
 	}
 }
+
+// ⚠ **兜底判据必须区分"命令没跑起来"和"schtasks 正常报错"。**
+//
+// 这个区分我第一版写错了：把"退出码非零"当成调用失败，
+// 于是**查一个不存在的任务**（schtasks 本来就返回非零）被误判成 cmd 启动失败，
+// 去重试、最后报一个带诊断的错 —— TestQueryMissingTaskIsNotAnError 直接挂了。
+//
+// 正确的判据只有两类：明确的"找不到路径"，或输出完全为空。
+func TestCmdFailedToStartOnlyMatchesStartupFailures(t *testing.T) {
+	startupFailures := [][]byte{
+		[]byte("ERROR: The system cannot find the path specified.\r\n"),
+		[]byte("系统找不到指定的路径。\r\n"),
+		[]byte(""),
+		[]byte("   \r\n"),
+	}
+	for _, out := range startupFailures {
+		if !cmdFailedToStart(out) {
+			t.Errorf("应判为'命令没跑起来'：%q", string(out))
+		}
+	}
+
+	// 这些是 schtasks **跑起来了**并且自己报的错 —— 不能走兜底重试
+	legitErrors := [][]byte{
+		[]byte("ERROR: The system cannot find the file specified."),
+		[]byte("ERROR: The task \"cne-xyz\" does not exist."),
+		[]byte("ERROR: 系统找不到指定的文件。"),
+		[]byte("INFO: Scheduled task \"cne-daily-update\" has already been enabled.\r\n" +
+			"SUCCESS: The parameters of scheduled task \"cne-daily-update\" have been changed."),
+	}
+	for _, out := range legitErrors {
+		if cmdFailedToStart(out) {
+			t.Errorf("**不该**判为'命令没跑起来'（schtasks 已执行并报错）：%q", string(out))
+		}
+	}
+}
+
+// 查不存在的任务必须返回"未注册"，而不是把 schtasks 的业务性非零退出
+// 当成调用失败报出来。
+func TestQueryMissingTaskStillWorks(t *testing.T) {
+	info, err := Query("cne-definitely-not-registered-xyz")
+	if err != nil {
+		t.Fatalf("**查不存在的任务不该报错**（schtasks 返回非零是正常的业务结果）：%v", err)
+	}
+	if info.Registered {
+		t.Error("不该报告已注册")
+	}
+}

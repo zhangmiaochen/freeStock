@@ -5,6 +5,8 @@ package cne
 import (
 	"errors"
 	"fmt"
+	"os"
+	"os/exec"
 	"regexp"
 	"strings"
 	"unicode/utf8"
@@ -200,9 +202,9 @@ func DeleteTask(name string) error {
 // 辅助
 // ---------------------------------------------------------------------------
 
-// runSchtasks 调用 schtasks，并让它输出 UTF-8。
+// runSchtasks 调用 schtasks。
 //
-// ⚠ 这里有两个坑，都是实测出来的：
+// ⚠ 这里有三个坑，全是实测踩出来的：
 //
 // **坑一：必须设一个有效的工作目录。**
 // 用户点「开启自动更新」时报过：
@@ -210,34 +212,121 @@ func DeleteTask(name string) error {
 //	/enable cne-daily-update 失败：exit status 1
 //	（ERROR: The system cannot find the path specified.）
 //
-// 同一条命令在 PowerShell 里是 exit 0 —— 问题不在命令，在环境：
-// `cmd.exe` 对**当前工作目录**敏感，GUI 进程继承来的 CWD 可能是无效的
-// （快捷方式的"起始位置"、被删的目录、构建期间的 bin/），
-// 于是 cmd 直接报"找不到路径"，schtasks 根本没被执行。
-// 修法：hiddenCommand 统一把 Dir 设成 neutralDir()。
+// 而**同一条命令在 PowerShell 里是 exit 0** —— 问题在环境不在命令：
+// `cmd.exe` 对**当前工作目录**敏感，目录无效时报的正是这句话。
+// GUI 进程继承来的 CWD 不可控（快捷方式的"起始位置"、被删的目录、
+// 构建期间的 bin/）。→ `hiddenCommand` 统一设 Dir。
 //
-// **坑二：不能把 Dir 设成 System32。**
-// 实测 Dir=System32 时 schtasks 会输出**中文 GBK**，
-// 而 `decodeConsole` 对非 UTF-8 是"剥掉非法字节"，中文被剥光后字段全空。
-// 所以 neutralDir 刻意避开 System32。
+// **坑二：Dir 不能是 System32。**
+// 实测 Dir=System32 时 schtasks 输出**中文 GBK**，而 decodeConsole 对非
+// UTF-8 是"剥掉非法字节"，中文被剥光后字段全空。→ 用 neutralDir()。
 //
-// 至于 `chcp 65001`：它确实有用（强制 UTF-8 输出），保留。
-// 输出被 `|` 到管道时 Windows 仍可能按 OEM 代码页编码，chcp 能把它掰过来。
+// **坑三：不能只依赖 `cmd /c`。**（用户第二次报同样的错之后加的）
+// 既然在用户机器上 `cmd /c` 这条路仍然会报"找不到路径"，就不能把功能
+// 压在它上面。所以：
+//   - 先按老路 `cmd /c "chcp 65001 >nul && schtasks ..."` 试一次（能拿到 UTF-8）
+//   - **失败就直接调 schtasks**（不经 cmd，绕开 cmd 对 CWD 的敏感性）
+//   - 两条都失败，才把**两条路各自的事实**一起报出来
+//
+// 最后这点是刻意的：这个错我修过一次没修好，第二次不能再让用户只看到
+// 一句"找不到路径" —— 错误里必须带上足够定位的信息。
 func runSchtasks(args ...string) ([]byte, error) {
+	// ① 经 cmd /c（能强制 UTF-8 输出）
 	full := "chcp 65001 >nul && schtasks " + strings.Join(args, " ")
-	return hiddenCommand("cmd", "/c", full).CombinedOutput()
+	cmd := hiddenCommand("cmd", "/c", full)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		return out, nil
+	}
+	// ⚠ **不是所有非零退出都是"调用失败"。**
+	// 查一个不存在的任务时 schtasks 本来就返回非零（"找不到该任务"），
+	// 那是**正常的业务结果**，要原样交给上层用 isNotFound 判断。
+	// 只有"cmd 根本没跑起来"才该走兜底。
+	//（第一版没区分这两者，把"任务不存在"也当成调用失败去重试，
+	//  结果 TestQueryMissingTaskIsNotAnError 直接挂了。）
+	if !cmdFailedToStart(out) {
+		return out, err
+	}
+	first := strings.TrimSpace(decodeConsole(out))
+
+	// ② 直接调 schtasks（绕开 cmd）
+	out2, err2 := hiddenCommand("schtasks", args...).CombinedOutput()
+	if err2 == nil {
+		return out2, nil
+	}
+	if !cmdFailedToStart(out2) {
+		return out2, err2
+	}
+
+	// ③ 两条都失败 —— 把定位所需的事实全放进错误里
+	return out2, fmt.Errorf(
+		"schtasks 两种调用方式都失败：\n"+
+			"  ① cmd /c: %v（%s）\n"+
+			"  ② 直接调用: %v（%s）\n"+
+			"  诊断：子进程工作目录=%q，进程自身工作目录=%q，cmd 解析为=%q，schtasks 解析为=%q，SystemRoot=%q",
+		err, first,
+		err2, strings.TrimSpace(decodeConsole(out2)),
+		cmd.Dir, selfWorkingDir(),
+		lookPathOrEmpty("cmd"), lookPathOrEmpty("schtasks"),
+		os.Getenv("SystemRoot"))
+}
+
+// cmdFailedToStart 判断一次失败是不是"命令根本没跑起来"。
+//
+// 只认**启动阶段**的错误：
+//   - "The system cannot find the path specified." / 中文版
+//   - 或输出完全为空（进程没来得及产出任何东西就死了）
+//
+// ⚠ 不能简单地用"退出码非零"当判据：schtasks 查不到任务时也返回非零。
+func cmdFailedToStart(out []byte) bool {
+	text := decodeConsole(out)
+	if strings.TrimSpace(text) == "" {
+		return true
+	}
+	lower := strings.ToLower(text)
+	// ⚠ 只认**路径**。schtasks 自己的业务错误里也有"系统找不到"，
+	// 例如"系统找不到指定的**文件**。"（任务/文件不存在）——
+	// 那说明 schtasks 已经跑起来了，不该走兜底重试。
+	//（第一版用宽泛的"系统找不到"匹配，把这种也被判成启动失败，
+	//  是测试把它抓出来的。）
+	return strings.Contains(lower, "cannot find the path") ||
+		strings.Contains(text, "找不到指定的路径")
+}
+
+// selfWorkingDir 返回本进程的当前工作目录（可能已失效）。
+func selfWorkingDir() string {
+	dir, err := os.Getwd()
+	if err != nil {
+		return "<取不到: " + err.Error() + ">"
+	}
+	return dir
+}
+
+// lookPathOrEmpty 解析可执行文件位置，失败时返回空串。
+//
+// 放进诊断里是因为：如果应用进程的 PATH 有问题（GUI 启动的进程 PATH 可能
+// 不完整），`cmd` / `schtasks` 会解析不到 —— 那是另一类根因。
+func lookPathOrEmpty(name string) string {
+	p, err := exec.LookPath(name)
+	if err != nil {
+		return "<找不到: " + err.Error() + ">"
+	}
+	return p
 }
 
 // decodeConsole 把输出规整成字符串。
 //
-// 已经用 chcp 65001 强制 UTF-8，所以这里基本是恒等；仍保留一层兜底 ——
-// 万一某台机器上 chcp 没生效，至少不会 panic，只是字段可能取不到。
+// 走 `cmd /c chcp 65001` 时输出已是 UTF-8，这里是恒等。
+// 走了兜底（直接调 schtasks）时输出可能是 **OEM 代码页（GBK）** ——
+// 纯 Go 标准库没有 GBK 解码器，所以只能把无法解码的字节丢掉，
+// **ASCII 字段名（TaskName / Next Run Time / Status）仍能保住**，
+// 中文值（例如"就绪"）会丢。这是兜底路径的已知代价 ——
+// 界面上的时间与状态仍可用，只是个别中文值可能为空。
 func decodeConsole(raw []byte) string {
 	s := strings.TrimPrefix(string(raw), "\ufeff")
 	if utf8.ValidString(s) {
 		return s
 	}
-	// 非 UTF-8：丢掉无法解码的字节，保住 ASCII 字段名（Next Run Time 等）
 	return strings.ToValidUTF8(s, "")
 }
 
