@@ -132,6 +132,18 @@ func quotesInRange(all []*stockdb.Quote, start, end int) []*stockdb.Quote {
 func (p *rangeCachingProvider) DailyBars(
 	ctx context.Context, code string, start, end int,
 ) ([]score.Bar, error) {
+	// ⚠ **数据湖这条路直接透传，不再套一层缓存**。
+	//
+	// 底层 lakeProvider 已经有"按交易日批量读"的缓存：每次取数只是从内存
+	// 里按区间切片，已经是 O(结果)。再在上面套一层区间缓存，收益为零，
+	// 却要为**每天每只股票**多拷贝一份整窗口的 bar（5821 只 × 281 根），
+	// 白白推高 GC 压力（profile 里 GC 占 14%）。
+	//
+	// stockdb 那条路没有这层内存缓存，仍然需要它（否则会按天重复发请求）。
+	if p.Provider.Kind() == SourceKindCnLake {
+		return p.Provider.DailyBars(ctx, code, start, end)
+	}
+
 	// 与 DailyHistory 同样的保护：区间超出预取窗口就不敢用缓存
 	if start < p.from || end > p.to {
 		return p.Provider.DailyBars(ctx, code, start, end)

@@ -49,6 +49,12 @@ func TestReadTypedParallelKeepsOrder(t *testing.T) {
 }
 
 // 并发度上限为 8，且不超过文件数。
+// lakeReadWorkers 的边界。
+//
+// ⚠ 上限原先是硬编码 8，理由是"磁盘 IO 密集"。那个判断是错的 ——
+// parquet 读取里占大头的是 zstd 解压 + thrift 解码 + 列转换（CPU profile 全是热点），
+// 属于 **CPU 密集**，压在 8 等于在 16 核机器上白扔一半算力。
+// 现在上限是 lakeReadMaxWorkers（32），这里跟着常量走，改上限时不会再挂。
 func TestLakeReadWorkersBounds(t *testing.T) {
 	if got := lakeReadWorkers(0); got != 1 {
 		t.Errorf("0 个文件应回落到 1，实际 %d", got)
@@ -56,8 +62,8 @@ func TestLakeReadWorkersBounds(t *testing.T) {
 	if got := lakeReadWorkers(1); got != 1 {
 		t.Errorf("1 个文件应为 1，实际 %d", got)
 	}
-	if got := lakeReadWorkers(1000); got > 8 {
-		t.Errorf("上限应为 8，实际 %d", got)
+	if got := lakeReadWorkers(1000); got > lakeReadMaxWorkers {
+		t.Errorf("上限应为 %d，实际 %d", lakeReadMaxWorkers, got)
 	}
 	if got := lakeReadWorkers(3); got != 3 {
 		t.Errorf("3 个文件应为 3，实际 %d", got)

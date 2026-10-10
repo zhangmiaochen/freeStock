@@ -320,8 +320,8 @@ func readTyped[T any](files []string, keep func(*T) bool) ([]T, error) {
 // 而且每个文件都要读 footer，随机寻道会变多。
 func lakeReadWorkers(fileCount int) int {
 	workers := runtime.NumCPU()
-	if workers > 8 {
-		workers = 8
+	if workers > lakeReadMaxWorkers {
+		workers = lakeReadMaxWorkers
 	}
 	if workers > fileCount {
 		workers = fileCount
@@ -331,6 +331,18 @@ func lakeReadWorkers(fileCount int) int {
 	}
 	return workers
 }
+
+// lakeReadMaxWorkers 是并行读文件的上限。
+//
+// ⚠ 原来这里硬编码 **8**，理由是"这是磁盘 IO 密集的活，再多的协程只会互相抢 IO"。
+// **这个判断是错的**：parquet 读取里占大头的是 **zstd 解压 + thrift 解码 +
+// 列转换**，CPU profile 上全是热点 —— 它是 **CPU 密集**的。
+// 实测环境 16 逻辑核，压在 8 等于白扔一半算力。
+//
+// 上限仍然保留（32），避免在文件数极大时开过多协程。
+// 放开并发**不改变任何数据结果**：只是同时读多个文件，
+// 每个文件的解码路径与顺序完全未变。
+const lakeReadMaxWorkers = 32
 
 func readTypedFile[T any](handle *parquetHandle, keep func(*T) bool, out *[]T) error {
 	reader := parquet.NewGenericReader[T](handle.file)
