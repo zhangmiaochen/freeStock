@@ -233,13 +233,13 @@ func (r *Runner) Start(kind string, tradeDate string) (*Job, error) {
 		return nil, fmt.Errorf("创建日志文件失败：%w", err)
 	}
 
-	cmd := exec.Command(exe, args...)
+	cmd := hiddenCommand(exe, args...)
 	cmd.Dir = r.opts.ProjectDir // cne 按相对路径找配置（方案 §4.2）
 	cmd.Env = BuildEnv()        // §2.4
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
-	// Windows：独立进程组，取消时才能把整棵进程树带走
-	setupProcessGroup(cmd)
+	// 不弹控制台窗口 + 独立进程组（见 setupHiddenProcess 的说明）
+	setupHiddenProcess(cmd)
 
 	job := &Job{
 		ID:        fmt.Sprintf("cne-%d", time.Now().UnixNano()),

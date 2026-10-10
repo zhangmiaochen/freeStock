@@ -5,7 +5,6 @@ package cne
 import (
 	"errors"
 	"fmt"
-	"os/exec"
 	"regexp"
 	"strings"
 	"unicode/utf8"
@@ -216,7 +215,7 @@ func runSchtasks(args ...string) ([]byte, error) {
 	}
 	// cmd /c "chcp 65001 >nul && schtasks <args...>"
 	full := "chcp 65001 >nul && schtasks " + strings.Join(quoted, " ")
-	return exec.Command("cmd", "/c", full).CombinedOutput()
+	return hiddenCommand("cmd", "/c", full).CombinedOutput()
 }
 
 // decodeConsole 把输出规整成字符串。

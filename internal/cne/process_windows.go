@@ -10,23 +10,50 @@ import (
 	"syscall"
 )
 
-// setupProcessGroup 让子进程进入**独立的进程组**。
+// createNoWindow 让子进程**不弹控制台窗口**。
 //
-// cne 会派生子进程（python），只有把整棵进程树归到独立进程组，
-// 取消时才能一次带走，不留孤儿（方案 §4.2）。
-func setupProcessGroup(cmd *exec.Cmd) {
+// ⚠ `cne.exe` 是控制台程序：用 exec.Command 直接起它，Windows 会给它分配
+// 一个黑框，用户点一下「手动更新」就弹一个窗出来。用户实测反馈过这一点。
+//
+// 值取自 Win32 的 CREATE_NO_WINDOW（0x08000000）。Go 的 syscall 包里
+// 在部分版本上没导出这个常量，所以显式定义 —— 它是稳定的 ABI 常量。
+const createNoWindow = 0x08000000
+
+// setupHiddenProcess 让子进程**既没有控制台窗口、又在独立进程组里**。
+//
+//   - CREATE_NO_WINDOW：不弹黑框（用户可见的体验问题）
+//   - CREATE_NEW_PROCESS_GROUP：cne 会派生 python 子进程，
+//     归到独立进程组便于取消时整棵树带走（方案 §4.2）
+//
+// ⚠ 即使 CREATE_NO_WINDOW 让 CREATE_NEW_PROCESS_GROUP 失效也没关系：
+// 取消走的是 `taskkill /T /PID`，它按**父子关系**遍历进程树，不依赖进程组。
+func setupHiddenProcess(cmd *exec.Cmd) {
 	if cmd.SysProcAttr == nil {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
 	}
-	cmd.SysProcAttr.CreationFlags |= syscall.CREATE_NEW_PROCESS_GROUP
+	cmd.SysProcAttr.CreationFlags |= createNoWindow | syscall.CREATE_NEW_PROCESS_GROUP
 }
+
+// hiddenCommand 构造一个**不会弹窗**的外部命令。
+//
+// 本项目所有对外部程序的调用都必须走这里 —— 包括 taskkill / powershell /
+// schtasks(经 cmd /c) —— 否则每调一次就闪一个黑框（实测 powershell 那个
+// 尤其明显，因为它启动慢，窗口会停留可见的一段时间）。
+func hiddenCommand(name string, args ...string) *exec.Cmd {
+	cmd := exec.Command(name, args...)
+	setupHiddenProcess(cmd)
+	return cmd
+}
+
+// setupProcessGroup 保留旧名，供内部与测试使用。
+func setupProcessGroup(cmd *exec.Cmd) { setupHiddenProcess(cmd) }
 
 // killProcessTree 杀掉整棵进程树。
 //
 // 用 taskkill /T（连子树）/F（强制）—— 这是 Windows 上最可靠的方式；
 // 只对父进程 Kill() 会留下 python 孤儿（方案 §11 验收清单明确要求核对）。
 func killProcessTree(pid int) error {
-	out, err := exec.Command("taskkill", "/T", "/F", "/PID", strconv.Itoa(pid)).CombinedOutput()
+	out, err := hiddenCommand("taskkill", "/T", "/F", "/PID", strconv.Itoa(pid)).CombinedOutput()
 	if err != nil {
 		// 进程可能已经自己结束了 —— 这种情况不算失败
 		msg := string(out)
@@ -56,7 +83,7 @@ func killProcessTree(pid int) error {
 func foreignCneRunning() (int, bool) {
 	const script = `Get-CimInstance Win32_Process -Filter "Name='cne.exe'" | ` +
 		`ForEach-Object { "$($_.ProcessId)|$($_.CommandLine)" }`
-	out, err := exec.Command("powershell", "-NoProfile", "-NonInteractive",
+	out, err := hiddenCommand("powershell", "-NoProfile", "-NonInteractive",
 		"-Command", script).Output()
 	if err != nil {
 		return 0, false

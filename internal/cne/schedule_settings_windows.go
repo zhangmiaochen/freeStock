@@ -4,7 +4,6 @@ package cne
 
 import (
 	"fmt"
-	"os/exec"
 	"strings"
 )
 
@@ -45,7 +44,7 @@ func ApplyRecommendedSettings(taskName string) error {
 	if !isKnownTask(taskName) {
 		return fmt.Errorf("只允许改本项目的两个任务，收到 %q", taskName)
 	}
-	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive",
+	cmd := hiddenCommand("powershell", "-NoProfile", "-NonInteractive",
 		"-Command", taskSettingsScript)
 	cmd.Env = append(buildTaskEnv(), "FREESTOCK_TASK_NAME="+taskName)
 	out, err := cmd.CombinedOutput()
