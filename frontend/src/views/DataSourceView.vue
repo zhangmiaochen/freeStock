@@ -16,6 +16,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
 import DataLakeCard from "@/components/settings/DataLakeCard.vue";
+import DataUpdateCard from "@/components/settings/DataUpdateCard.vue";
 import { api, errorMessage, type DataSourceInfo, type SourceStatus } from "@/lib/backend";
 import { useStockStore } from "@/stores/stock";
 
@@ -274,6 +275,7 @@ function kindLabel(kind: string) {
 
       <!-- 财务数据来源：行情库没有财报，需要外部数据湖补 -->
       <DataLakeCard />
+      <DataUpdateCard />
 
       <!-- 设置文件位置：数据源与 K 线指标参数都存在这里 -->
       <section v-if="configPath" class="bg-card rounded-lg border p-4">

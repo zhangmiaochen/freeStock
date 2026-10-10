@@ -82,9 +82,15 @@ import type {
 } from "../../bindings/freestock/internal/score/models";
 import type { PortfolioOptions } from "../../bindings/freestock/internal/service/models";
 import * as StockService from "../../bindings/freestock/internal/service/stockservice";
+import * as CneUpdateService from "../../bindings/freestock/internal/service/cneupdateservice";
 import * as PortfolioService from "../../bindings/freestock/internal/service/portfolioservice";
 
 export type { BollPrefs, KlinePrefs, MaPrefs, MacdPrefs };
+// cne 数据更新相关类型（对应 internal/service/cneupdate.go 的 json tag）
+import type { JobInfo, UpdatePrefsInfo } from "../../bindings/freestock/internal/service/models";
+import type { Status as CneUpdateStatus } from "../../bindings/freestock/internal/cne/models";
+import type { UpdatePrefs } from "../../bindings/freestock/internal/config/models";
+export type { JobInfo, UpdatePrefsInfo, CneUpdateStatus, UpdatePrefs };
 export type {
   AppliedChange,
   ApplyResult,
@@ -216,6 +222,25 @@ export const api = {
   saveKlinePrefs: (prefs: KlinePrefs) =>
     StockService.SaveKlinePrefs(prefs) as Promise<KlinePrefsInfo>,
   getConfigPath: () => StockService.GetConfigPath() as Promise<string>,
+
+  // ---- cne 数据更新（见 docs/cne数据更新方案.md）----
+  //
+  // ⚠ kind 的取值与 Go 侧 `internal/cne` 的常量一一对应：
+  //   full  更新到今天（普通日更）
+  //   stale 补抓落后（--stale-only）
+  //   date  补指定交易日（--trade-date）
+  // 方案 §2.2/§2.3 实测过：**stale 不覆盖日行情，非交易日跑普通日更会跳过行情组** ——
+  // 所以界面上必须给三个入口，不能只给一个按钮。
+  /** 发起手动更新，**立即返回**（单次 8~60 分钟，不能同步等待） */
+  manualUpdate: (kind: string, tradeDate = "") =>
+    CneUpdateService.ManualUpdate(kind, tradeDate) as Promise<JobInfo | null>,
+  /** 当前/最近任务的进度快照 */
+  updateStatus: () => CneUpdateService.UpdateStatus() as Promise<CneUpdateStatus | null>,
+  /** 取消当前任务（杀整棵进程树，不留孤儿 python） */
+  cancelUpdate: () => CneUpdateService.CancelUpdate() as Promise<void>,
+  getUpdatePrefs: () => CneUpdateService.GetUpdatePrefs() as Promise<UpdatePrefsInfo>,
+  setUpdatePrefs: (prefs: UpdatePrefs) =>
+    CneUpdateService.SetUpdatePrefs(prefs) as Promise<UpdatePrefsInfo>,
   /** 条件选股 */
   getScreenOptions: () => StockService.GetScreenOptions() as Promise<ScreenOptions | null>,
   screenStocks: (cond: ScreenCondition) =>
