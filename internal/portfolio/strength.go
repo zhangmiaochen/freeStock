@@ -150,6 +150,14 @@ func (s *Store) StrengthCount(tradeDate int64, strategyID string) (int, error) {
 //
 // 先删后插：一次刷新的结果应当**完整替换**该 (日期, 策略) 的旧数据，
 // 否则上一轮评上、这一轮数据不足被跳过的股票会残留成幽灵行。
+//
+// **写入按批做**（`strengthInsertBatch` 行一条 INSERT）。语义完全不变：
+// 同一个事务、同一个表、**同一行顺序**，只是把"一行一次 Exec"换成
+// "一批一次 Exec"。
+//
+// 为什么必须批：纯 Go 驱动（modernc/sqlite）下单个 `stmt.Exec` 要绑 39 个参数
+// 再走一次 VDBE，实测 **7600 行 = 108ms**（约 14µs/行、每行 28 次分配）——
+// 指标算完只要 69ms，落库反而成了回填单日最大的一块。
 func (s *Store) SaveStrength(tradeDate int64, strategyID string, rows []StrengthRow) error {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -164,29 +172,89 @@ func (s *Store) SaveStrength(tradeDate int64, strategyID string, rows []Strength
 		return fmt.Errorf("清理旧评分失败：%w", err)
 	}
 
-	stmt, err := tx.Prepare(`
-		INSERT INTO stock_strength (
-			trade_date, strategy_id, ts_code, name, industry, market,
-			total_score, trend_score, structure_score, rs_score, capital_score, repair_score,
-			close_price, high_price, low_price, open_price, pct_chg, amount_yuan,
-			ma5_price, ma20_price, ma30_price, ma60_price, ma120_price, ma250_price,
-			relative_strength_20d, drawdown_from_high_20, drawdown_from_high_120,
-			rebound_from_low_60, stock_return_3d, stock_return_5d, stock_return_10d,
-			stock_return_20d, volume_ratio_20, volume_ratio_5_20,
-			ma5_prev_price, ma250_prev_price,
-			industry_return_20d, benchmark_return_20d, created_at
-		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-	if err != nil {
-		return fmt.Errorf("准备评分写入失败：%w", err)
-	}
-	defer stmt.Close()
-
 	now := nowText()
+	// 满批的语句只 Prepare 一次、反复执行；余数单独 Prepare 一次。
+	fullBatches := len(rows) / strengthInsertBatch
+	if fullBatches > 0 {
+		stmt, err := tx.Prepare(strengthInsertSQL(strengthInsertBatch))
+		if err != nil {
+			return fmt.Errorf("准备评分写入失败：%w", err)
+		}
+		defer stmt.Close()
+
+		args := make([]any, 0, strengthInsertBatch*strengthColumnCount)
+		for i := 0; i < fullBatches; i++ {
+			batch := rows[i*strengthInsertBatch : (i+1)*strengthInsertBatch]
+			args = appendStrengthArgs(args[:0], batch, tradeDate, strategyID, now)
+			if _, err := stmt.Exec(args...); err != nil {
+				return fmt.Errorf("写入评分失败（%s 起 %d 行）：%w",
+					batch[0].Code, len(batch), err)
+			}
+		}
+	}
+	if rest := len(rows) % strengthInsertBatch; rest > 0 {
+		batch := rows[fullBatches*strengthInsertBatch:]
+		args := appendStrengthArgs(make([]any, 0, rest*strengthColumnCount), batch, tradeDate, strategyID, now)
+		if _, err := tx.Exec(strengthInsertSQL(rest), args...); err != nil {
+			return fmt.Errorf("写入评分失败（%s 起 %d 行）：%w",
+				batch[0].Code, len(batch), err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("提交评分失败：%w", err)
+	}
+	return nil
+}
+
+// strengthInsertBatch 是每条 INSERT 写多少行。
+//
+// 取值只受 SQLite 的"单条语句绑定参数上限"约束：200 × 39 = 7800 个占位符，
+// 远低于 SQLite 的默认上限（32766）。再大收益有限，而语句编译出的程序会变长。
+const strengthInsertBatch = 200
+
+// strengthColumnCount 是 stock_strength 的插入列数（39）。
+const strengthColumnCount = 39
+
+// strengthInsertColumns 是插入列清单（列顺序必须与 appendStrengthArgs 一致）。
+const strengthInsertColumns = `
+	trade_date, strategy_id, ts_code, name, industry, market,
+	total_score, trend_score, structure_score, rs_score, capital_score, repair_score,
+	close_price, high_price, low_price, open_price, pct_chg, amount_yuan,
+	ma5_price, ma20_price, ma30_price, ma60_price, ma120_price, ma250_price,
+	relative_strength_20d, drawdown_from_high_20, drawdown_from_high_120,
+	rebound_from_low_60, stock_return_3d, stock_return_5d, stock_return_10d,
+	stock_return_20d, volume_ratio_20, volume_ratio_5_20,
+	ma5_prev_price, ma250_prev_price,
+	industry_return_20d, benchmark_return_20d, created_at`
+
+// strengthInsertSQL 拼出写入 n 行的 INSERT 语句。
+func strengthInsertSQL(n int) string {
+	if n < 1 {
+		n = 1
+	}
+	var b strings.Builder
+	b.WriteString("INSERT INTO stock_strength (")
+	b.WriteString(strengthInsertColumns)
+	b.WriteString(") VALUES ")
+	group := "(?" + strings.Repeat(",?", strengthColumnCount-1) + ")"
+	for i := 0; i < n; i++ {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		b.WriteString(group)
+	}
+	return b.String()
+}
+
+// appendStrengthArgs 按列顺序摊平一批行。
+//
+// ⚠ 策略与日期以入参为准（避免调用方漏填）—— 与原来逐行写入时的处理一致。
+func appendStrengthArgs(
+	args []any, rows []StrengthRow, tradeDate int64, strategyID, now string,
+) []any {
 	for _, row := range rows {
-		// 策略与日期以入参为准，避免调用方漏填
-		row.TradeDate, row.StrategyID = tradeDate, strategyID
-		if _, err := stmt.Exec(
-			row.TradeDate, row.StrategyID, row.Code, row.Name, row.Industry, row.Market,
+		args = append(args,
+			tradeDate, strategyID, row.Code, row.Name, row.Industry, row.Market,
 			row.TotalScore, row.TrendScore, row.StructureScore, row.RSScore,
 			row.CapitalScore, row.RepairScore,
 			row.Close, row.High, row.Low, row.Open, row.PctChg, row.Amount,
@@ -195,14 +263,9 @@ func (s *Store) SaveStrength(tradeDate int64, strategyID string, rows []Strength
 			row.ReboundFromLow60, row.StockReturn3D, row.StockReturn5D, row.StockReturn10D,
 			row.StockReturn20D, row.VolumeRatio20, row.VolumeRatio520,
 			row.Ma5Prev, row.Ma250Prev, row.IndustryReturn20D, row.BenchmarkReturn20D, now,
-		); err != nil {
-			return fmt.Errorf("写入评分失败（%s）：%w", row.Code, err)
-		}
+		)
 	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("提交评分失败：%w", err)
-	}
-	return nil
+	return args
 }
 
 // LatestStrengthDate 返回已物化的最新评分日（无数据返回 0）。

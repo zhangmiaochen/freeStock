@@ -23,12 +23,12 @@ import (
 //	if not high_first: ranked = 1.0 - ranked
 //
 // 缺失值原实现用 `default` 填充；这里没有缺失概念（Go 的值都是 0）。
+//
+// 这里直接走 `seriesRankScoreRanked`（同一个口径，**只有一份实现**）——
+// 单次调用多花一次排序无所谓；成批调用请用下面的查询器版本，
+// 否则同一列问 n 次就是 O(n²)（回测每个交易日都要跑一遍）。
 func seriesRankScore(values []float64, value float64, highFirst bool) float64 {
-	ranked := RankPct(values, value)
-	if !highFirst {
-		return 1.0 - ranked
-	}
-	return ranked
+	return seriesRankScoreRanked(NewRankLookup(values), value, highFirst)
 }
 
 // trendGrowthEntryPriority 对应原实现的 `_trend_growth_entry_priority`（:1616-1628）。
@@ -62,16 +62,31 @@ func trendGrowthEntryPriority(rows []Row) []float64 {
 		drawdown[i] = row.DrawdownFromHigh120
 	}
 
+	// 六列各自"排序一次、按行查询" —— 与逐行 RankPct 的结果逐位相同，
+	// 但把 O(6n²) 降成 O(6n log n)。回测里这个函数**每个交易日都要跑一遍**。
+	rankers := [6]*RankLookup{
+		NewRankLookup(total), NewRankLookup(structure), NewRankLookup(ma30Gap),
+		NewRankLookup(volumeRatio), NewRankLookup(rs20), NewRankLookup(drawdown),
+	}
 	out := make([]float64, n)
 	for i := range rows {
-		out[i] = seriesRankScore(total, total[i], true)*0.25 +
-			seriesRankScore(structure, structure[i], true)*0.25 +
-			seriesRankScore(ma30Gap, ma30Gap[i], false)*0.18 +
-			seriesRankScore(volumeRatio, volumeRatio[i], false)*0.12 +
-			seriesRankScore(rs20, rs20[i], false)*0.12 +
-			seriesRankScore(drawdown, drawdown[i], true)*0.08
+		out[i] = seriesRankScoreRanked(rankers[0], total[i], true)*0.25 +
+			seriesRankScoreRanked(rankers[1], structure[i], true)*0.25 +
+			seriesRankScoreRanked(rankers[2], ma30Gap[i], false)*0.18 +
+			seriesRankScoreRanked(rankers[3], volumeRatio[i], false)*0.12 +
+			seriesRankScoreRanked(rankers[4], rs20[i], false)*0.12 +
+			seriesRankScoreRanked(rankers[5], drawdown[i], true)*0.08
 	}
 	return out
+}
+
+// seriesRankScoreRanked 是 seriesRankScore 的查询器版本（同一个口径）。
+func seriesRankScoreRanked(lookup *RankLookup, value float64, highFirst bool) float64 {
+	ranked := lookup.Pct(value)
+	if !highFirst {
+		return 1.0 - ranked
+	}
+	return ranked
 }
 
 // PrioritizeEntryPoints 按策略对候选做入场优先级重排（原实现 :1646-1698）。
@@ -142,9 +157,10 @@ func prioritizeLowBuy(rows []Row, cfg StrategyConfig) []Row {
 	for i := range out {
 		amounts[i] = out[i].Amount
 	}
+	amountRanks := NewRankLookup(amounts)
 	priority := make([]float64, len(out))
 	for i := range out {
-		amountRank := 1 - RankPct(amounts, amounts[i])
+		amountRank := 1 - amountRanks.Pct(amounts[i])
 		priority[i] = LowBuyEntryScore(out[i], cfg.LowBuyBreadthReadyCount, amountRank)
 	}
 
@@ -155,8 +171,13 @@ func prioritizeLowBuy(rows []Row, cfg StrategyConfig) []Row {
 		for i := range out {
 			byMarket[out[i].Market] = append(byMarket[out[i].Market], out[i].Amount)
 		}
+		// 每个市场一个查询器（市场数是几个，不是几千）
+		lookupByMarket := make(map[string]*RankLookup, len(byMarket))
+		for market, values := range byMarket {
+			lookupByMarket[market] = NewRankLookup(values)
+		}
 		for i := range out {
-			marketRank[i] = RankPct(byMarket[out[i].Market], out[i].Amount)
+			marketRank[i] = lookupByMarket[out[i].Market].Pct(out[i].Amount)
 		}
 	}
 

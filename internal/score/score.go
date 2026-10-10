@@ -205,16 +205,24 @@ type Indicators struct {
 // 只取**最后一根** K 线上的快照 —— 原项目是逐日整表算，
 // 这里按需算某一天，语义一致（滚动窗口只看历史）。
 func ComputeIndicators(bars []Bar) (Indicators, bool) {
-	if len(bars) < 2 {
+	// ⚠ **下限是 10 而不是 2**：下面要取 `closes[:len-5]`（ma20.shift(5)）与
+	// `closes[:len-10]`（ma60.shift(10)），少于 10 根会**切片越界 panic**
+	//（原来只挡了 len<2，于是 2~9 根会直接崩）。生产路径在调用前挡了 len<30，
+	// 所以这只影响直接调用这个导出函数的场景 —— 但它不该崩。
+	if len(bars) < 10 {
 		return Indicators{}, false
 	}
-	opens := make([]float64, len(bars))
+	// 只物化**真正用到的**四列（均线用 close、量比用 volume、回撤用 high/low）。
+	//
+	// ⚠ 原来这里还多物化了一份 `opens`，但它**从头到尾没被读过** ——
+	// 每只股票每天白分配 2.6KB（全市场一天约 20MB 的无用分配）。
+	// 删掉它不改变任何结果（open 是直接从最后一根 K 线取的）。
 	highs := make([]float64, len(bars))
 	lows := make([]float64, len(bars))
 	closes := make([]float64, len(bars))
 	volumes := make([]float64, len(bars))
 	for i, b := range bars {
-		opens[i], highs[i], lows[i], closes[i], volumes[i] = b.Open, b.High, b.Low, b.Close, b.Volume
+		highs[i], lows[i], closes[i], volumes[i] = b.High, b.Low, b.Close, b.Volume
 	}
 	last := bars[len(bars)-1]
 
@@ -497,6 +505,11 @@ const (
 	RepairWindow    = 40    // 事件后的观察窗口（交易日）
 	RepairGap       = 10    // 两次事件的最小间隔（交易日）
 	RepairKnownLag  = 41    // 事件后多少天才计入统计（窗口 + 1，防未来函数）
+
+	// repairHighWindow 是 `high120` 的回看长度（原实现 rolling(120).max()）。
+	repairHighWindow = 120
+	// repairHighMinDays 是 high120 的 min_periods（原实现字面量 40）。
+	repairHighMinDays = 40
 )
 
 // RepairFeatures 是修复能力的统计结果。
@@ -527,12 +540,6 @@ func BuildRepairFeatures(bars []Bar) RepairFeatures {
 		return out
 	}
 
-	highs := make([]float64, len(bars))
-	closes := make([]float64, len(bars))
-	for i, b := range bars {
-		highs[i], closes[i] = b.High, b.Close
-	}
-
 	var (
 		events    int
 		recovered int
@@ -541,14 +548,40 @@ func BuildRepairFeatures(bars []Bar) RepairFeatures {
 		lastEvent = -RepairGap - 1
 	)
 
+	// `high120[i] = max(high[max(0,i-119) .. i])`，即原实现的
+	// `rollingMax(highs[:i+1], 120, 40)`。
+	//
+	// ⚠ **用单调队列一次算完，不再是每个 i 都重扫 120 个值。**
+	//
+	// 原来这一句是 O(n²)：330 个位置 × 120 次比较 = 每只股票每天约 4 万次比较，
+	// 而回填是"每只股票每天一次" —— CPU profile 里 `rollingMax` 占了
+	// 全市场回填 **27% 的 CPU**，是单项最大的一块。
+	//
+	// 结果**逐位不变**：队列维护的是同一个滑动窗口的同一个最大值
+	//（值相等时留新不留旧，最大值本身完全一样）。有差分测试比对旧实现。
+	//
+	// 队列里存下标、值递减。窗口是 `[i-119, i]`：新值从队尾压入前先弹掉
+	// 所有 <= 它的下标（它们不可能是后续任何窗口的最大值），队首滑出窗口就弹出。
+	deque := make([]int, 0, repairHighWindow)
 	last := len(bars) - 1
 	for i := 0; i <= last; i++ {
-		// 事件条件：相对 120 日高点回撤 <= -10%
-		high120, ok := rollingMax(highs[:i+1], 120, 40)
-		if !ok || high120 <= 0 {
+		high := bars[i].High
+		for len(deque) > 0 && bars[deque[len(deque)-1]].High <= high {
+			deque = deque[:len(deque)-1]
+		}
+		deque = append(deque, i)
+		if deque[0] <= i-repairHighWindow {
+			deque = deque[1:]
+		}
+		// minPeriods=40：不足 40 根时原实现返回 ok=false（窗口还没成形）
+		if i+1 < repairHighMinDays {
 			continue
 		}
-		if (closes[i]/high120-1)*100 > RepairThreshold {
+		high120 := bars[deque[0]].High
+		if high120 <= 0 {
+			continue
+		}
+		if (bars[i].Close/high120-1)*100 > RepairThreshold {
 			continue
 		}
 		// 最小间隔
@@ -571,11 +604,11 @@ func BuildRepairFeatures(bars []Bar) RepairFeatures {
 		newHighFlag := false
 		recoverDay := 0
 		for j := i + 1; j <= end; j++ {
-			if closes[j] >= high120*0.98 && !recoveredFlag {
+			if bars[j].Close >= high120*0.98 && !recoveredFlag {
 				recoveredFlag = true
 				recoverDay = j - i
 			}
-			if closes[j] >= high120*1.02 {
+			if bars[j].Close >= high120*1.02 {
 				newHighFlag = true
 			}
 		}
@@ -619,7 +652,22 @@ func BuildRepairFeatures(bars []Bar) RepairFeatures {
 // RankPct 计算 value 在同组里的百分位（0..1，越大越高）。
 //
 // 对应 pandas 的 rank(pct=True)：并列取平均名次。
+//
+// ⚠ **单次调用要线性扫一遍整个 values**。在"一天几千只股票、每只都要算分位"
+// 的路径上循环调用会退化成 O(n²) —— 实测全市场回填里它占了 **21% 的 CPU**
+// （每天 3 次 × 7600 只 → 1.7 亿次比较）。那种场景请用 `NewRankLookup`：
+// 排序一次，之后每次查询 O(log n)，结果逐位相同。
 func RankPct(values []float64, value float64) float64 {
+	return rankPctLinear(values, value)
+}
+
+// rankPctLinear 是原始的线性实现（保留为唯一的口径定义）。
+//
+// 语义（**改动前后必须一致**，有差分测试保证）：
+//   - 并列取平均名次：`less + (equal+1)/2`
+//   - `equal == 0`（值不在数组里）返回 0
+//   - NaN 既不小于也不等于任何值，所以含 NaN 时它只占 len 的名次、不计入 less/equal
+func rankPctLinear(values []float64, value float64) float64 {
 	if len(values) == 0 {
 		return 0
 	}
@@ -638,6 +686,59 @@ func RankPct(values []float64, value float64) float64 {
 	}
 	avgRank := float64(less) + (float64(equal)+1)/2
 	return round(avgRank/float64(len(values)), 4)
+}
+
+// RankLookup 是"一次排序、多次查询"的百分位计算器。
+//
+// **结果与 RankPct 逐位一致**（见 TestRankLookupMatchesRankPct 的随机差分，
+// 以及真实数据上的评分指纹 A/B）。等价性靠三件事保证：
+//
+//  1. 并列名次：排序后用二分定出 `less`（第一个 >= value 的位置）与
+//     `upper`（第一个 > value 的位置），`equal = upper - less` ——
+//     与线性实现数出来的 `<` / `==` 个数完全相同。
+//  2. 值不在数组里：`sorted[less] != value` 直接返回 0，对应 `equal == 0`。
+//  3. **NaN 退回线性**：NaN 与任何值都不相等（连自己都不等），
+//     排序 + 二分表达不了这个语义，所以含 NaN 时不排序、逐次走线性实现。
+//     ±0.0 不需要特判：`-0.0 == 0.0` 为真，二分用 `>=` / `>` 也把它们归到同一组。
+type RankLookup struct {
+	values []float64
+	// sorted 是 values 的升序副本；为 nil 表示"不能走二分"（空数组或含 NaN）
+	sorted []float64
+}
+
+// NewRankLookup 为 values 建查询器，O(n log n) 一次。
+func NewRankLookup(values []float64) *RankLookup {
+	lookup := &RankLookup{values: values}
+	if len(values) == 0 {
+		return lookup
+	}
+	for _, v := range values {
+		if math.IsNaN(v) {
+			return lookup
+		}
+	}
+	sorted := make([]float64, len(values))
+	copy(sorted, values)
+	sort.Float64s(sorted)
+	lookup.sorted = sorted
+	return lookup
+}
+
+// Pct 返回 value 的百分位；空输入与 nil 接收者返回 0。
+func (r *RankLookup) Pct(value float64) float64 {
+	if r == nil || len(r.values) == 0 {
+		return 0
+	}
+	if r.sorted == nil || math.IsNaN(value) {
+		return rankPctLinear(r.values, value)
+	}
+	less := sort.SearchFloat64s(r.sorted, value)
+	if less == len(r.sorted) || r.sorted[less] != value {
+		return 0
+	}
+	upper := sort.Search(len(r.sorted), func(i int) bool { return r.sorted[i] > value })
+	avgRank := float64(less) + (float64(upper-less)+1)/2
+	return round(avgRank/float64(len(r.sorted)), 4)
 }
 
 // Median 返回中位数（同 industry 收益均值等场景用）。
