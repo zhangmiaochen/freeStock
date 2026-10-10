@@ -182,17 +182,12 @@ func (r *Runner) Start(kind string, tradeDate string) (*Job, error) {
 			ErrBusy, r.current.Kind, time.Since(r.current.StartedAt).Round(time.Second))
 	}
 
-	// 第 3 道闸：跨进程检测。cne 自己有 ingest 锁，第二个任务会失败或空等，
-	// 提前拒绝体验更好（方案 §5.4）。
-	if pid, found := r.foreignRunning(); found {
-		return nil, fmt.Errorf("检测到已有 cne 进程在运行（PID %d）—— 请等它结束，或先结束它", pid)
-	}
-
-	exe, err := r.executable()
-	if err != nil {
-		return nil, err
-	}
-
+	// ⚠ **先校验参数，再查环境**。
+	//
+	// 次序反了会给出误导性的错误：当机器上已有 cne 在跑（很常见 —— 计划任务
+	// 或用户自己起的），一个"补指定交易日但漏填日期"的请求会报
+	// "已有 cne 进程在运行"，用户于是去等那个进程，而真正的问题是参数没填。
+	// 参数错误是**请求本身有问题**，与机器状态无关，应当先报。
 	var extra []string
 	switch kind {
 	case KindStale:
@@ -208,9 +203,20 @@ func (r *Runner) Start(kind string, tradeDate string) (*Job, error) {
 		return nil, fmt.Errorf("未知的更新类型 %q", kind)
 	}
 
+	exe, err := r.executable()
+	if err != nil {
+		return nil, err
+	}
+
 	args, err := r.buildArgs(kind, extra)
 	if err != nil {
 		return nil, err
+	}
+
+	// 第 3 道闸：跨进程检测。cne 自己有 ingest 锁，第二个任务会失败或空等，
+	// 提前拒绝体验更好（方案 §5.4）。
+	if pid, found := r.foreignRunning(); found {
+		return nil, fmt.Errorf("检测到已有 cne 进程在运行（PID %d）—— 请等它结束，或先结束它", pid)
 	}
 
 	logDir := r.opts.LogDir

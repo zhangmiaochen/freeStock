@@ -16,6 +16,7 @@ export {
     AutoPortfolioRequest,
     AutoPortfolioResult,
     AutoSnapshot,
+    AutoUpdateStatus,
     BackfillAllResult,
     BackfillResult,
     BackfillStrategy,

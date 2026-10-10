@@ -28,6 +28,9 @@ const mocks = vi.hoisted(() => ({
   latestRunResult: vi.fn(),
   previewSchedule: vi.fn(),
   applySchedule: vi.fn(),
+  autoUpdateStatus: vi.fn(),
+  setAutoUpdate: vi.fn(),
+  fixScheduleSettings: vi.fn(),
 }));
 
 vi.mock("@/lib/backend", () => ({
@@ -45,6 +48,9 @@ vi.mock("@/lib/backend", () => ({
     latestRunResult: mocks.latestRunResult,
     previewSchedule: mocks.previewSchedule,
     applySchedule: mocks.applySchedule,
+    autoUpdateStatus: mocks.autoUpdateStatus,
+    setAutoUpdate: mocks.setAutoUpdate,
+    fixScheduleSettings: mocks.fixScheduleSettings,
   },
   errorMessage: (e: unknown) => String(e),
 }));
@@ -110,6 +116,18 @@ beforeEach(() => {
     conclusion: "本次运行共 2 个数据集，写入 7866 行；1 个有数据；1 个上游暂无数据（fund_flow）—— 这类明天会自动重试，不用手动补。（cne 进程状态：degraded）",
   });
 
+  mocks.autoUpdateStatus.mockResolvedValue({
+    enabled: true,
+    dailyEnabled: true,
+    staleEnabled: true,
+    startWhenAvailable: true,
+    summary: "自动更新已开启，且错过时间后会补跑",
+    warning: "",
+  });
+  mocks.setAutoUpdate.mockResolvedValue({
+    enabled: false, dailyEnabled: false, staleEnabled: false,
+    startWhenAvailable: true, summary: "自动更新已关闭", warning: "",
+  });
   mocks.previewSchedule.mockResolvedValue({
     changes: [
       { task: "cne-daily-update", action: "change", from: "17:30", to: "18:00" },
@@ -208,12 +226,12 @@ describe("cne 数据更新卡片", () => {
     expect(wrapper.text()).toContain("工程目录不存在");
   });
 
-  it("自动更新的开关未开放时要写明原因，并显示当前实际生效的任务", async () => {
+  it("自动更新有真开关，并显示当前实际生效的任务，并显示当前实际生效的任务", async () => {
     const wrapper = await mountCard();
     const text = wrapper.text();
     // 说明为什么没有开关 —— 而不是放一个点了没反应的控件
-    expect(text).toContain("自动更新的开关尚未开放");
-    expect(text).toContain("双跑");
+    expect(text).not.toContain("开关尚未开放");
+    expect(text).toContain("自动更新");
     // 当前实际生效的两个任务要从后端读出来显示（不再硬编码在模板里）
     expect(text).toContain("cne-daily-update");
     expect(text).toContain("cne-daily-stale");
@@ -352,7 +370,19 @@ describe("计划任务改动：必须两步，确认前绝不执行", () => {
   });
 
   it("没有改动时不显示「确认执行」按钮（避免无意义确认）", async () => {
-    mocks.previewSchedule.mockResolvedValue({
+    mocks.autoUpdateStatus.mockResolvedValue({
+    enabled: true,
+    dailyEnabled: true,
+    staleEnabled: true,
+    startWhenAvailable: true,
+    summary: "自动更新已开启，且错过时间后会补跑",
+    warning: "",
+  });
+  mocks.setAutoUpdate.mockResolvedValue({
+    enabled: false, dailyEnabled: false, staleEnabled: false,
+    startWhenAvailable: true, summary: "自动更新已关闭", warning: "",
+  });
+  mocks.previewSchedule.mockResolvedValue({
       changes: [{ task: "cne-daily-update", action: "keep", from: "17:30", to: "17:30", reason: "时间已经是目标值" }],
       commands: [],
       warnings: [],
@@ -368,7 +398,19 @@ describe("计划任务改动：必须两步，确认前绝不执行", () => {
   });
 
   it("任务不存在时明确说不会创建", async () => {
-    mocks.previewSchedule.mockResolvedValue({
+    mocks.autoUpdateStatus.mockResolvedValue({
+    enabled: true,
+    dailyEnabled: true,
+    staleEnabled: true,
+    startWhenAvailable: true,
+    summary: "自动更新已开启，且错过时间后会补跑",
+    warning: "",
+  });
+  mocks.setAutoUpdate.mockResolvedValue({
+    enabled: false, dailyEnabled: false, staleEnabled: false,
+    startWhenAvailable: true, summary: "自动更新已关闭", warning: "",
+  });
+  mocks.previewSchedule.mockResolvedValue({
       changes: [{ task: "cne-daily-update", action: "not-registered", to: "17:30", reason: "任务不存在。本功能不会创建它" }],
       commands: [],
       warnings: ["任务不存在。本功能不会创建它"],
@@ -380,5 +422,58 @@ describe("计划任务改动：必须两步，确认前绝不执行", () => {
     await vi.waitFor(() => expect(mocks.previewSchedule).toHaveBeenCalled());
     await new Promise((r) => setTimeout(r, 0));
     expect(wrapper.text()).toContain("不会创建");
+  });
+});
+describe("自动更新开关", () => {
+  it("开启且错过会补跑时，显示已开启、不显示修复按钮", async () => {
+    const wrapper = await mountCard();
+    const text = wrapper.text();
+    expect(text).toContain("自动更新");
+    expect(text).toContain("已开启");
+    expect(text).not.toContain("错过时间不会补跑");
+    expect(wrapper.findAll("button").find((b) => b.text().includes("修复"))).toBeUndefined();
+    expect(text).toContain("关闭自动更新");
+  });
+
+  it("**StartWhenAvailable 没打开时高亮警告并给修复按钮**", async () => {
+    mocks.autoUpdateStatus.mockResolvedValue({
+      enabled: true,
+      dailyEnabled: true,
+      staleEnabled: true,
+      startWhenAvailable: false,
+      summary: "自动更新已开启，但**错过时间后不会补跑**",
+      warning: "两个任务都启用了，但「错过计划开始时间后尽快启动」没打开。如果每天 17:30 / 21:00 时电脑关着或休眠，那一天会被直接跳过，而任务列表看上去一切正常。",
+    });
+    const wrapper = await mountCard();
+    const text = wrapper.text();
+    expect(text).toContain("错过时间不会补跑");
+    expect(text).toContain("直接跳过");
+    const fix = wrapper.findAll("button").find((b) => b.text().includes("修复"));
+    expect(fix).toBeTruthy();
+    await fix!.trigger("click");
+    await vi.waitFor(() => expect(mocks.fixScheduleSettings).toHaveBeenCalled());
+  });
+
+  it("点「关闭自动更新」会调用 setAutoUpdate(false)", async () => {
+    const wrapper = await mountCard();
+    await wrapper.findAll("button").find((b) => b.text().includes("关闭自动更新"))!.trigger("click");
+    await vi.waitFor(() => expect(mocks.setAutoUpdate).toHaveBeenCalledWith(false));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(wrapper.text()).toContain("不会再自动更新");
+  });
+
+  it("已关闭时显示「开启自动更新」，点了传 true", async () => {
+    mocks.autoUpdateStatus.mockResolvedValue({
+      enabled: false, dailyEnabled: false, staleEnabled: false,
+      startWhenAvailable: true, summary: "自动更新已关闭", warning: "任务存在但被禁用，到点不会跑。",
+    });
+    mocks.setAutoUpdate.mockResolvedValue({
+      enabled: true, dailyEnabled: true, staleEnabled: true,
+      startWhenAvailable: true, summary: "自动更新已开启，且错过时间后会补跑", warning: "",
+    });
+    const wrapper = await mountCard();
+    expect(wrapper.text()).toContain("已关闭");
+    await wrapper.findAll("button").find((b) => b.text().includes("开启自动更新"))!.trigger("click");
+    await vi.waitFor(() => expect(mocks.setAutoUpdate).toHaveBeenCalledWith(true));
   });
 });

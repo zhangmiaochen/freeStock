@@ -228,6 +228,101 @@ func (s *CneUpdateService) CancelCatchUp() error {
 	return s.runner().CancelCatchUp()
 }
 
+// AutoUpdateStatus 是"自动更新"的整体状态。
+type AutoUpdateStatus struct {
+	// Enabled 表示两个任务是否都启用了
+	Enabled bool `json:"enabled"`
+	// DailyEnabled / StaleEnabled 分别表示各自的状态
+	DailyEnabled bool `json:"dailyEnabled"`
+	StaleEnabled bool `json:"staleEnabled"`
+	// StartWhenAvailable 表示"错过时间后是否补跑"（两个任务都满足才为 true）
+	StartWhenAvailable bool `json:"startWhenAvailable"`
+	// Summary 是人类可读的一句话
+	Summary string `json:"summary"`
+	// Warning 是需要提醒用户的问题（例如"错过不会补跑"）
+	Warning string `json:"warning,omitempty"`
+}
+
+// AutoUpdateStatus 报告自动更新当前是否真的会生效。
+//
+// ⚠ 这里刻意查两件事，而不只是"任务存不存在"：
+//   - 任务是否 **Enabled**（禁用则不跑）
+//   - **StartWhenAvailable** 是否为 true
+//
+// 实测本机两个任务 `Enabled=true`、时间正确，但
+// `StartWhenAvailable=false` —— 意味着 17:30/21:00 时机器关着就
+// **永远跳过那天**，而界面看上去完全正常。这是"自动更新看起来配好了、
+// 实际不生效"的最常见原因。
+func (s *CneUpdateService) AutoUpdateStatus() (*AutoUpdateStatus, error) {
+	state, err := cne.QuerySchedule()
+	if err != nil {
+		return nil, err
+	}
+	st := &AutoUpdateStatus{
+		DailyEnabled: state.Daily.Registered && state.Daily.Enabled,
+		StaleEnabled: state.Stale.Registered && state.Stale.Enabled,
+	}
+	st.Enabled = st.DailyEnabled || st.StaleEnabled
+	st.StartWhenAvailable = state.Daily.StartWhenAvailable && state.Stale.StartWhenAvailable
+
+	switch {
+	case !state.Daily.Registered && !state.Stale.Registered:
+		st.Summary = "自动更新未配置：两个计划任务都不存在"
+		st.Warning = "没有计划任务，应用关着时不会自动更新。"
+	case !st.Enabled:
+		st.Summary = "自动更新已关闭"
+		st.Warning = "任务存在但被禁用，到点不会跑。"
+	case !st.StartWhenAvailable:
+		st.Summary = "自动更新已开启，但**错过时间后不会补跑**"
+		st.Warning = fmt.Sprintf(
+			"两个任务都启用了，但「错过计划开始时间后尽快启动」没打开。"+
+				"如果 %s 时电脑关着或休眠，那一天会被**直接跳过**，"+
+				"而任务列表看上去一切正常。建议点下面的按钮打开它。",
+			firstClock(state))
+	default:
+		st.Summary = "自动更新已开启，且错过时间后会补跑"
+	}
+	return st, nil
+}
+
+func firstClock(state *cne.ScheduleState) string {
+	if state.Daily.Registered && state.Daily.NextRun != "" {
+		return "每天 17:30 / 21:00"
+	}
+	return "计划时间"
+}
+
+// SetAutoUpdate 开启/关闭自动更新（启用或禁用两个计划任务）。
+//
+// 关闭后应用不运行时也不会自动更新 —— 这就是"自动更新开关"。
+// **只改启用状态，不改时间、不改要执行的命令。**
+func (s *CneUpdateService) SetAutoUpdate(enabled bool) (*AutoUpdateStatus, error) {
+	for _, name := range []string{cne.TaskDaily, cne.TaskStale} {
+		if err := cne.SetTaskEnabled(name, enabled); err != nil {
+			// 一个失败也要把另一个的状态报出来，别让用户以为"全没成"
+			st, _ := s.AutoUpdateStatus()
+			return st, err
+		}
+	}
+	slog.Info("自动更新开关已切换", "enabled", enabled)
+	return s.AutoUpdateStatus()
+}
+
+// FixScheduleSettings 把两个任务改成"错过时间后也能补跑"。
+//
+// ⚠ 只改四项设置（StartWhenAvailable / 电池两项 / 多实例策略），
+// **不动触发器（时间）、不动要执行的命令** —— 遵守"只改现有两个任务"的边界。
+func (s *CneUpdateService) FixScheduleSettings() (*AutoUpdateStatus, error) {
+	for _, name := range []string{cne.TaskDaily, cne.TaskStale} {
+		if err := cne.ApplyRecommendedSettings(name); err != nil {
+			st, _ := s.AutoUpdateStatus()
+			return st, err
+		}
+	}
+	slog.Info("计划任务设置已调整为「错过也补跑」")
+	return s.AutoUpdateStatus()
+}
+
 // PreviewSchedule 算出把两个计划任务改到目标时间需要做什么，**不执行任何操作**。
 //
 // 用户明确要求"改动前弹确认"，所以必须分成两步：先预览（含原始 schtasks

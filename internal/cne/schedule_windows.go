@@ -39,6 +39,15 @@ type TaskInfo struct {
 	LastRun string `json:"lastRun"`
 	// Command 是任务实际执行的命令行
 	Command string `json:"command"`
+	// Enabled 表示任务是启用还是禁用 —— 也就是"自动更新开没开"
+	Enabled bool `json:"enabled"`
+	// ScheduledState 是原始的 "Scheduled Task State" 字段
+	ScheduledState string `json:"scheduledState"`
+	// StartWhenAvailable 表示"错过计划时间后是否补跑"。
+	// ⚠ 它缺失时任务会在错过时间的那天**静默不跑**（见 schedule_settings_windows.go）
+	StartWhenAvailable bool `json:"startWhenAvailable"`
+	// StartWhenAvailableKnown 表示上面那个值是否真的读到了
+	StartWhenAvailableKnown bool `json:"startWhenAvailableKnown"`
 }
 
 // Query 读取一个计划任务的状态。
@@ -66,6 +75,12 @@ func Query(name string) (*TaskInfo, error) {
 	info.LastResult = fieldOf(text, "Last Result", "上次运行结果")
 	info.LastRun = fieldOf(text, "Last Run Time", "上次运行时间")
 	info.Command = fieldOf(text, "Task To Run", "要运行的任务")
+	info.ScheduledState = fieldOf(text, "Scheduled Task State", "计划任务状态")
+	state := strings.ToLower(strings.TrimSpace(info.ScheduledState))
+	info.Enabled = !strings.Contains(state, "disabled") && !strings.Contains(state, "禁用")
+	// StartWhenAvailable 的读取不可靠：schtasks 不一定输出该字段，
+	// 所以单独标一个 known，让界面区分"关着"和"读不到"
+	info.StartWhenAvailable, info.StartWhenAvailableKnown = StartWhenAvailable(name)
 	return info, nil
 }
 

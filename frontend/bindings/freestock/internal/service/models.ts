@@ -370,6 +370,66 @@ export class AutoSnapshot {
 }
 
 /**
+ * AutoUpdateStatus 是"自动更新"的整体状态。
+ */
+export class AutoUpdateStatus {
+    /**
+     * Enabled 表示两个任务是否都启用了
+     */
+    "enabled": boolean;
+
+    /**
+     * DailyEnabled / StaleEnabled 分别表示各自的状态
+     */
+    "dailyEnabled": boolean;
+    "staleEnabled": boolean;
+
+    /**
+     * StartWhenAvailable 表示"错过时间后是否补跑"（两个任务都满足才为 true）
+     */
+    "startWhenAvailable": boolean;
+
+    /**
+     * Summary 是人类可读的一句话
+     */
+    "summary": string;
+
+    /**
+     * Warning 是需要提醒用户的问题（例如"错过不会补跑"）
+     */
+    "warning"?: string;
+
+    /** Creates a new AutoUpdateStatus instance. */
+    constructor($$source: Partial<AutoUpdateStatus> = {}) {
+        if (!("enabled" in $$source)) {
+            this["enabled"] = false;
+        }
+        if (!("dailyEnabled" in $$source)) {
+            this["dailyEnabled"] = false;
+        }
+        if (!("staleEnabled" in $$source)) {
+            this["staleEnabled"] = false;
+        }
+        if (!("startWhenAvailable" in $$source)) {
+            this["startWhenAvailable"] = false;
+        }
+        if (!("summary" in $$source)) {
+            this["summary"] = "";
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new AutoUpdateStatus instance from a string or object.
+     */
+    static createFrom($$source: any = {}): AutoUpdateStatus {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new AutoUpdateStatus($$parsedSource as Partial<AutoUpdateStatus>);
+    }
+}
+
+/**
  * BackfillAllResult 是"区间回填所有活跃策略"的结果。
  */
 export class BackfillAllResult {

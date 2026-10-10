@@ -42,6 +42,24 @@ export function ApplySchedule(plan: cne$0.SchedulePlan | null, confirmed: boolea
 }
 
 /**
+ * AutoUpdateStatus 报告自动更新当前是否真的会生效。
+ * 
+ * ⚠ 这里刻意查两件事，而不只是"任务存不存在"：
+ *   - 任务是否 **Enabled**（禁用则不跑）
+ *   - **StartWhenAvailable** 是否为 true
+ * 
+ * 实测本机两个任务 `Enabled=true`、时间正确，但
+ * `StartWhenAvailable=false` —— 意味着 17:30/21:00 时机器关着就
+ * **永远跳过那天**，而界面看上去完全正常。这是"自动更新看起来配好了、
+ * 实际不生效"的最常见原因。
+ */
+export function AutoUpdateStatus(): $CancellablePromise<$models.AutoUpdateStatus | null> {
+    return $Call.ByID(4238830633).then(($result: any) => {
+        return $$createType3($result);
+    });
+}
+
+/**
  * CancelCatchUp 请求停止补跑。
  * 
  * 语义是"**当前这一天跑完后不再继续**"，不中途掐断正在跑的那天 ——
@@ -63,7 +81,7 @@ export function CancelUpdate(): $CancellablePromise<void> {
  */
 export function CatchUpState(): $CancellablePromise<cne$0.CatchUpState> {
     return $Call.ByID(2972324642).then(($result: any) => {
-        return $$createType2($result);
+        return $$createType4($result);
     });
 }
 
@@ -76,7 +94,19 @@ export function CatchUpState(): $CancellablePromise<cne$0.CatchUpState> {
  */
 export function CheckFreshness(): $CancellablePromise<cne$0.FreshnessReport | null> {
     return $Call.ByID(1299744870).then(($result: any) => {
-        return $$createType4($result);
+        return $$createType6($result);
+    });
+}
+
+/**
+ * FixScheduleSettings 把两个任务改成"错过时间后也能补跑"。
+ * 
+ * ⚠ 只改四项设置（StartWhenAvailable / 电池两项 / 多实例策略），
+ * **不动触发器（时间）、不动要执行的命令** —— 遵守"只改现有两个任务"的边界。
+ */
+export function FixScheduleSettings(): $CancellablePromise<$models.AutoUpdateStatus | null> {
+    return $Call.ByID(564450120).then(($result: any) => {
+        return $$createType3($result);
     });
 }
 
@@ -85,7 +115,7 @@ export function CheckFreshness(): $CancellablePromise<cne$0.FreshnessReport | nu
  */
 export function GetUpdatePrefs(): $CancellablePromise<$models.UpdatePrefsInfo> {
     return $Call.ByID(3588240232).then(($result: any) => {
-        return $$createType5($result);
+        return $$createType7($result);
     });
 }
 
@@ -95,7 +125,7 @@ export function GetUpdatePrefs(): $CancellablePromise<$models.UpdatePrefsInfo> {
  */
 export function LatestRunResult(): $CancellablePromise<cne$0.RunDetail | null> {
     return $Call.ByID(2761471014).then(($result: any) => {
-        return $$createType7($result);
+        return $$createType9($result);
     });
 }
 
@@ -111,7 +141,7 @@ export function LatestRunResult(): $CancellablePromise<cne$0.RunDetail | null> {
  */
 export function ManualUpdate(kind: string, tradeDate: string): $CancellablePromise<$models.JobInfo | null> {
     return $Call.ByID(4236573058, kind, tradeDate).then(($result: any) => {
-        return $$createType9($result);
+        return $$createType11($result);
     });
 }
 
@@ -137,7 +167,7 @@ export function PreviewSchedule(dailyAt: string, staleAt: string): $CancellableP
  */
 export function RecentRuns(limit: number): $CancellablePromise<cne$0.RunSummary[]> {
     return $Call.ByID(393987276, limit).then(($result: any) => {
-        return $$createType11($result);
+        return $$createType13($result);
     });
 }
 
@@ -157,7 +187,19 @@ export function RecentRuns(limit: number): $CancellablePromise<cne$0.RunSummary[
  */
 export function ScheduleState(): $CancellablePromise<cne$0.ScheduleState | null> {
     return $Call.ByID(4153802545).then(($result: any) => {
-        return $$createType13($result);
+        return $$createType15($result);
+    });
+}
+
+/**
+ * SetAutoUpdate 开启/关闭自动更新（启用或禁用两个计划任务）。
+ * 
+ * 关闭后应用不运行时也不会自动更新 —— 这就是"自动更新开关"。
+ * **只改启用状态，不改时间、不改要执行的命令。**
+ */
+export function SetAutoUpdate(enabled: boolean): $CancellablePromise<$models.AutoUpdateStatus | null> {
+    return $Call.ByID(232369017, enabled).then(($result: any) => {
+        return $$createType3($result);
     });
 }
 
@@ -170,7 +212,7 @@ export function ScheduleState(): $CancellablePromise<cne$0.ScheduleState | null>
  */
 export function SetUpdatePrefs(prefs: config$0.UpdatePrefs): $CancellablePromise<$models.UpdatePrefsInfo> {
     return $Call.ByID(1336538668, prefs).then(($result: any) => {
-        return $$createType5($result);
+        return $$createType7($result);
     });
 }
 
@@ -189,7 +231,7 @@ export function SetUpdatePrefs(prefs: config$0.UpdatePrefs): $CancellablePromise
  */
 export function StartCatchUp(): $CancellablePromise<$models.CatchUpInfo | null> {
     return $Call.ByID(1149046919).then(($result: any) => {
-        return $$createType15($result);
+        return $$createType17($result);
     });
 }
 
@@ -198,26 +240,28 @@ export function StartCatchUp(): $CancellablePromise<$models.CatchUpInfo | null> 
  */
 export function UpdateStatus(): $CancellablePromise<cne$0.Status | null> {
     return $Call.ByID(1563115678).then(($result: any) => {
-        return $$createType17($result);
+        return $$createType19($result);
     });
 }
 
 // Private type creation functions
 const $$createType0 = cne$0.SchedulePlan.createFrom;
 const $$createType1 = $Create.Nullable($$createType0);
-const $$createType2 = cne$0.CatchUpState.createFrom;
-const $$createType3 = cne$0.FreshnessReport.createFrom;
-const $$createType4 = $Create.Nullable($$createType3);
-const $$createType5 = $models.UpdatePrefsInfo.createFrom;
-const $$createType6 = cne$0.RunDetail.createFrom;
-const $$createType7 = $Create.Nullable($$createType6);
-const $$createType8 = $models.JobInfo.createFrom;
+const $$createType2 = $models.AutoUpdateStatus.createFrom;
+const $$createType3 = $Create.Nullable($$createType2);
+const $$createType4 = cne$0.CatchUpState.createFrom;
+const $$createType5 = cne$0.FreshnessReport.createFrom;
+const $$createType6 = $Create.Nullable($$createType5);
+const $$createType7 = $models.UpdatePrefsInfo.createFrom;
+const $$createType8 = cne$0.RunDetail.createFrom;
 const $$createType9 = $Create.Nullable($$createType8);
-const $$createType10 = cne$0.RunSummary.createFrom;
-const $$createType11 = $Create.Array($$createType10);
-const $$createType12 = cne$0.ScheduleState.createFrom;
-const $$createType13 = $Create.Nullable($$createType12);
-const $$createType14 = $models.CatchUpInfo.createFrom;
+const $$createType10 = $models.JobInfo.createFrom;
+const $$createType11 = $Create.Nullable($$createType10);
+const $$createType12 = cne$0.RunSummary.createFrom;
+const $$createType13 = $Create.Array($$createType12);
+const $$createType14 = cne$0.ScheduleState.createFrom;
 const $$createType15 = $Create.Nullable($$createType14);
-const $$createType16 = cne$0.Status.createFrom;
+const $$createType16 = $models.CatchUpInfo.createFrom;
 const $$createType17 = $Create.Nullable($$createType16);
+const $$createType18 = cne$0.Status.createFrom;
+const $$createType19 = $Create.Nullable($$createType18);

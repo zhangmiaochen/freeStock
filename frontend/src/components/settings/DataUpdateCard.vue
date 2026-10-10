@@ -22,6 +22,7 @@ import {
   type ScheduleState,
   type RunDetail,
   type SchedulePlan,
+  type AutoUpdateStatus,
   type UpdatePrefs,
   type UpdatePrefsInfo,
 } from "@/lib/backend";
@@ -56,6 +57,8 @@ const dailyAt = ref("17:30");
 const staleAt = ref("21:00");
 /** 改动预览：**必须等用户看过它并确认，才会执行** */
 const plan = ref<SchedulePlan | null>(null);
+/** 自动更新是否真的会生效（含"错过会不会补跑"） */
+const autoUpdate = ref<AutoUpdateStatus | null>(null);
 const busy = ref("");
 const message = ref("");
 const error = ref("");
@@ -83,6 +86,58 @@ async function loadSchedule() {
     schedule.value = await api.scheduleState();
   } catch {
     schedule.value = null;
+  }
+}
+
+/** 读回自动更新状态。 */
+async function loadAutoUpdate() {
+  try {
+    autoUpdate.value = await api.autoUpdateStatus();
+  } catch {
+    autoUpdate.value = null;
+  }
+}
+
+/** 开关自动更新（启用/禁用两个计划任务）。 */
+async function toggleAutoUpdate(enabled: boolean) {
+  if (busy.value) return;
+  busy.value = "auto";
+  error.value = "";
+  message.value = "";
+  try {
+    const st = await api.setAutoUpdate(enabled);
+    autoUpdate.value = st;
+    message.value = enabled ? "自动更新已开启。" : "自动更新已关闭 —— 应用不运行时不会再自动更新。";
+    await loadSchedule();
+  } catch (e) {
+    error.value = errorMessage(e);
+    await loadAutoUpdate();
+  } finally {
+    busy.value = "";
+  }
+}
+
+/**
+ * 打开"错过计划时间后尽快启动"。
+ *
+ * ⚠ 这是"自动更新看起来配好了、实际不生效"的关键修复：
+ * 没打开时，17:30/21:00 机器关着就会**直接跳过那天**。
+ */
+async function fixScheduleSettings() {
+  if (busy.value) return;
+  busy.value = "fix";
+  error.value = "";
+  message.value = "";
+  try {
+    const st = await api.fixScheduleSettings();
+    autoUpdate.value = st;
+    message.value = "已打开「错过计划开始时间后尽快启动」—— 之后错过的时间点会在机器可用时补跑。";
+    await loadSchedule();
+  } catch (e) {
+    error.value = errorMessage(e);
+    await loadAutoUpdate();
+  } finally {
+    busy.value = "";
   }
 }
 
@@ -316,6 +371,7 @@ onMounted(async () => {
   await loadStatus();
   await loadFreshness();
   await loadSchedule();
+  await loadAutoUpdate();
   if (schedule.value?.daily?.nextRun) {
     const c = clockFromSchedule(schedule.value.daily.nextRun);
     if (c) dailyAt.value = c;
@@ -557,13 +613,47 @@ onUnmounted(stopPolling);
         </div>
 
         <div class="space-y-2 rounded border border-dashed p-3">
-          <div class="text-muted-foreground flex items-start gap-2 text-xs">
-            <CircleAlert class="mt-0.5 size-4 shrink-0" />
-            <span>
-              <strong>自动更新的开关尚未开放</strong>（方案第 3 阶段）—— 创建/修改计划任务
-              会改动你机器上的任务，需要连同「确认 CNEquity 侧调度器已关闭、避免双跑」
-              一起设计。下面是**当前实际生效的**两个任务（只读）：
-            </span>
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="text-sm font-medium">自动更新</span>
+            <Badge
+              :variant="autoUpdate?.enabled ? 'secondary' : 'outline'"
+              class="text-[10px]"
+            >
+              {{ autoUpdate?.enabled ? '已开启' : '已关闭' }}
+            </Badge>
+            <Badge
+              v-if="autoUpdate && !autoUpdate.startWhenAvailable"
+              variant="destructive"
+              class="text-[10px]"
+            >
+              错过时间不会补跑
+            </Badge>
+            <div class="ml-auto flex items-center gap-2">
+              <Button
+                size="sm"
+                :variant="autoUpdate?.enabled ? 'outline' : 'default'"
+                :disabled="!!busy"
+                @click="toggleAutoUpdate(!autoUpdate?.enabled)"
+              >
+                {{ busy === 'auto' ? '切换中…' : autoUpdate?.enabled ? '关闭自动更新' : '开启自动更新' }}
+              </Button>
+              <Button
+                v-if="autoUpdate && !autoUpdate.startWhenAvailable"
+                size="sm"
+                variant="default"
+                :disabled="!!busy"
+                @click="fixScheduleSettings"
+              >
+                {{ busy === 'fix' ? '修复中…' : '修复：错过也补跑' }}
+              </Button>
+            </div>
+          </div>
+          <p v-if="autoUpdate?.warning" class="text-[11px] text-amber-600">{{ autoUpdate.warning }}</p>
+          <p v-else-if="autoUpdate?.summary" class="text-muted-foreground text-[11px]">
+            {{ autoUpdate.summary }}
+          </p>
+          <div class="text-muted-foreground text-xs">
+            当前生效的任务：
           </div>
           <div v-if="schedule" class="space-y-1 text-xs">
             <div class="grid grid-cols-2 gap-2">

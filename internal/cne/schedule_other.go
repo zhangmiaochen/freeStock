@@ -13,13 +13,17 @@ const (
 )
 
 type TaskInfo struct {
-	Name       string `json:"name"`
-	Registered bool   `json:"registered"`
-	NextRun    string `json:"nextRun"`
-	Status     string `json:"status"`
-	LastResult string `json:"lastResult"`
-	LastRun    string `json:"lastRun"`
-	Command    string `json:"command"`
+	Name                    string `json:"name"`
+	Registered              bool   `json:"registered"`
+	NextRun                 string `json:"nextRun"`
+	Status                  string `json:"status"`
+	LastResult              string `json:"lastResult"`
+	LastRun                 string `json:"lastRun"`
+	Command                 string `json:"command"`
+	Enabled                 bool   `json:"enabled"`
+	ScheduledState          string `json:"scheduledState"`
+	StartWhenAvailable      bool   `json:"startWhenAvailable"`
+	StartWhenAvailableKnown bool   `json:"startWhenAvailableKnown"`
 }
 
 type ScheduleState struct {

@@ -89,10 +89,10 @@ export type { BollPrefs, KlinePrefs, MaPrefs, MacdPrefs };
 // cne 数据更新相关类型（对应 internal/service/cneupdate.go 的 json tag）
 import type { JobInfo, UpdatePrefsInfo } from "../../bindings/freestock/internal/service/models";
 import type { Status as CneUpdateStatus, FreshnessReport, CatchUpState } from "../../bindings/freestock/internal/cne/models";
-import type { CatchUpInfo } from "../../bindings/freestock/internal/service/models";
+import type { CatchUpInfo, AutoUpdateStatus } from "../../bindings/freestock/internal/service/models";
 import type { ScheduleState, RunDetail, RunSummary, SchedulePlan } from "../../bindings/freestock/internal/cne/models";
 import type { UpdatePrefs } from "../../bindings/freestock/internal/config/models";
-export type { JobInfo, UpdatePrefsInfo, CneUpdateStatus, UpdatePrefs, FreshnessReport, CatchUpState, CatchUpInfo, ScheduleState, RunDetail, RunSummary, SchedulePlan };
+export type { JobInfo, UpdatePrefsInfo, CneUpdateStatus, UpdatePrefs, FreshnessReport, CatchUpState, CatchUpInfo, AutoUpdateStatus, ScheduleState, RunDetail, RunSummary, SchedulePlan };
 export type {
   AppliedChange,
   ApplyResult,
@@ -273,6 +273,20 @@ export const api = {
    * ⚠ 结果里的 `commands` 是**将要执行的原始 schtasks 命令**，
    * 必须原样展示给用户看 —— 让他知道自己机器上会发生什么。
    */
+  /**
+   * 自动更新是否真的会生效。
+   *
+   * ⚠ 不只看"任务存不存在"，还查**是否 Enabled** 和
+   * **StartWhenAvailable**（错过时间后会不会补跑）——
+   * 后者没打开时，17:30/21:00 机器关着就会永远跳过那天，
+   * 而任务列表看上去一切正常。
+   */
+  autoUpdateStatus: () => CneUpdateService.AutoUpdateStatus() as Promise<AutoUpdateStatus | null>,
+  /** 开启/关闭自动更新（启用或禁用两个计划任务）。只改启用状态，不改时间。 */
+  setAutoUpdate: (enabled: boolean) =>
+    CneUpdateService.SetAutoUpdate(true === enabled) as Promise<AutoUpdateStatus | null>,
+  /** 把两个任务改成「错过时间后也能补跑」。只改设置，不动时间与命令。 */
+  fixScheduleSettings: () => CneUpdateService.FixScheduleSettings() as Promise<AutoUpdateStatus | null>,
   previewSchedule: (dailyAt: string, staleAt: string) =>
     CneUpdateService.PreviewSchedule(dailyAt, staleAt) as Promise<SchedulePlan | null>,
   /**

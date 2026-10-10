@@ -735,6 +735,27 @@ export class TaskInfo {
      */
     "command": string;
 
+    /**
+     * Enabled 表示任务是启用还是禁用 —— 也就是"自动更新开没开"
+     */
+    "enabled": boolean;
+
+    /**
+     * ScheduledState 是原始的 "Scheduled Task State" 字段
+     */
+    "scheduledState": string;
+
+    /**
+     * StartWhenAvailable 表示"错过计划时间后是否补跑"。
+     * ⚠ 它缺失时任务会在错过时间的那天**静默不跑**（见 schedule_settings_windows.go）
+     */
+    "startWhenAvailable": boolean;
+
+    /**
+     * StartWhenAvailableKnown 表示上面那个值是否真的读到了
+     */
+    "startWhenAvailableKnown": boolean;
+
     /** Creates a new TaskInfo instance. */
     constructor($$source: Partial<TaskInfo> = {}) {
         if (!("name" in $$source)) {
@@ -757,6 +778,18 @@ export class TaskInfo {
         }
         if (!("command" in $$source)) {
             this["command"] = "";
+        }
+        if (!("enabled" in $$source)) {
+            this["enabled"] = false;
+        }
+        if (!("scheduledState" in $$source)) {
+            this["scheduledState"] = "";
+        }
+        if (!("startWhenAvailable" in $$source)) {
+            this["startWhenAvailable"] = false;
+        }
+        if (!("startWhenAvailableKnown" in $$source)) {
+            this["startWhenAvailableKnown"] = false;
         }
 
         Object.assign(this, $$source);
