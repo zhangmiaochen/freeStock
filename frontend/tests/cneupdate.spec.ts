@@ -26,6 +26,8 @@ const mocks = vi.hoisted(() => ({
   cancelUpdate: vi.fn(),
   scheduleState: vi.fn(),
   latestRunResult: vi.fn(),
+  previewSchedule: vi.fn(),
+  applySchedule: vi.fn(),
 }));
 
 vi.mock("@/lib/backend", () => ({
@@ -41,6 +43,8 @@ vi.mock("@/lib/backend", () => ({
     cancelUpdate: mocks.cancelUpdate,
     scheduleState: mocks.scheduleState,
     latestRunResult: mocks.latestRunResult,
+    previewSchedule: mocks.previewSchedule,
+    applySchedule: mocks.applySchedule,
   },
   errorMessage: (e: unknown) => String(e),
 }));
@@ -104,6 +108,24 @@ beforeEach(() => {
     unavailable: ["fund_flow"],
     rowsWritten: 7866,
     conclusion: "本次运行共 2 个数据集，写入 7866 行；1 个有数据；1 个上游暂无数据（fund_flow）—— 这类明天会自动重试，不用手动补。（cne 进程状态：degraded）",
+  });
+
+  mocks.previewSchedule.mockResolvedValue({
+    changes: [
+      { task: "cne-daily-update", action: "change", from: "17:30", to: "18:00" },
+      { task: "cne-daily-stale", action: "keep", from: "21:00", to: "21:00", reason: "时间已经是目标值" },
+    ],
+    commands: ['schtasks /change /tn "cne-daily-update" /st 18:00'],
+    warnings: [],
+    hasChanges: true,
+    summary: "将要改动 cne-daily-update：17:30 → 18:00",
+  });
+  mocks.applySchedule.mockResolvedValue({
+    changes: [{ task: "cne-daily-update", action: "change", from: "17:30", to: "18:00", reason: "已改为 18:00" }],
+    commands: ['schtasks /change /tn "cne-daily-update" /st 18:00'],
+    warnings: [],
+    hasChanges: true,
+    summary: "计划任务时间已更新：cne-daily-update=18:00",
   });
 });
 
@@ -268,5 +290,95 @@ describe("最近一次运行结果（退出码不可信）", () => {
     mocks.latestRunResult.mockRejectedValue(new Error("找不到运行清单"));
     const wrapper = await mountCard();
     expect(wrapper.text()).not.toContain("最近一次运行结果");
+  });
+});
+describe("计划任务改动：必须两步，确认前绝不执行", () => {
+  it("只点「预览改动」时**不会**调用 applySchedule", async () => {
+    const wrapper = await mountCard();
+    const btn = wrapper.findAll("button").find((b) => b.text().includes("预览改动"));
+    expect(btn).toBeTruthy();
+    await btn!.trigger("click");
+    await vi.waitFor(() => expect(mocks.previewSchedule).toHaveBeenCalled());
+    await new Promise((r) => setTimeout(r, 0));
+    // ⚠ 这是本组最重要的断言：预览不得触发任何改动
+    expect(mocks.applySchedule).not.toHaveBeenCalled();
+  });
+
+  it("预览时把**原始 schtasks 命令**原样显示出来", async () => {
+    const wrapper = await mountCard();
+    await wrapper.findAll("button").find((b) => b.text().includes("预览改动"))!.trigger("click");
+    await vi.waitFor(() => expect(mocks.previewSchedule).toHaveBeenCalled());
+    await new Promise((r) => setTimeout(r, 0));
+    const text = wrapper.text();
+    expect(text).toContain("将要对你机器上的计划任务做以下改动");
+    // 命令原文要能看到，而不是只给一句"将改时间"
+    expect(text).toContain('schtasks /change /tn "cne-daily-update" /st 18:00');
+    expect(text).toContain("17:30");
+    expect(text).toContain("18:00");
+    // 无需改动的任务要说清
+    expect(text).toContain("无需改动");
+    // 必须写明不会新建/删除
+    expect(text).toContain("不会新建也不会删除");
+  });
+
+  it("确认后才执行，且 confirmed 传 true", async () => {
+    const wrapper = await mountCard();
+    await wrapper.findAll("button").find((b) => b.text().includes("预览改动"))!.trigger("click");
+    await vi.waitFor(() => expect(mocks.previewSchedule).toHaveBeenCalled());
+    await new Promise((r) => setTimeout(r, 0));
+
+    const confirm = wrapper.findAll("button").find((b) => b.text().includes("确认执行"));
+    expect(confirm).toBeTruthy();
+    await confirm!.trigger("click");
+    await vi.waitFor(() => expect(mocks.applySchedule).toHaveBeenCalled());
+    // 第二个参数必须是显式的 true
+    expect(mocks.applySchedule.mock.calls[0][1]).toBe(true);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(wrapper.text()).toContain("计划任务时间已更新");
+  });
+
+  it("点「放弃」后不执行，且确认区消失", async () => {
+    const wrapper = await mountCard();
+    await wrapper.findAll("button").find((b) => b.text().includes("预览改动"))!.trigger("click");
+    await vi.waitFor(() => expect(mocks.previewSchedule).toHaveBeenCalled());
+    await new Promise((r) => setTimeout(r, 0));
+    expect(wrapper.text()).toContain("将要对你机器上的计划任务");
+
+    await wrapper.findAll("button").find((b) => b.text().includes("放弃"))!.trigger("click");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(mocks.applySchedule).not.toHaveBeenCalled();
+    expect(wrapper.text()).not.toContain("将要对你机器上的计划任务");
+    expect(wrapper.text()).toContain("没有执行任何操作");
+  });
+
+  it("没有改动时不显示「确认执行」按钮（避免无意义确认）", async () => {
+    mocks.previewSchedule.mockResolvedValue({
+      changes: [{ task: "cne-daily-update", action: "keep", from: "17:30", to: "17:30", reason: "时间已经是目标值" }],
+      commands: [],
+      warnings: [],
+      hasChanges: false,
+      summary: "两个任务的时间都已经是目标值，无需改动。",
+    });
+    const wrapper = await mountCard();
+    await wrapper.findAll("button").find((b) => b.text().includes("预览改动"))!.trigger("click");
+    await vi.waitFor(() => expect(mocks.previewSchedule).toHaveBeenCalled());
+    await new Promise((r) => setTimeout(r, 0));
+    expect(wrapper.text()).toContain("无需改动");
+    expect(wrapper.findAll("button").find((b) => b.text().includes("确认执行"))).toBeUndefined();
+  });
+
+  it("任务不存在时明确说不会创建", async () => {
+    mocks.previewSchedule.mockResolvedValue({
+      changes: [{ task: "cne-daily-update", action: "not-registered", to: "17:30", reason: "任务不存在。本功能不会创建它" }],
+      commands: [],
+      warnings: ["任务不存在。本功能不会创建它"],
+      hasChanges: false,
+      summary: "没有需要改的地方",
+    });
+    const wrapper = await mountCard();
+    await wrapper.findAll("button").find((b) => b.text().includes("预览改动"))!.trigger("click");
+    await vi.waitFor(() => expect(mocks.previewSchedule).toHaveBeenCalled());
+    await new Promise((r) => setTimeout(r, 0));
+    expect(wrapper.text()).toContain("不会创建");
   });
 });

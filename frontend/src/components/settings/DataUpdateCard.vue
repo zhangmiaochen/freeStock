@@ -21,6 +21,7 @@ import {
   type FreshnessReport,
   type ScheduleState,
   type RunDetail,
+  type SchedulePlan,
   type UpdatePrefs,
   type UpdatePrefsInfo,
 } from "@/lib/backend";
@@ -50,6 +51,11 @@ async function loadRunResult() {
 const projectDir = ref("");
 const cnePath = ref("");
 const tradeDate = ref("");
+/** 计划任务时间设置 */
+const dailyAt = ref("17:30");
+const staleAt = ref("21:00");
+/** 改动预览：**必须等用户看过它并确认，才会执行** */
+const plan = ref<SchedulePlan | null>(null);
 const busy = ref("");
 const message = ref("");
 const error = ref("");
@@ -202,6 +208,66 @@ async function cancelCatchUp() {
   }
 }
 
+/**
+ * 预览计划任务改动。**只算不改。**
+ *
+ * ⚠ 结果里的 commands 是**将要执行的原始 schtasks 命令**，
+ * 下面的模板会把它原样渲染出来 —— 让用户明确知道自己机器上会发生什么。
+ */
+async function previewScheduleChange() {
+  if (busy.value) return;
+  busy.value = "preview";
+  error.value = "";
+  message.value = "";
+  try {
+    plan.value = await api.previewSchedule(dailyAt.value.trim(), staleAt.value.trim());
+    if (plan.value && !plan.value.hasChanges) {
+      message.value = plan.value.summary;
+    }
+  } catch (e) {
+    plan.value = null;
+    error.value = errorMessage(e);
+  } finally {
+    busy.value = "";
+  }
+}
+
+/** 放弃这次改动（把预览清掉，不执行任何东西）。 */
+function discardPlan() {
+  plan.value = null;
+  message.value = "已放弃改动，没有执行任何操作。";
+}
+
+/**
+ * 执行确认过的改动。
+ *
+ * ⚠ 只有用户**看过上面的原始命令并点这个按钮**才会走到这里。
+ * confirmed 传 true 是明确的表态，不是默认值。
+ */
+async function applyScheduleChange() {
+  if (busy.value || !plan.value) return;
+  busy.value = "apply";
+  error.value = "";
+  try {
+    const result = await api.applySchedule(plan.value, true);
+    message.value = result?.summary ?? "已执行。";
+    plan.value = null;
+    await loadSchedule();
+  } catch (e) {
+    error.value = errorMessage(e);
+    await loadSchedule();
+  } finally {
+    busy.value = "";
+  }
+}
+
+/** 从 "2026/10/10 17:30:00" 里取出 "17:30"，用于把输入框预填成现状。 */
+function clockFromSchedule(nextRun: string): string {
+  const m = nextRun.match(/(\d{1,2}):(\d{2})/);
+  if (!m) return "";
+  return `${m[1].padStart(2, "0")}:${m[2]}`;
+}
+
 /** 把 20261009 显示成 2026-10-09。 */
 function fmtDate(n?: number): string {
   if (!n) return "—";
@@ -250,6 +316,14 @@ onMounted(async () => {
   await loadStatus();
   await loadFreshness();
   await loadSchedule();
+  if (schedule.value?.daily?.nextRun) {
+    const c = clockFromSchedule(schedule.value.daily.nextRun);
+    if (c) dailyAt.value = c;
+  }
+  if (schedule.value?.stale?.nextRun) {
+    const c = clockFromSchedule(schedule.value.stale.nextRun);
+    if (c) staleAt.value = c;
+  }
   await loadRunResult();
   // 打开页面时如果任务在跑，直接开始轮询
   if (status.value?.running) startPolling();
@@ -506,6 +580,71 @@ onUnmounted(stopPolling);
             <p v-if="schedule.summary" class="text-muted-foreground">{{ schedule.summary }}</p>
             <p v-if="schedule.wrapperPath" class="text-muted-foreground">
               包装脚本：<code>{{ schedule.wrapperPath }}</code>
+            </p>
+          </div>
+
+          <!-- 改时间：**两步**。先预览（把原始命令摆出来），再确认执行。
+               这是"改动前弹确认"的界面落实 —— 确认前绝不调用 applySchedule。 -->
+          <div class="space-y-2 border-t pt-2">
+            <div class="grid gap-2 md:grid-cols-2">
+              <label class="flex flex-col gap-1 text-xs">
+                <span class="text-muted-foreground">主日更时间（cne-daily-update）</span>
+                <Input v-model="dailyAt" placeholder="17:30" class="h-8" />
+              </label>
+              <label class="flex flex-col gap-1 text-xs">
+                <span class="text-muted-foreground">补抓落后时间（cne-daily-stale）</span>
+                <Input v-model="staleAt" placeholder="21:00" class="h-8" />
+              </label>
+            </div>
+            <Button size="sm" variant="outline" :disabled="!!busy" @click="previewScheduleChange">
+              {{ busy === 'preview' ? '计算中…' : '预览改动' }}
+            </Button>
+
+            <!-- 确认区：把将要执行的**原始命令**原样显示 -->
+            <div v-if="plan" class="space-y-2 rounded border border-amber-500/50 bg-amber-500/5 p-3">
+              <div class="flex items-start gap-2 text-xs">
+                <CircleAlert class="mt-0.5 size-4 shrink-0 text-amber-600" />
+                <div class="space-y-1">
+                  <div class="font-medium">将要对你机器上的计划任务做以下改动</div>
+                  <div v-for="c in plan.changes" :key="c.task" class="text-muted-foreground">
+                    <template v-if="c.action === 'change'">
+                      <code>{{ c.task }}</code>：{{ c.from }} → <strong>{{ c.to }}</strong>
+                    </template>
+                    <template v-else-if="c.action === 'keep'">
+                      <code>{{ c.task }}</code>：无需改动（{{ c.reason }}）
+                    </template>
+                    <template v-else>
+                      <code>{{ c.task }}</code>：**不会创建** —— {{ c.reason }}
+                    </template>
+                  </div>
+                </div>
+              </div>
+
+              <div v-if="plan.commands?.length" class="space-y-1">
+                <div class="text-[11px] font-medium">将要执行的命令（原样）：</div>
+                <pre class="bg-muted overflow-auto rounded p-2 text-[11px]">{{ plan.commands.join("\n") }}</pre>
+              </div>
+
+              <div class="flex flex-wrap items-center gap-2">
+                <Button
+                  v-if="plan.hasChanges"
+                  size="sm"
+                  variant="destructive"
+                  :disabled="!!busy"
+                  @click="applyScheduleChange"
+                >
+                  {{ busy === 'apply' ? '执行中…' : '确认执行以上改动' }}
+                </Button>
+                <Button size="sm" variant="ghost" :disabled="!!busy" @click="discardPlan">
+                  放弃
+                </Button>
+                <span class="text-muted-foreground text-[11px]">
+                  只修改现有任务，<strong>不会新建也不会删除</strong>。
+                </span>
+              </div>
+            </div>
+            <p v-if="plan && !plan.hasChanges && plan.warnings?.length" class="text-[11px] text-amber-600">
+              {{ plan.warnings.join('；') }}
             </p>
           </div>
         </div>

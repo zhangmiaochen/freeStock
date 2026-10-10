@@ -90,9 +90,9 @@ export type { BollPrefs, KlinePrefs, MaPrefs, MacdPrefs };
 import type { JobInfo, UpdatePrefsInfo } from "../../bindings/freestock/internal/service/models";
 import type { Status as CneUpdateStatus, FreshnessReport, CatchUpState } from "../../bindings/freestock/internal/cne/models";
 import type { CatchUpInfo } from "../../bindings/freestock/internal/service/models";
-import type { ScheduleState, RunDetail, RunSummary } from "../../bindings/freestock/internal/cne/models";
+import type { ScheduleState, RunDetail, RunSummary, SchedulePlan } from "../../bindings/freestock/internal/cne/models";
 import type { UpdatePrefs } from "../../bindings/freestock/internal/config/models";
-export type { JobInfo, UpdatePrefsInfo, CneUpdateStatus, UpdatePrefs, FreshnessReport, CatchUpState, CatchUpInfo, ScheduleState, RunDetail, RunSummary };
+export type { JobInfo, UpdatePrefsInfo, CneUpdateStatus, UpdatePrefs, FreshnessReport, CatchUpState, CatchUpInfo, ScheduleState, RunDetail, RunSummary, SchedulePlan };
 export type {
   AppliedChange,
   ApplyResult,
@@ -267,6 +267,22 @@ export const api = {
    * 需要连同"确认 CNEquity 侧调度器已关闭、避免双跑"一起设计。
    */
   scheduleState: () => CneUpdateService.ScheduleState() as Promise<ScheduleState | null>,
+  /**
+   * 算出把两个计划任务改到目标时间需要做什么。**只算不改。**
+   *
+   * ⚠ 结果里的 `commands` 是**将要执行的原始 schtasks 命令**，
+   * 必须原样展示给用户看 —— 让他知道自己机器上会发生什么。
+   */
+  previewSchedule: (dailyAt: string, staleAt: string) =>
+    CneUpdateService.PreviewSchedule(dailyAt, staleAt) as Promise<SchedulePlan | null>,
+  /**
+   * 执行计划任务的改动。**必须 confirmed=true**。
+   *
+   * 界面顺序必须是：previewSchedule → 展示原始命令 → 用户确认 → applySchedule(plan, true)。
+   * 后端只改现有的两个任务，**不新建、不删除**。
+   */
+  applySchedule: (plan: SchedulePlan, confirmed: boolean) =>
+    CneUpdateService.ApplySchedule(plan, true === confirmed) as Promise<SchedulePlan | null>,
 
   /**
    * 最近的运行记录（来自 cne 的 manifest.db）。
