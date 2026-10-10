@@ -74,13 +74,14 @@ func barsFromQuotes(quotes []*stockdb.Quote) []score.Bar {
 			continue
 		}
 		bars = append(bars, score.Bar{
-			Date:   q.Date,
-			Open:   q.Open,
-			High:   q.High,
-			Low:    q.Low,
-			Close:  q.Close,
-			Volume: q.Volume,
-			Amount: q.Amount,
+			Date:     q.Date,
+			Open:     q.Open,
+			High:     q.High,
+			Low:      q.Low,
+			Close:    q.Close,
+			Volume:   q.Volume,
+			Amount:   q.Amount,
+			Turnover: q.Turnover,
 		})
 	}
 	sort.Slice(bars, func(i, j int) bool { return bars[i].Date < bars[j].Date })
@@ -436,11 +437,14 @@ func (s *ScoringService) loadScoreInputs(provider Provider, codes []string, star
 		go func() {
 			defer wg.Done()
 			for item := range jobs {
-				quotes, err := provider.DailyHistory(ctx, item.code, start, end)
-				if err != nil || len(quotes) == 0 {
+				// **走 DailyBars 而不是 DailyHistory**：评分只需要 OHLCV，
+				// 而 DailyHistory 会为每根 K 线组装完整 Quote（估值/市值/股本/
+				// PE/PB/换手率/IsST），实测每根 26.2µs —— 全市场回填 30 秒里
+				// 99% 花在这上面。DailyBars 只搬 7 个字段。
+				bars, err := provider.DailyBars(ctx, item.code, start, end)
+				if err != nil || len(bars) == 0 {
 					continue
 				}
-				bars := barsFromQuotes(quotes)
 				if len(bars) < 30 {
 					// 数据太短的股票算不出有意义的指标
 					continue
@@ -458,17 +462,16 @@ func (s *ScoringService) loadScoreInputs(provider Provider, codes []string, star
 					prevHigh60: prevHigh,
 					bars:       len(bars),
 				}
-				// 成交额与换手取最后一根
-				last := quotes[len(quotes)-1]
-				for _, q := range quotes {
-					if q != nil && q.Date > last.Date {
-						last = q
+				// 成交额与换手取最后一根（DailyBars 已经带上 Turnover，
+				// 与 buildQuote 用同一个算法：Volume/FloatShare*100 取 4 位）
+				last := bars[len(bars)-1]
+				for _, bar := range bars {
+					if bar.Date > last.Date {
+						last = bar
 					}
 				}
-				if last != nil {
-					in.amount = last.Amount
-					in.turnover = last.Turnover
-				}
+				in.amount = last.Amount
+				in.turnover = last.Turnover
 				mu.Lock()
 				results = append(results, in)
 				mu.Unlock()

@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 
+	"freestock/internal/score"
 	"freestock/internal/stockdb"
 )
 
@@ -31,6 +32,14 @@ type rangeCachingProvider struct {
 
 	mu    sync.Mutex
 	cache map[string][]*stockdb.Quote
+
+	// barCache 是 DailyBars 的缓存。
+	//
+	// **为什么不直接透传给底层 DailyBars**：换方法会让 stockdb 那边丢掉
+	// 「每只只取一次」的区间缓存，退化成按天重复请求。
+	// 走底层 DailyBars 才能让数据湖那条路（真正省掉 Quote 组装）拿到全部好处。
+	barMu    sync.Mutex
+	barCache map[string][]score.Bar
 	// hits/misses/fetches 用来观察缓存到底有没有生效 ——
 	// "以为命中了其实没有"是这类缓存最容易出的问题，必须能看见。
 	hits, misses, fetches int
@@ -50,6 +59,7 @@ func newRangeCachingProvider(inner Provider, from, to int) *rangeCachingProvider
 		from:     from,
 		to:       to,
 		cache:    map[string][]*stockdb.Quote{},
+		barCache: map[string][]score.Bar{},
 	}
 }
 
@@ -110,6 +120,55 @@ func quotesInRange(all []*stockdb.Quote, start, end int) []*stockdb.Quote {
 			continue
 		}
 		out = append(out, q)
+	}
+	return out
+}
+
+// DailyBars 与 DailyHistory 用同一套缓存策略：
+// 请求区间落在预取窗口内就用缓存切片，否则整窗口取一次。
+//
+// 底层用的是 Provider.DailyBars —— 数据湖那条路因此完全不组装 Quote，
+// 这是回填从 30 秒级降下来的关键。
+func (p *rangeCachingProvider) DailyBars(
+	ctx context.Context, code string, start, end int,
+) ([]score.Bar, error) {
+	// 与 DailyHistory 同样的保护：区间超出预取窗口就不敢用缓存
+	if start < p.from || end > p.to {
+		return p.Provider.DailyBars(ctx, code, start, end)
+	}
+
+	p.barMu.Lock()
+	cached, ok := p.barCache[code]
+	p.barMu.Unlock()
+
+	if !ok {
+		full, err := p.Provider.DailyBars(ctx, code, p.from, p.to)
+		if err != nil {
+			return nil, err
+		}
+		p.barMu.Lock()
+		// 并发下可能已有别的 worker 写进去了，保留先到的（内容相同）
+		if _, exists := p.barCache[code]; !exists {
+			p.barCache[code] = full
+		}
+		cached = p.barCache[code]
+		p.barMu.Unlock()
+	}
+
+	return sliceBars(cached, start, end), nil
+}
+
+// sliceBars 从整窗口切片出 [start, end]，并**复制一份**。
+//
+// 复制是必须的：调用方（评分）会遍历/持有这个切片，
+// 直接返回缓存内部切片会让外部改动污染缓存。
+func sliceBars(all []score.Bar, start, end int) []score.Bar {
+	out := make([]score.Bar, 0, len(all))
+	for _, bar := range all {
+		if bar.Date < int64(start) || bar.Date > int64(end) {
+			continue
+		}
+		out = append(out, bar)
 	}
 	return out
 }

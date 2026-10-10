@@ -142,6 +142,10 @@ type Bar struct {
 	Close  float64
 	Volume float64
 	Amount float64
+	// Turnover 是换手率（%）。**评分要用它** ——
+	// scoring 里 `TurnRankPct = RankPct(全市场换手率, 本股换手率)`，
+	// 少了它整个评分都会变。取数路径不走 Quote 时也必须把它算出来。
+	Turnover float64
 }
 
 // Indicators 是单只股票在最新一根 K 线上的指标快照。

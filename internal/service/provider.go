@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"freestock/internal/cnlake"
+	"freestock/internal/score"
 	"freestock/internal/stockdb"
 )
 
@@ -48,6 +49,17 @@ type Provider interface {
 	LatestQuotes(ctx context.Context, codes []string, date int) (map[string]*stockdb.Quote, error)
 	QuoteRangeDesc(ctx context.Context, code string, start, end int) ([]*stockdb.Quote, error)
 	DailyHistory(ctx context.Context, code string, start, end int) ([]*stockdb.Quote, error)
+	// DailyBars 只取 OHLCV（评分算指标只需要这些）。
+	//
+	// **为什么要单独一条路径**：`DailyHistory` 会为**每一根 K 线**组装完整的
+	// `stockdb.Quote` —— 估值、市值、股本、PE/PB、换手率、IsST 等，
+	// 而 `score.Bar` 只用 Date/Open/High/Low/Close/Volume/Amount 七个字段。
+	// 实测组装 Quote 每根 26.2µs，而反过来剥字段只要 47ns：
+	// 全市场回填 30 秒里 99% 花在这上面（指标计算只占 0.5%）。
+	//
+	// 语义必须与 `barsFromQuotes(DailyHistory(...))` **完全一致**：
+	// 同样按 [start, end] 过滤、同样丢弃 Close<=0 的行、同样按日期升序。
+	DailyBars(ctx context.Context, code string, start, end int) ([]score.Bar, error)
 	DividendFactors(ctx context.Context, code string) ([]stockdb.Factor, error)
 	MoneyFlowRange(ctx context.Context, code string, start, end int) ([]stockdb.MoneyFlow, error)
 	Boards(ctx context.Context) ([]stockdb.Board, error)
@@ -754,6 +766,15 @@ func (p *lakeProvider) shareHistory(code string) []cnlake.ShareStructureRow {
 			}
 			index[code] = append(index[code], row)
 		}
+		// ⚠ **必须按日期排序**。
+		//
+		// `AllShareStructures` 不保证顺序（原来的 `ShareStructures(code)`
+		// 是排过序再返回的），而 `sharesFor` 依赖"截至 date 的最后一行" ——
+		// 顺序一乱就会提前中断、返回错误的股本，进而让换手率与评分都错。
+		for code, list := range index {
+			sort.Slice(list, func(i, j int) bool { return list[i].Date() < list[j].Date() })
+			index[code] = list
+		}
 		p.mu.Lock()
 		p.shares = index
 		p.mu.Unlock()
@@ -768,13 +789,18 @@ func (p *lakeProvider) shareHistory(code string) []cnlake.ShareStructureRow {
 
 // sharesFor 找出截至 date 生效的股本。
 func sharesFor(rows []cnlake.ShareStructureRow, date int64) (total, float float64, ok bool) {
-	for _, row := range rows {
-		if row.Date() > date {
-			break
-		}
-		total, float, ok = row.TotalShares, row.FloatShares, true
+	// **二分查找"最后一个 <= date"的行**。
+	//
+	// 原来是线性扫描（遇到第一个 > date 就 break），语义相同 ——
+	// rows 已按日期升序（见 shareHistory 建索引处）。
+	// CPU profile 里这个函数占 11.5%（每根 K 线都要查一次股本），
+	// 从 O(n) 降到 O(log n)。
+	i := sort.Search(len(rows), func(i int) bool { return rows[i].Date() > date })
+	if i == 0 {
+		return 0, 0, false
 	}
-	return total, float, ok
+	last := rows[i-1]
+	return last.TotalShares, last.FloatShares, true
 }
 
 func (p *lakeProvider) DividendFactors(ctx context.Context, code string) ([]stockdb.Factor, error) {
@@ -987,4 +1013,73 @@ func (p *lakeProvider) clearCaches() {
 	p.boards = nil
 	p.shares = nil
 	p.mu.Unlock()
+}
+
+// ---------------------------------------------------------------------------
+// DailyBars：只要 OHLCV 的轻量路径
+// ---------------------------------------------------------------------------
+
+// DailyBars 直接读数据湖的 BarRow，**不组装 Quote**。
+//
+// 组件 Quote 的每根成本实测 26.2µs，而这里只搬 7 个字段 —— 这是回填
+// 从 30 秒级降下来的关键。过滤与排序规则与 barsFromQuotes 保持一致。
+func (p *lakeProvider) DailyBars(ctx context.Context, code string, start, end int) ([]score.Bar, error) {
+	if end <= 0 {
+		end = 20991231
+	}
+	if start <= 0 {
+		start = 19900101
+	}
+
+	rows, err := p.barsFor(code, start, end)
+	if err != nil {
+		return nil, err
+	}
+	// 股本结构与 quoteRange 走同一份缓存（shareHistory 内部只读一次数据集）
+	shares := p.shareHistory(cnlake.BareSymbol(code))
+
+	bars := make([]score.Bar, 0, len(rows))
+	for _, row := range rows {
+		date := row.Date()
+		if date < int64(start) || date > int64(end) {
+			continue
+		}
+		// 与 barsFromQuotes 一致：收盘价无效的行不要
+		if row.Close <= 0 {
+			continue
+		}
+		// **换手率必须算出来** —— 评分里 `TurnRankPct` 用的是全市场换手率排名，
+		// 少了它结果会变。算法与 buildQuote **逐字一致**：
+		//   Turnover = round(Volume / FloatShare * 100, 4)，FloatShare<=0 时为 0。
+		turnover := 0.0
+		if _, floatShare, ok := sharesFor(shares, date); ok && floatShare > 0 {
+			turnover = round(float64(row.Volume)/floatShare*100, 4)
+		}
+		bars = append(bars, score.Bar{
+			Date:     date,
+			Open:     row.Open,
+			High:     row.High,
+			Low:      row.Low,
+			Close:    row.Close,
+			Volume:   float64(row.Volume),
+			Amount:   row.Amount,
+			Turnover: turnover,
+		})
+	}
+	if !sort.SliceIsSorted(bars, func(i, j int) bool { return bars[i].Date < bars[j].Date }) {
+		sort.Slice(bars, func(i, j int) bool { return bars[i].Date < bars[j].Date })
+	}
+	return bars, nil
+}
+
+// DailyBars 对 free-stockdb 走原路径再剥字段。
+//
+// 这里没有可省的组装开销（服务端直接返回行情），保留是为了让评分代码
+// 只有一条取数路径，不必按数据源分支。
+func (p *stockdbProvider) DailyBars(ctx context.Context, code string, start, end int) ([]score.Bar, error) {
+	quotes, err := p.DailyHistory(ctx, code, start, end)
+	if err != nil {
+		return nil, err
+	}
+	return barsFromQuotes(quotes), nil
 }
