@@ -90,9 +90,9 @@ export type { BollPrefs, KlinePrefs, MaPrefs, MacdPrefs };
 import type { JobInfo, UpdatePrefsInfo } from "../../bindings/freestock/internal/service/models";
 import type { Status as CneUpdateStatus, FreshnessReport, CatchUpState } from "../../bindings/freestock/internal/cne/models";
 import type { CatchUpInfo } from "../../bindings/freestock/internal/service/models";
-import type { ScheduleState } from "../../bindings/freestock/internal/cne/models";
+import type { ScheduleState, RunDetail, RunSummary } from "../../bindings/freestock/internal/cne/models";
 import type { UpdatePrefs } from "../../bindings/freestock/internal/config/models";
-export type { JobInfo, UpdatePrefsInfo, CneUpdateStatus, UpdatePrefs, FreshnessReport, CatchUpState, CatchUpInfo, ScheduleState };
+export type { JobInfo, UpdatePrefsInfo, CneUpdateStatus, UpdatePrefs, FreshnessReport, CatchUpState, CatchUpInfo, ScheduleState, RunDetail, RunSummary };
 export type {
   AppliedChange,
   ApplyResult,
@@ -267,6 +267,17 @@ export const api = {
    * 需要连同"确认 CNEquity 侧调度器已关闭、避免双跑"一起设计。
    */
   scheduleState: () => CneUpdateService.ScheduleState() as Promise<ScheduleState | null>,
+
+  /**
+   * 最近的运行记录（来自 cne 的 manifest.db）。
+   *
+   * ⚠ **这是判断"这次更新到底成没成"的唯一可靠方式**：
+   * 方案 §2.1 实测 exit=1 时可能 5 个步骤成功、写了 2.5 万行，
+   * 而 degraded 的运行反而 exit=0。**退出码不能当成功判据。**
+   */
+  recentRuns: (limit = 10) => CneUpdateService.RecentRuns(limit) as Promise<RunSummary[]>,
+  /** 最近一次运行的详细结果：每个数据集写了多少行、失败还是上游暂无数据 */
+  latestRunResult: () => CneUpdateService.LatestRunResult() as Promise<RunDetail | null>,
   /** 条件选股 */
   getScreenOptions: () => StockService.GetScreenOptions() as Promise<ScreenOptions | null>,
   screenStocks: (cond: ScreenCondition) =>

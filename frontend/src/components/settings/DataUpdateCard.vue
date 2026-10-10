@@ -20,6 +20,7 @@ import {
   type CatchUpState,
   type FreshnessReport,
   type ScheduleState,
+  type RunDetail,
   type UpdatePrefs,
   type UpdatePrefsInfo,
 } from "@/lib/backend";
@@ -29,6 +30,23 @@ const prefs = ref<UpdatePrefsInfo | null>(null);
 const freshness = ref<FreshnessReport | null>(null);
 const catchUp = ref<CatchUpState | null>(null);
 const schedule = ref<ScheduleState | null>(null);
+/**
+ * 最近一次运行的**实际结果**（来自 cne 的 manifest.db）。
+ *
+ * ⚠ 它才是"这次更新到底成没成"的判据，**不是退出码**：
+ * 方案 §2.1 实测 exit=1 时可能 5 个步骤成功、写了 2.5 万行，
+ * 而 degraded 的运行反而 exit=0。
+ */
+const runResult = ref<RunDetail | null>(null);
+
+/** 读回最近一次运行的结果。 */
+async function loadRunResult() {
+  try {
+    runResult.value = await api.latestRunResult();
+  } catch {
+    runResult.value = null;
+  }
+}
 const projectDir = ref("");
 const cnePath = ref("");
 const tradeDate = ref("");
@@ -232,6 +250,7 @@ onMounted(async () => {
   await loadStatus();
   await loadFreshness();
   await loadSchedule();
+  await loadRunResult();
   // 打开页面时如果任务在跑，直接开始轮询
   if (status.value?.running) startPolling();
 });
@@ -319,6 +338,74 @@ onUnmounted(stopPolling);
           </span>
           <p v-if="catchUp.message" class="text-muted-foreground">{{ catchUp.message }}</p>
         </div>
+      </div>
+
+      <Separator />
+
+      <!-- 最近一次运行的实际结果。
+           ⚠ 这张表的存在理由就是方案 §2.1：**退出码不能当成功判据**。
+           所以这里既不给"成功/失败"的总判，也不只看进程状态 ——
+           而是把每个数据集写了多少行摆出来，让"有数据"和"上游暂无数据"
+           分开呈现。 -->
+      <div v-if="runResult" class="space-y-2">
+        <div class="flex flex-wrap items-center gap-2">
+          <span class="text-sm font-medium">最近一次运行结果</span>
+          <Badge
+            :variant="runResult.failed?.length ? 'destructive' : 'secondary'"
+            class="text-[10px]"
+          >
+            {{ runResult.failed?.length ? `${runResult.failed.length} 个数据集失败` : '没有本地失败' }}
+          </Badge>
+          <span class="text-muted-foreground text-[11px]">
+            共写 {{ (runResult.rowsWritten ?? 0).toLocaleString() }} 行
+          </span>
+          <Button size="xs" variant="ghost" :disabled="!!busy" class="ml-auto" @click="loadRunResult">
+            <RefreshCw /> 刷新
+          </Button>
+        </div>
+
+        <div v-if="runResult.datasets?.length" class="overflow-hidden rounded border text-xs">
+          <div class="bg-muted grid grid-cols-4 gap-2 px-3 py-1.5 font-medium">
+            <span>数据集</span><span>状态</span><span>写入行数</span><span>说明</span>
+          </div>
+          <div
+            v-for="d in runResult.datasets"
+            :key="d.dataset"
+            class="grid grid-cols-4 gap-2 border-t px-3 py-1.5"
+          >
+            <span>{{ d.dataset }}</span>
+            <span
+              :class="
+                d.rowsWritten > 0
+                  ? 'text-muted-foreground'
+                  : runResult.unavailable?.includes(d.dataset)
+                    ? 'text-muted-foreground'
+                    : 'text-destructive'
+              "
+            >
+              {{ d.status }}
+            </span>
+            <span>{{ (d.rowsWritten ?? 0).toLocaleString() }}</span>
+            <span class="text-muted-foreground truncate">
+              {{ d.reasonCode || d.errorCode || d.errorMessage || '—' }}
+            </span>
+          </div>
+        </div>
+
+        <p class="text-muted-foreground text-[11px]">{{ runResult.conclusion }}</p>
+        <p v-if="runResult.run?.status" class="text-muted-foreground text-[11px]">
+          cne 进程状态：<code>{{ runResult.run.status }}</code>
+          <template v-if="runResult.run.coverageStatus">
+            · 覆盖：<code>{{ runResult.run.coverageStatus }}</code>
+          </template>
+          <template v-if="runResult.run.finishedAt">
+            · 结束于 {{ runResult.run.finishedAt }}
+          </template>
+        </p>
+        <p class="text-muted-foreground text-[11px]">
+          ⚠ 进程状态与数据结果**不是一回事**：曾经出现过 exit=1 但有 5 个步骤成功、
+          写了两万多行的情况，也出现过 degraded 却 exit=0。判断更新成没成，看上面的行数。
+        </p>
       </div>
 
       <Separator />

@@ -25,6 +25,7 @@ const mocks = vi.hoisted(() => ({
   cancelCatchUp: vi.fn(),
   cancelUpdate: vi.fn(),
   scheduleState: vi.fn(),
+  latestRunResult: vi.fn(),
 }));
 
 vi.mock("@/lib/backend", () => ({
@@ -39,6 +40,7 @@ vi.mock("@/lib/backend", () => ({
     cancelCatchUp: mocks.cancelCatchUp,
     cancelUpdate: mocks.cancelUpdate,
     scheduleState: mocks.scheduleState,
+    latestRunResult: mocks.latestRunResult,
   },
   errorMessage: (e: unknown) => String(e),
 }));
@@ -88,6 +90,20 @@ beforeEach(() => {
     wrapperPath: "D:\\CNEquity\\cne-daily.cmd",
     summary: "两个任务都已注册",
     note: "",
+  });
+  // 最近一次运行：默认给一份"有数据 + 上游暂无数据"的真实形态
+  // （数值取自本机 manifest.db 的实测记录）
+  mocks.latestRunResult.mockResolvedValue({
+    run: { runId: "r1", jobName: "daily", status: "degraded", startedAt: "", finishedAt: "", rowsWritten: 7866, executionStatus: "completed", coverageStatus: "partial" },
+    datasets: [
+      { dataset: "compact", stage: "aggregated", status: "success", criticality: "", rowsWritten: 3933, usableResult: true },
+      { dataset: "fund_flow", stage: "aggregated", status: "failed", criticality: "", rowsWritten: 0, usableResult: false, reasonCode: "source_transient" },
+    ],
+    succeeded: ["compact"],
+    failed: [],
+    unavailable: ["fund_flow"],
+    rowsWritten: 7866,
+    conclusion: "本次运行共 2 个数据集，写入 7866 行；1 个有数据；1 个上游暂无数据（fund_flow）—— 这类明天会自动重试，不用手动补。（cne 进程状态：degraded）",
   });
 });
 
@@ -208,5 +224,49 @@ describe("cne 数据更新卡片", () => {
 
     await wrapper.findAll("button").find((b) => b.text().includes("补抓落后"))!.trigger("click");
     await vi.waitFor(() => expect(mocks.manualUpdate).toHaveBeenCalledWith("stale", ""));
+  });
+});
+describe("最近一次运行结果（退出码不可信）", () => {
+  it("显示每个数据集写入的行数与说明，并把上游暂无数据与真失败区分开", async () => {
+    const wrapper = await mountCard();
+    const text = wrapper.text();
+    expect(text).toContain("最近一次运行结果");
+    expect(text).toContain("compact");
+    expect(text).toContain("3,933");
+    expect(text).toContain("fund_flow");
+    expect(text).toContain("source_transient");
+    expect(text).toContain("明天会自动重试");
+    // 有上游无数据、但没有本地失败时，不该报"失败"
+    expect(text).toContain("没有本地失败");
+  });
+
+  it("有真正失败的数据集时才显示失败徽章", async () => {
+    mocks.latestRunResult.mockResolvedValue({
+      run: { runId: "r2", jobName: "daily", status: "failed", startedAt: "", finishedAt: "", rowsWritten: 100, executionStatus: "", coverageStatus: "" },
+      datasets: [
+        { dataset: "hot_rank", stage: "aggregated", status: "success", criticality: "", rowsWritten: 100, usableResult: true },
+        { dataset: "fund_flow", stage: "aggregated", status: "failed", criticality: "", rowsWritten: 0, usableResult: false, errorCode: "E_TIMEOUT", errorMessage: "timed out" },
+      ],
+      succeeded: ["hot_rank"],
+      failed: ["fund_flow"],
+      unavailable: [],
+      rowsWritten: 100,
+      conclusion: "1 个失败（fund_flow）",
+    });
+    const wrapper = await mountCard();
+    expect(wrapper.text()).toContain("1 个数据集失败");
+    expect(wrapper.text()).toContain("E_TIMEOUT");
+  });
+
+  it("卡片要写明进程状态与数据结果不是一回事", async () => {
+    const wrapper = await mountCard();
+    expect(wrapper.text()).toContain("不是一回事");
+    expect(wrapper.text()).toContain("exit=1");
+  });
+
+  it("manifest 读不到时（如未配置数据湖）不显示该区块，也不报错", async () => {
+    mocks.latestRunResult.mockRejectedValue(new Error("找不到运行清单"));
+    const wrapper = await mountCard();
+    expect(wrapper.text()).not.toContain("最近一次运行结果");
   });
 });
