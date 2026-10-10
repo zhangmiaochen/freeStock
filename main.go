@@ -125,6 +125,8 @@ func main() {
 	// 组合库按需打开（首次用到组合功能时才建文件），这里只构造服务
 	portfolioService := service.NewPortfolioService(stockService)
 	defer portfolioService.Close()
+	// cne 数据更新（手动更新闭环；自动更新见 docs/cne数据更新方案.md 第 3 阶段）
+	cneUpdateService := service.NewCneUpdateService(store)
 
 	app := application.New(application.Options{
 		Name:        "FreeStock",
@@ -134,6 +136,7 @@ func main() {
 		Services: []application.Service{
 			application.NewService(stockService),
 			application.NewService(portfolioService),
+			application.NewService(cneUpdateService),
 		},
 		Assets: application.AssetOptions{
 			Handler: application.AssetFileServerFS(assets),

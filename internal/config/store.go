@@ -3,9 +3,11 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -184,6 +186,8 @@ type fileData struct {
 	// 这里存 RawMessage 而不是具体结构：条件类型由 service 包定义，
 	// config 不该反向依赖它（会形成循环）。由 service 负责编解码。
 	ScreenPrefs json.RawMessage `json:"screenPrefs,omitempty"`
+	// UpdatePrefs 是 cne 数据更新的设置（手动/自动）。
+	UpdatePrefs *UpdatePrefs `json:"updatePrefs,omitempty"`
 }
 
 // Store 管理配置文件。
@@ -417,4 +421,118 @@ func (s *Store) SetScreenPrefs(raw json.RawMessage) {
 	payload, err := json.MarshalIndent(s.data, "", "  ")
 	s.mu.Unlock()
 	s.write(path, payload, err)
+}
+
+// ---------------------------------------------------------------------------
+// cne 数据更新设置
+// ---------------------------------------------------------------------------
+
+// UpdatePrefs 是 cne 数据更新的设置。
+//
+// 对应方案 docs/cne数据更新方案.md §3。**默认全部关闭自动行为** ——
+// 注册计划任务会改动用户机器，必须是用户显式开启。
+type UpdatePrefs struct {
+	AutoDaily      bool     `json:"autoDaily"`            // 是否启用每日自动更新（计划任务）
+	DailyTime      string   `json:"dailyTime"`            // "17:30"，盘后主日更
+	AutoStale      bool     `json:"autoStale"`            // 是否启用"补抓落后"（计划任务）
+	StaleTime      string   `json:"staleTime"`            // "21:00"
+	CatchUpOnStart bool     `json:"catchUpOnStart"`       // 启动时发现落后就补（§5.2 第 2 层）
+	Groups         []string `json:"groups,omitempty"`     // 限定调度组；空=全部
+	CNEPath        string   `json:"cnePath,omitempty"`    // cne 可执行文件；空=按 PATH 找
+	ProjectDir     string   `json:"projectDir,omitempty"` // cne 工作目录（须含 configs/cnequity.toml）
+}
+
+// DefaultUpdatePrefs 返回默认设置。
+//
+// 两个自动开关**默认关**：注册/修改计划任务会动到用户机器上的东西，
+// 不能因为装了个软件就悄悄改。启动补跑默认开（只读判断 + 明确提示）。
+func DefaultUpdatePrefs() UpdatePrefs {
+	return UpdatePrefs{
+		AutoDaily:      false,
+		DailyTime:      "17:30",
+		AutoStale:      false,
+		StaleTime:      "21:00",
+		CatchUpOnStart: true,
+		ProjectDir:     `D:\workspace\stockTool\CNEquity`,
+	}
+}
+
+// Sanitize 收敛非法值 —— 与 KlinePrefs.Sanitize 一样"永不报错，只纠正"。
+//
+// 时间必须能被计划任务接受：统一成 HH:MM，非法就回落默认。
+func (p UpdatePrefs) Sanitize() UpdatePrefs {
+	def := DefaultUpdatePrefs()
+
+	p.DailyTime = sanitizeClock(p.DailyTime, def.DailyTime)
+	p.StaleTime = sanitizeClock(p.StaleTime, def.StaleTime)
+
+	if p.ProjectDir == "" {
+		p.ProjectDir = def.ProjectDir
+	}
+	// 去重 + 去空的分组
+	if len(p.Groups) > 0 {
+		seen := make(map[string]bool, len(p.Groups))
+		out := make([]string, 0, len(p.Groups))
+		for _, g := range p.Groups {
+			g = strings.TrimSpace(g)
+			if g == "" || seen[g] {
+				continue
+			}
+			seen[g] = true
+			out = append(out, g)
+		}
+		p.Groups = out
+	}
+	p.CNEPath = strings.TrimSpace(p.CNEPath)
+	return p
+}
+
+// sanitizeClock 把 "17:30" / "7:5" / "1730" 这类输入收敛成 HH:MM。
+//
+// 计划任务对时间格式敏感，非法值会让任务注册失败 —— 所以这里不报错、
+// 只回落到默认值，和 KlinePrefs 的处理方式一致。
+func sanitizeClock(value, fallback string) string {
+	v := strings.TrimSpace(value)
+	if v == "" {
+		return fallback
+	}
+	// "1730" -> "17:30"
+	if len(v) == 4 && !strings.Contains(v, ":") {
+		v = v[:2] + ":" + v[2:]
+	}
+	parts := strings.Split(v, ":")
+	if len(parts) != 2 {
+		return fallback
+	}
+	hour, err1 := strconv.Atoi(strings.TrimSpace(parts[0]))
+	minute, err2 := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if err1 != nil || err2 != nil {
+		return fallback
+	}
+	if hour < 0 || hour > 23 || minute < 0 || minute > 59 {
+		return fallback
+	}
+	return fmt.Sprintf("%02d:%02d", hour, minute)
+}
+
+// UpdatePrefs 返回已保存的设置；第二个返回值表示是否保存过。
+func (s *Store) UpdatePrefs() (UpdatePrefs, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.data.UpdatePrefs == nil {
+		return DefaultUpdatePrefs(), false
+	}
+	return s.data.UpdatePrefs.Sanitize(), true
+}
+
+// SetUpdatePrefs 保存设置。写入失败会被忽略（内存中仍生效）。
+func (s *Store) SetUpdatePrefs(prefs UpdatePrefs) UpdatePrefs {
+	sanitized := prefs.Sanitize()
+	s.mu.Lock()
+	s.data.UpdatePrefs = &sanitized
+	path := s.path
+	payload, err := json.MarshalIndent(s.data, "", "  ")
+	s.mu.Unlock()
+	s.write(path, payload, err)
+	return sanitized
 }

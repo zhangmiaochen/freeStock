@@ -145,6 +145,28 @@ func (r *Runner) executable() (string, error) {
 	return "", errors.New("找不到 cne 可执行文件：请在设置里指定 CNEPath，或把它放进 PATH")
 }
 
+// SetOptions 更新 Runner 的选项（设置改了之后由 service 层调用）。
+//
+// 只改配置，不影响正在跑的任务 —— 新选项对**下一次** Start 生效。
+func (r *Runner) SetOptions(opts Options) {
+	r.mu.Lock()
+	r.opts = opts
+	r.mu.Unlock()
+}
+
+// CurrentLogPath 返回当前（或最近一次）任务的日志路径，没有则空串。
+func (r *Runner) CurrentLogPath() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.current != nil {
+		return r.current.LogPath
+	}
+	if r.last != nil {
+		return r.last.LogPath
+	}
+	return ""
+}
+
 // Start 启动一次更新并**立即返回**（方案 §2.6：单次 8~60 分钟，绝不能同步等待）。
 //
 // tradeDate 仅在 kind == KindDate 时使用（YYYY-MM-DD）。
