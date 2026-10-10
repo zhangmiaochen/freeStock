@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -57,11 +58,39 @@ func setupHiddenProcess(cmd *exec.Cmd) {
 // GBK 的中文被剥光后字段全空 —— 于是解析失败、界面显示空白。
 // 所以这里刻意避开 System32，用临时目录（必定存在、语言中立）。
 func neutralDir() string {
-	dir := os.TempDir()
-	if info, err := os.Stat(dir); err == nil && info.IsDir() {
-		return dir
+	// ⚠ **多级兜底 + 逐级校验存在性**。
+	//
+	// 这个值会被设成 cmd / schtasks 的工作目录；一旦它是无效路径，
+	// 那些程序会直接报 "The system cannot find the path specified." ——
+	// 而**错误信息里完全看不出是这个目录的问题**，极难定位。
+	// 实测踩过：cmd /c 那条路在用户机器上一直失败。
+	//
+	// 所以这里不能只"取一个看着合理的值"，必须**确认它真的存在**；
+	// 全都不行时退到可执行文件自己所在的目录 —— 那个必定存在。
+	candidates := []string{
+		os.TempDir(),
+		os.Getenv("TEMP"),
+		os.Getenv("TMP"),
+		os.Getenv("USERPROFILE"),
+		`C:\`,
 	}
-	return "."
+	for _, dir := range candidates {
+		dir = strings.TrimSpace(dir)
+		if dir == "" {
+			continue
+		}
+		if info, err := os.Stat(dir); err == nil && info.IsDir() {
+			return dir
+		}
+	}
+	if exe, err := os.Executable(); err == nil {
+		if dir := filepath.Dir(exe); dir != "" {
+			if info, err := os.Stat(dir); err == nil && info.IsDir() {
+				return dir
+			}
+		}
+	}
+	return `C:\`
 }
 
 // hiddenCommand 构造一个**不会弹窗**的外部命令。

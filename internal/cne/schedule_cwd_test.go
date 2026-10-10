@@ -126,41 +126,6 @@ func TestAllCommandsGetWorkingDir(t *testing.T) {
 	}
 }
 
-// ⚠ **兜底判据必须区分"命令没跑起来"和"schtasks 正常报错"。**
-//
-// 这个区分我第一版写错了：把"退出码非零"当成调用失败，
-// 于是**查一个不存在的任务**（schtasks 本来就返回非零）被误判成 cmd 启动失败，
-// 去重试、最后报一个带诊断的错 —— TestQueryMissingTaskIsNotAnError 直接挂了。
-//
-// 正确的判据只有两类：明确的"找不到路径"，或输出完全为空。
-func TestCmdFailedToStartOnlyMatchesStartupFailures(t *testing.T) {
-	startupFailures := [][]byte{
-		[]byte("ERROR: The system cannot find the path specified.\r\n"),
-		[]byte("系统找不到指定的路径。\r\n"),
-		[]byte(""),
-		[]byte("   \r\n"),
-	}
-	for _, out := range startupFailures {
-		if !cmdFailedToStart(out) {
-			t.Errorf("应判为'命令没跑起来'：%q", string(out))
-		}
-	}
-
-	// 这些是 schtasks **跑起来了**并且自己报的错 —— 不能走兜底重试
-	legitErrors := [][]byte{
-		[]byte("ERROR: The system cannot find the file specified."),
-		[]byte("ERROR: The task \"cne-xyz\" does not exist."),
-		[]byte("ERROR: 系统找不到指定的文件。"),
-		[]byte("INFO: Scheduled task \"cne-daily-update\" has already been enabled.\r\n" +
-			"SUCCESS: The parameters of scheduled task \"cne-daily-update\" have been changed."),
-	}
-	for _, out := range legitErrors {
-		if cmdFailedToStart(out) {
-			t.Errorf("**不该**判为'命令没跑起来'（schtasks 已执行并报错）：%q", string(out))
-		}
-	}
-}
-
 // 查不存在的任务必须返回"未注册"，而不是把 schtasks 的业务性非零退出
 // 当成调用失败报出来。
 func TestQueryMissingTaskStillWorks(t *testing.T) {
@@ -170,5 +135,58 @@ func TestQueryMissingTaskStillWorks(t *testing.T) {
 	}
 	if info.Registered {
 		t.Error("不该报告已注册")
+	}
+}
+
+// ⚠ **GBK 解码是这次修复的核心**，必须钉住。
+//
+// 中文 Windows 上 schtasks 按 GBK（OEM 936）输出，而且**连字段名都是中文**
+// （`任务名:` / `下次运行时间:` / `计划任务状态:`），不解码就取不到任何值。
+//
+// 之前用 `cmd /c chcp 65001` 强制 UTF-8，引出了 cmd 对工作目录敏感那一堆问题；
+// 现在改成正确解码 GBK（用依赖里本来就有的 golang.org/x/text）。
+func TestDecodeConsoleHandlesGBK(t *testing.T) {
+	// "主机名:       ABC" 的 GBK 编码
+	gbk := []byte{
+		0xd6, 0xf7, 0xbb, 0xfa, 0xc3, 0xfb, 0xa3, 0xba, // 主机名：
+		0x20, 0x20, 0x41, 0x42, 0x43, // "  ABC"
+	}
+	got := decodeConsole(gbk)
+	if !strings.Contains(got, "主机名") {
+		t.Errorf("**GBK 没解码成功**：%q —— 字段名是中文，不解码就取不到值", got)
+	}
+	if !strings.Contains(got, "ABC") {
+		t.Errorf("ASCII 部分丢了：%q", got)
+	}
+
+	// UTF-8 输入必须原样返回（英文系统、或已经转过码的情况）
+	utf8Input := []byte("Folder: \\\r\nTaskName: \\cne-daily-update\r\n")
+	if got := decodeConsole(utf8Input); got != string(utf8Input) {
+		t.Errorf("UTF-8 输入被改动了：%q", got)
+	}
+
+	// BOM 要去掉
+	if got := decodeConsole([]byte("\ufeffFolder: \\")); strings.HasPrefix(got, "\ufeff") {
+		t.Errorf("BOM 没去掉：%q", got)
+	}
+}
+
+// **直连 schtasks（不经 cmd）必须能读回中文字段** —— 这是这次修复的落点。
+func TestSchtasksDirectReadsChineseFields(t *testing.T) {
+	out, err := runSchtasks("/query", "/tn", TaskDaily, "/fo", "LIST", "/v")
+	if err != nil {
+		// 任务不存在等情况不算失败
+		t.Skipf("查询失败（可能任务未注册）：%v", err)
+	}
+	text := decodeConsole(out)
+	// 中英文字段名至少有一个能用
+	nextRun := fieldOf(text, "Next Run Time", "下次运行时间")
+	state := fieldOf(text, "Scheduled Task State", "计划任务状态")
+	t.Logf("下次运行时间=%q  计划任务状态=%q", nextRun, state)
+	if nextRun == "" && state == "" {
+		t.Errorf("**中英文字段名都没取到** —— GBK 解码或字段匹配有问题：\n%s", text)
+	}
+	if nextRun != "" && !contains(nextRun, ":") {
+		t.Errorf("下次运行时间不像时间：%q", nextRun)
 	}
 }

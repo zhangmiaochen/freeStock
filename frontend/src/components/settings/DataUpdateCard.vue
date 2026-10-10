@@ -59,6 +59,8 @@ const staleAt = ref("21:00");
 const plan = ref<SchedulePlan | null>(null);
 /** 自动更新是否真的会生效（含"错过会不会补跑"） */
 const autoUpdate = ref<AutoUpdateStatus | null>(null);
+/** 读自动更新状态失败的原因（非空时界面要显示出来，而不是什么都不显示） */
+const autoUpdateError = ref("");
 const busy = ref("");
 const message = ref("");
 const error = ref("");
@@ -89,12 +91,23 @@ async function loadSchedule() {
   }
 }
 
-/** 读回自动更新状态。 */
+/**
+ * 读回自动更新状态。
+ *
+ * ⚠ **失败时不能静默**。原来这里 `catch {}` 直接置 null，于是
+ * 「修复：错过也补跑」按钮（条件是 `!startWhenAvailable`）跟着消失 ——
+ * 用户会以为功能被删了，而实际是查询失败。用户实测反馈过这一点：
+ * "你怎么把之前的修复跳过按钮去掉了"。
+ *
+ * 现在失败会把原因显示出来，并且**保留一个"重试"入口**。
+ */
 async function loadAutoUpdate() {
   try {
     autoUpdate.value = await api.autoUpdateStatus();
-  } catch {
+    autoUpdateError.value = "";
+  } catch (e) {
     autoUpdate.value = null;
+    autoUpdateError.value = errorMessage(e);
   }
 }
 
@@ -668,7 +681,14 @@ onUnmounted(stopPolling);
               </Button>
             </div>
           </div>
-          <p v-if="autoUpdate?.warning" class="text-[11px] text-amber-600">{{ autoUpdate.warning }}</p>
+          <p v-if="autoUpdateError" class="text-destructive flex items-start gap-1 text-[11px]">
+            <CircleAlert class="mt-0.5 size-3.5 shrink-0" />
+            <span>
+              读不到自动更新状态：{{ autoUpdateError }}
+              <Button size="xs" variant="ghost" class="ml-1 h-5 px-1" @click="loadAutoUpdate">重试</Button>
+            </span>
+          </p>
+          <p v-else-if="autoUpdate?.warning" class="text-[11px] text-amber-600">{{ autoUpdate.warning }}</p>
           <p v-else-if="autoUpdate?.summary" class="text-muted-foreground text-[11px]">
             {{ autoUpdate.summary }}
           </p>
