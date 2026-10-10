@@ -87,7 +87,7 @@ func TestScoreDigestRealData(t *testing.T) {
 
 			// **落库再读回来**：这样指纹覆盖的就不只是计算结果，还有
 			// 行业/市场归属（saveScoringResult）与写入本身（SaveStrength 分批）。
-			if err := svc.saveScoringResult(store, result, strategyID); err != nil {
+			if err := svc.saveScoringResult(store, result, strategyID, false); err != nil {
 				t.Fatalf("%s %d 落库失败：%v", strategyID, date, err)
 			}
 			stored, err := store.LoadStrength(int64(date), strategyID, 0)

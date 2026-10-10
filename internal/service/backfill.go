@@ -63,10 +63,17 @@ type BackfillResult struct {
 // limit 语义：
 //
 //	limit <= 0 → **全市场**（所有有行情的股票）
-//	limit >  0 → 只评股票列表前 limit 只
+//	limit >  0 → 从全市场里**等距抽样** limit 只（跨板块，不是"代码最小的前 N 只"）
 //
-// **回测必须用全市场**：只用前 1000 只的话，候选池与实盘建议不是一回事，
-// 回测出来的组合也不代表策略的真实表现。
+// ⚠ **回测必须用全市场**。非 0 的 limit 只适合"快速验证通路"：
+// 抽样再均匀，广度那类**全市场计数**也一定是被低估的
+// （低吸开仓要看"全市场 close>MA60 且 MA20>MA60 的只数 ≥ 1000"），
+// 用它跑出来的组合与实盘建议不是一回事。
+//
+// 历史上这里取的是"代码序前 limit 只"，limit=1000 时只会评到
+// 000/001/002（深市主板）—— 创业板/科创板一只不评，
+// 于是「主板+创业板」的组合候选恒为空、低吸广度恒判不足、回测恒为 0 成交。
+// 已改为等距抽样（见 `scoringUniverse`）。
 //
 // force=false 时**增量**：已经算过的 (交易日, 代码) 不再重算 ——
 // 重跑一个已经填过的区间应当在几秒内结束，而不是又花几分钟。
@@ -145,6 +152,10 @@ func (s *PortfolioService) RefreshBackfill(
 		// 重算值完全相同。重跑一个已经填过的区间应当是**近乎瞬间**的事，
 		// 而不是又花几分钟。
 		todo := codes
+		// incremental 表示 todo 只是"该日还没算过的那部分代码"。
+		// 它决定落库用**按主键覆盖**还是**整分区替换** —— 见 saveScoringResult。
+		// 用错会**删掉该日已经算好的其余行**（真实数据就是这样被削掉一大半的）。
+		incremental := false
 		if !force {
 			existing, err := store.StrengthCodes(int64(date), strategyID)
 			if err != nil {
@@ -160,6 +171,7 @@ func (s *PortfolioService) RefreshBackfill(
 				}
 				out.Reused += len(codes) - len(missing)
 				todo = missing
+				incremental = true
 			}
 		}
 		if len(todo) == 0 {
@@ -183,7 +195,7 @@ func (s *PortfolioService) RefreshBackfill(
 			continue
 		}
 		saveBegan := time.Now()
-		if err := s.saveScoringResult(store, result, strategyID); err != nil {
+		if err := s.saveScoringResult(store, result, strategyID, incremental); err != nil {
 			saveTotal += time.Since(saveBegan)
 			out.Skipped = append(out.Skipped,
 				fmt.Sprintf("%d：落库失败 %v", date, err))

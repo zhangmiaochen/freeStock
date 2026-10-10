@@ -178,17 +178,34 @@ type Row struct {
 	BenchmarkReturn20D float64 `json:"benchmarkReturn20d"`
 
 	// 持仓专属
-	PositionLayers   int     `json:"positionLayers"`
-	EntryPrice       float64 `json:"entryPrice"`
-	CurrentPrice     float64 `json:"currentPrice"`
-	HighestPrice     float64 `json:"highestPrice"`
-	ProfitLossPct    float64 `json:"profitLossPct"`
+	PositionLayers int     `json:"positionLayers"`
+	EntryPrice     float64 `json:"entryPrice"`
+	CurrentPrice   float64 `json:"currentPrice"`
+	HighestPrice   float64 `json:"highestPrice"`
+	ProfitLossPct  float64 `json:"profitLossPct"`
+	// PositionWeight 是持仓权重百分数（层数 / 总层数 × 100）。
+	//
+	// 自动建组合在**选出持仓的那一刻**就要把它算好并随预览返回 ——
+	// 原实现的 `selected_positions` 项里就带 `position_weight`
+	//（portfolio_service.py:2371，经 `_position_row_payload` 输出到预览）。
+	PositionWeight   float64 `json:"positionWeight"`
 	HoldingTradeDays int     `json:"holdingTradeDays"`
 
-	// 信号（原项目不入库，运行时 merge_asof 回填）
-	SignalType  string  `json:"activeSignalType"`
-	SignalAge   int     `json:"signalAge"`
-	SignalScore float64 `json:"activeSignalScore"`
+	// 信号（由 signal_history 经 merge_asof 回看 29 个交易日回填，
+	// 见 internal/score/signal_attach.go）。
+	//
+	// 原实现的 9 个 `active_signal_*` / `signal_*` 列在
+	// `portfolio_rotation_logic.py` 里**全部有消费点**，所以这里一并建模，
+	// 不能只留三个（少一个就会让"信号模型/级别"在候选说明里变空）。
+	SignalType       string  `json:"activeSignalType"`
+	SignalAge        int     `json:"signalAge"`
+	SignalScore      float64 `json:"activeSignalScore"`
+	SignalModelID    string  `json:"activeSignalModelId"`
+	SignalModelName  string  `json:"activeSignalModelName"`
+	SignalLevel      string  `json:"activeSignalLevel"`
+	SignalLevelLabel string  `json:"activeSignalLevelLabel"`
+	SignalTradeDate  int64   `json:"signalTradeDate"`
+	SignalCount      int     `json:"signalCount"`
 }
 
 // hasFreshSignal 判断是否有"新鲜信号"。
@@ -240,6 +257,16 @@ func IsStructureBroken(row Row, strategyID, marketState string, protectStart, pr
 		runup := (row.HighestPrice/row.EntryPrice - 1) * 100
 		retrace := (row.CurrentPrice/row.HighestPrice - 1) * 100
 		if runup >= protectStart && retrace <= -protectRetrace {
+			return true
+		}
+		// 高手模拟还有一条**独立的更严规则**：涨 8% 后回撤 4% 即算破坏。
+		//
+		// 原实现把它**硬编码在 `is_structure_broken` 里**（portfolio_rotation_logic.py:444-445），
+		// 不看传进来的阈值 —— 所以所有调用方（含加层判定）都自动带上它。
+		// 本项目把阈值做成参数，只在主链条（rotation.go 的持仓判定）传了 8/4，
+		// `layering.go` 仍传 15/6 → 高手模拟的加层判定比原版**宽**。
+		// 在这里补上，等价于原实现的硬编码。
+		if strategyID == StrategyExpert && runup >= 8.0 && retrace <= -4.0 {
 			return true
 		}
 	}
@@ -492,6 +519,13 @@ type ReplacementPair struct {
 	MainReason     string  `json:"mainReason"`
 	ExpectedUplift float64 `json:"expectedPortfolioUplift"`
 	RankNo         int     `json:"rankNo"`
+	// EntryLayers 是换入时应给的层数（原实现 :2250）：
+	// full_replace → `initial_entry_layers(candidate, policy)`；partial_rotate → 1。
+	//
+	// ⚠ 此前恒为 1 —— 整仓换股只给 1 层，与"趋势成长在震荡市首次建仓给 2 层 /
+	// 超跌反弹高分给 2 层"直接冲突，而且会连带改变 free_layers，
+	// 让后续的 add / add_layer 数量也跟着偏。
+	EntryLayers int `json:"entryLayers"`
 }
 
 // RotationRow 是一条调仓动作。
@@ -564,10 +598,14 @@ type RotationInput struct {
 	// 原实现是 `market_breadth_status` 的 `index_entry_allowed`
 	//（portfolio_rotation_logic.py:1754-1760）。
 	LowBuyIndex LowBuyIndexGate
-	// UniverseScores 是**当日该策略的全部评分**（范围过滤前）。
+	// UniverseScores 是**当日该策略的全部评分**（在组合的行业/概念/市场范围
+	// **过滤之后**，但在"剔 ST / 剔持仓 / 分数下限 / head 截断"**之前**）。
 	//
-	// 广度闸门要在全量评分帧上数（原实现 `universe_count = len(scores)`），
-	// 不能拿候选池数 —— 候选池已经被 head(max(80,target*12)) 截断，
+	// 广度闸门要在这一帧上数（原实现 `universe_count = len(scores)`，而它的
+	// `scores` 来自先做过 `_scope_filter` 的 `score_frame`
+	// —— portfolio_service.py:2469 与 portfolio_rotation_logic.py:1749）。
+	//
+	// 不能拿候选池数：候选池已经被 `head(max(80,target*12))` 截断，
 	// 用它做分母会让 `universe_count >= 100` 恒不成立、闸门永不启用。
 	UniverseScores []float64
 }
@@ -747,7 +785,10 @@ func BuildRotationPlan(in RotationInput) RotationPlan {
 		if pair.Mode != "full_replace" {
 			action = ActionAdd
 		}
-		target := pair.LayersForCandidate()
+		target := pair.EntryLayers
+		if target < 1 {
+			target = 1
+		}
 		plan.Rows = append(plan.Rows, RotationRow{
 			Code: pair.CandidateCode, Name: pair.CandidateName,
 			Action: action, ActionLabel: ActionLabel(action),
@@ -775,8 +816,21 @@ func BuildRotationPlan(in RotationInput) RotationPlan {
 	// ⚠ **必须受额度控制**（见下）。少了它，候选池里每个过质量门槛的票都会生成
 	// 一条 add —— target=5 时可能出 80 条，「一键应用」会真的建出几十个持仓。
 	//
+	// ⚠ **绝不能在这里重排候选池**。
+	//
+	// 原实现全程使用 `candidate_ranked` 的**原始顺序**（配对 :2209、建仓 :2461、
+	// 溢出补位 :2587），而那个顺序是 `prioritize_trend_growth_entry_points`
+	// （:1646-1698）给的：低吸按**成交额**（amount_entry / deep_amount /
+	// board_norm_amount），趋势成长按**六项加权百分位复合分**。
+	//
+	// 此前这里调了 `sortCandidates(in.Candidates)`（纯 `total_score DESC`），
+	// 把上游刚排好的入场优先级**整体覆盖**掉了 —— 于是：
+	//   - 低吸买的是"分最高的"，不是"成交额最大的"
+	//   - 趋势成长买的是"分最高的"，不是"入场点最好的"
+	//   - 而配对（:597 在这行之前）用的还是优先级顺序 →
+	//     **同一个计划里混了两套顺序**
+	//
 	// 对应 Python portfolio_rotation_logic.py:2439-2520。
-	sortCandidates(in.Candidates)
 
 	// 换股/清仓之后还剩下几只、几层
 	plannedCount, plannedLayers := 0, 0
@@ -1078,6 +1132,16 @@ func BuildRotationPlan(in RotationInput) RotationPlan {
 	if !plan.EntryAllowed {
 		plan.Rows = applyBreadthGate(plan.Rows, &plan)
 	}
+	// ⚠ 低吸这里**故意**保持 `EntryAllowed = true`，且不做行改写。
+	//
+	// 原实现的广度闸门只作用于非低吸（portfolio_rotation_logic.py:2627 在
+	// `if not low_buy_strategy` 分支里）—— 低吸能不能开新仓由
+	// `market_breadth_status` 的低吸分支（广度就绪数 + 指数闸门）决定，
+	// 那一步已经在上面的 `canAddNewPosition` 里生效了。
+	//
+	// 已知显示差异：低吸时 `Breadth` 用的是通用 70/20 阈值，
+	// 而原实现在低吸分支报的是「就绪数 / 仓位档第一档阈值」并带 ready_label。
+	// **只影响界面文字，不影响任何一行动作**，故未改（改它会牵动 Wails 绑定）。
 
 	// ---- 排序 + 执行语义 ----
 	sortRotationRows(plan.Rows)
@@ -1094,7 +1158,15 @@ func BuildRotationPlan(in RotationInput) RotationPlan {
 }
 
 // LayersForCandidate 返回换入时应该给几层。
-func (p ReplacementPair) LayersForCandidate() int { return 1 }
+//
+// ⚠ **不要再用它**：层数取决于 `pair_mode` 与策略（见 `ReplacementPair.EntryLayers`）。
+// 保留它只是为了让旧测试仍能编译。
+func (p ReplacementPair) LayersForCandidate() int {
+	if p.EntryLayers < 1 {
+		return 1
+	}
+	return p.EntryLayers
+}
 
 // holdingByCode 在持仓行里按代码找原始 Row。
 func holdingByCode(holdings []Row, code string) (Row, bool) {

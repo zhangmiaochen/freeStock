@@ -8,8 +8,8 @@ import (
 	"freestock/internal/score"
 )
 
-// intPtr / floatPtr 由生产代码提供（见 auto_portfolio.go）——
-// 它们不是测试专用：`PortfolioInput` / `PositionInput` 的指针字段
+// intPtr 由生产代码提供（见 auto_portfolio.go）——
+// 它不是测试专用：`PortfolioInput` / `PositionInput` 的指针字段
 // 在业务代码里也要构造。
 
 // 一键应用建议的端到端：刷新评分 → 生成建议 → 应用 → 持仓被正确改写。

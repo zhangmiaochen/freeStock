@@ -88,8 +88,22 @@ func buildScopeMatcher(lake *cnlake.Lake) *ScopeMatcher {
 	return out
 }
 
-// Ready 表示成员表是否真的读到了。
+// Ready 表示成员表是否真的读到了（行业或概念任一有数据）。
 func (m *ScopeMatcher) Ready() bool { return m != nil && m.ready }
+
+// HasIndustryData / HasSectorData 分别表示**行业表 / 概念表**是否读到了。
+//
+// 为什么要分开问：原实现 `_scope_filter` 的行业与概念分支判定条件不同 ——
+// 行业是"单值行业名 **OR** 成员表命中"（成员表空也能靠单值选出票），
+// 概念是"**只**看成员表"（成员表空 → 空集）。用一个合并的 Ready() 会把
+// 两者混为一谈：概念范围在"只有行业表、没有概念表"时会被误判成可用。
+func (m *ScopeMatcher) HasIndustryData() bool {
+	return m != nil && len(m.industries) > 0
+}
+
+func (m *ScopeMatcher) HasSectorData() bool {
+	return m != nil && len(m.sectors) > 0
+}
 
 // HasIndustry 判定股票是否属于该行业（成员表里的**任意一个**分类体系）。
 func (m *ScopeMatcher) HasIndustry(code, name string) bool {

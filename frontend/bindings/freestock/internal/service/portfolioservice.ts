@@ -182,11 +182,20 @@ export function GetScoreSnapshots(portfolioID: string, limit: number): $Cancella
 }
 
 /**
+ * GetSignalSummary 返回信号表概览。
+ */
+export function GetSignalSummary(): $CancellablePromise<$models.SignalSummary | null> {
+    return $Call.ByID(3543150040).then(($result: any) => {
+        return $$createType24($result);
+    });
+}
+
+/**
  * GetStrengthSummary 返回评分物化状态。
  */
 export function GetStrengthSummary(strategyID: string): $CancellablePromise<$models.StrengthSummary | null> {
     return $Call.ByID(1979789275, strategyID).then(($result: any) => {
-        return $$createType24($result);
+        return $$createType26($result);
     });
 }
 
@@ -203,7 +212,7 @@ export function GetStrengthSummary(strategyID: string): $CancellablePromise<$mod
  */
 export function LatestClose(codes: string[], strategyID: string): $CancellablePromise<{ [_ in string]?: portfolio$0.PricePoint }> {
     return $Call.ByID(898950825, codes, strategyID).then(($result: any) => {
-        return $$createType26($result);
+        return $$createType28($result);
     });
 }
 
@@ -212,7 +221,7 @@ export function LatestClose(codes: string[], strategyID: string): $CancellablePr
  */
 export function ListBacktests(portfolioID: string): $CancellablePromise<portfolio$0.BacktestRun[]> {
     return $Call.ByID(2191167028, portfolioID).then(($result: any) => {
-        return $$createType28($result);
+        return $$createType30($result);
     });
 }
 
@@ -221,7 +230,7 @@ export function ListBacktests(portfolioID: string): $CancellablePromise<portfoli
  */
 export function ListPortfolios(): $CancellablePromise<portfolio$0.Portfolio[]> {
     return $Call.ByID(4287571721).then(($result: any) => {
-        return $$createType29($result);
+        return $$createType31($result);
     });
 }
 
@@ -258,17 +267,24 @@ export function PreviewAutoPortfolio(req: $models.AutoPortfolioRequest): $Cancel
  * limit 语义：
  * 
  * 	limit <= 0 → **全市场**（所有有行情的股票）
- * 	limit >  0 → 只评股票列表前 limit 只
+ * 	limit >  0 → 从全市场里**等距抽样** limit 只（跨板块，不是"代码最小的前 N 只"）
  * 
- * **回测必须用全市场**：只用前 1000 只的话，候选池与实盘建议不是一回事，
- * 回测出来的组合也不代表策略的真实表现。
+ * ⚠ **回测必须用全市场**。非 0 的 limit 只适合"快速验证通路"：
+ * 抽样再均匀，广度那类**全市场计数**也一定是被低估的
+ * （低吸开仓要看"全市场 close>MA60 且 MA20>MA60 的只数 ≥ 1000"），
+ * 用它跑出来的组合与实盘建议不是一回事。
+ * 
+ * 历史上这里取的是"代码序前 limit 只"，limit=1000 时只会评到
+ * 000/001/002（深市主板）—— 创业板/科创板一只不评，
+ * 于是「主板+创业板」的组合候选恒为空、低吸广度恒判不足、回测恒为 0 成交。
+ * 已改为等距抽样（见 `scoringUniverse`）。
  * 
  * force=false 时**增量**：已经算过的 (交易日, 代码) 不再重算 ——
  * 重跑一个已经填过的区间应当在几秒内结束，而不是又花几分钟。
  */
 export function RefreshBackfill(strategyID: string, startDate: number, endDate: number, limit: number, force: boolean): $CancellablePromise<$models.BackfillResult | null> {
     return $Call.ByID(1067070197, strategyID, startDate, endDate, limit, force).then(($result: any) => {
-        return $$createType31($result);
+        return $$createType33($result);
     });
 }
 
@@ -284,7 +300,32 @@ export function RefreshBackfill(strategyID: string, startDate: number, endDate: 
  */
 export function RefreshBackfillAll(startDate: number, endDate: number, limit: number, force: boolean): $CancellablePromise<$models.BackfillAllResult | null> {
     return $Call.ByID(2095863476, startDate, endDate, limit, force).then(($result: any) => {
-        return $$createType33($result);
+        return $$createType35($result);
+    });
+}
+
+/**
+ * RefreshSignals 为给定股票集合生成量价信号并落库。
+ * 
+ * `codes` 为空时取"最新评分日的全部代码"。`startDate/endDate` 为 0 时自动取：
+ * 起点 = 最新评分日往前 `LookbackDays`，终点 = 最新评分日。
+ */
+export function RefreshSignals(codes: string[], startDate: number, endDate: number, opts: $models.SignalGenerateOptions): $CancellablePromise<$models.SignalGenerateResult | null> {
+    return $Call.ByID(1023918032, codes, startDate, endDate, opts).then(($result: any) => {
+        return $$createType37($result);
+    });
+}
+
+/**
+ * RefreshSignalsFor 是给界面/命令行用的信号生成入口（无 ctx，便于绑定）。
+ * 
+ * 对应原项目研究页的"信号扫描"。**不跑它就等于信号表为空**，
+ * 而 `score.HasSignalSource` 已打开 —— 届时熊市下的入场会被"必须有新鲜信号"
+ * 的闸门全部挡掉（这是原版行为，不是缺陷）。
+ */
+export function RefreshSignalsFor(codes: string[], startDate: number, endDate: number, limit: number): $CancellablePromise<$models.SignalGenerateResult | null> {
+    return $Call.ByID(829008031, codes, startDate, endDate, limit).then(($result: any) => {
+        return $$createType37($result);
     });
 }
 
@@ -308,7 +349,7 @@ export function RefreshBackfillAll(startDate: number, endDate: number, limit: nu
  */
 export function RefreshStrength(strategyID: string, limit: number, force: boolean): $CancellablePromise<$models.RefreshResult | null> {
     return $Call.ByID(3438224358, strategyID, limit, force).then(($result: any) => {
-        return $$createType35($result);
+        return $$createType39($result);
     });
 }
 
@@ -320,7 +361,7 @@ export function RefreshStrength(strategyID: string, limit: number, force: boolea
  */
 export function RefreshStrengthAll(limit: number, force: boolean): $CancellablePromise<$models.RefreshAllResult | null> {
     return $Call.ByID(757294405, limit, force).then(($result: any) => {
-        return $$createType37($result);
+        return $$createType41($result);
     });
 }
 
@@ -357,18 +398,22 @@ const $$createType19 = portfolio$0.Overview.createFrom;
 const $$createType20 = $Create.Nullable($$createType19);
 const $$createType21 = portfolio$0.ScoreSnapshot.createFrom;
 const $$createType22 = $Create.Array($$createType21);
-const $$createType23 = $models.StrengthSummary.createFrom;
+const $$createType23 = $models.SignalSummary.createFrom;
 const $$createType24 = $Create.Nullable($$createType23);
-const $$createType25 = portfolio$0.PricePoint.createFrom;
-const $$createType26 = $Create.Map($Create.Any, $$createType25);
-const $$createType27 = portfolio$0.BacktestRun.createFrom;
-const $$createType28 = $Create.Array($$createType27);
-const $$createType29 = $Create.Array($$createType11);
-const $$createType30 = $models.BackfillResult.createFrom;
-const $$createType31 = $Create.Nullable($$createType30);
-const $$createType32 = $models.BackfillAllResult.createFrom;
+const $$createType25 = $models.StrengthSummary.createFrom;
+const $$createType26 = $Create.Nullable($$createType25);
+const $$createType27 = portfolio$0.PricePoint.createFrom;
+const $$createType28 = $Create.Map($Create.Any, $$createType27);
+const $$createType29 = portfolio$0.BacktestRun.createFrom;
+const $$createType30 = $Create.Array($$createType29);
+const $$createType31 = $Create.Array($$createType11);
+const $$createType32 = $models.BackfillResult.createFrom;
 const $$createType33 = $Create.Nullable($$createType32);
-const $$createType34 = $models.RefreshResult.createFrom;
+const $$createType34 = $models.BackfillAllResult.createFrom;
 const $$createType35 = $Create.Nullable($$createType34);
-const $$createType36 = $models.RefreshAllResult.createFrom;
+const $$createType36 = $models.SignalGenerateResult.createFrom;
 const $$createType37 = $Create.Nullable($$createType36);
+const $$createType38 = $models.RefreshResult.createFrom;
+const $$createType39 = $Create.Nullable($$createType38);
+const $$createType40 = $models.RefreshAllResult.createFrom;
+const $$createType41 = $Create.Nullable($$createType40);

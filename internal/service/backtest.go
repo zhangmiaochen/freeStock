@@ -115,7 +115,7 @@ func (s *PortfolioService) CreateBacktest(req BacktestRequest) (runResult *Backt
 		return nil, fmt.Errorf("回测区间内没有历史评分数据，请先执行历史回填")
 	}
 
-	days, codes, scopeErrors := s.buildStrengthDays(store, strengths)
+	days, codes, scopeErrors := s.buildStrengthDays(store, strengths, item)
 	if len(days) == 0 {
 		return nil, fmt.Errorf("回测区间内没有可用的评分交易日")
 	}
@@ -165,6 +165,17 @@ func (s *PortfolioService) CreateBacktest(req BacktestRequest) (runResult *Backt
 	if maxStocks < targetCount {
 		maxStocks = targetCount
 	}
+	// ⚠ 初始资金要**在这里就定下来**，不能等到算指标时再回落默认值。
+	//
+	// `backtest.New` 内部会对 cfg 副本补默认值（<1 → 100000），
+	// 但外层的 cfg 仍是原值 —— 于是 `persistBacktest` 把
+	// `initial_capital=0`、`final_value=0` 写进 `portfolio_backtest_run`，
+	// 回测记录页显示"初始资金 0 / 期末 0"。引擎与指标本身是对的，
+	// 只有落库这一行是错的。
+	initialCapital := req.InitialCapital
+	if initialCapital < 1 {
+		initialCapital = 100000
+	}
 	cfg := backtest.Config{
 		PortfolioID: item.ID, PortfolioName: item.Name,
 		StrategyID: item.StrategyID, StrategyLabel: item.StrategyLabel,
@@ -176,25 +187,59 @@ func (s *PortfolioService) CreateBacktest(req BacktestRequest) (runResult *Backt
 		TotalLayers:         item.TotalLayers,
 		// 低吸的单股层数上限是总层数，其余是 3（原实现 :1031）
 		MaxLayersPerStock: maxLayersForBacktest(item.StrategyID, item.TotalLayers),
-		InitialCapital:    req.InitialCapital,
+		InitialCapital:    initialCapital,
 		MarketScope:       scopeOfPortfolio(item),
 	}
 
 	engine := backtest.New(cfg, days, bars, benchmark)
-	buildPlan := s.backtestPlanBuilder(item, store, marketStateByDate(store, days))
+	// ★ 低吸的两道闸门必须**逐日**喂进去（广度就绪数 + 指数闸门）。
+	//
+	// 不喂的后果（此前就是这样）：`score.BuildRotationPlan` 拿到
+	// `LowBuyBreadthReadyCount=0`、`LowBuyIndex` 零值 →
+	//   - `lowBuyForceClear = 0 < 900` 恒真 → 每天把持仓全部清仓
+	//   - `LowBuyDynamicTargetCount(0,…) = 0` → 目标只数 0
+	//   - 广度/指数闸门都不过 → `canAddNewPosition=false`
+	// 于是**低吸回测从纯现金起步必然 0 成交、净值一条直线** ——
+	// 这正是"回测结果一直是 0"。
+	//
+	// 口径与原实现一致：广度就绪数是**全市场**（当日该策略的全部评分行）里
+	// `close>MA60 且 MA20>MA60` 的只数；指数闸门同日同值。
+	indexGates := map[string]score.LowBuyIndexGate{}
+	if item.StrategyID == portfolio.StrategyTrendLowBuy {
+		dates := make([]string, 0, len(days))
+		for _, day := range days {
+			dates = append(dates, day.Date)
+		}
+		if s.stock != nil {
+			indexGates = s.stock.lowBuyIndexGatesForRange(dates)
+		}
+	}
+	buildPlan := s.backtestPlanBuilder(item, store, marketStateByDate(store, days), targetCount, maxStocks, indexGates)
+	// ★ 评分日与价格日**必须有交集**，否则整个回测一条计划都产不出来。
+	//
+	// 原实现直接抛错（portfolio_service.py:1011-1018
+	// "回测区间内评分结果为空，无法执行无未来函数回测"）。
+	// 此前 Go 只在"一根 K 线都没有"时报错 —— 评分日与价格日错开时
+	// 会**安静地跑完**，落一条 `status=finished`、总收益 0、零成交的记录，
+	// 界面上看起来"回测成功但结果是 0"，完全看不出是数据没对上。
+	if overlap := strengthPriceOverlap(days, bars); overlap == 0 {
+		return nil, fmt.Errorf(
+			"回测区间内评分日与日线价格没有重合的交易日（评分 %d 天、价格 %d 天，区间 %d~%d）——"+
+				"请先对同一区间执行历史回填，或确认数据源的交易日历一致",
+			len(days), distinctBarDates(bars), req.StartDate, req.EndDate)
+	}
 	result, err := engine.Run(buildPlan)
 	if err != nil {
 		return nil, fmt.Errorf("回测执行失败：%w", err)
 	}
-	initialCapital := req.InitialCapital
-	if initialCapital < 1 {
-		initialCapital = cfg.InitialCapital
+	if len(result.Snapshots) == 0 {
+		return nil, fmt.Errorf(
+			"回测区间内没有可用的交易日（区间 %d~%d），没有产生任何净值曲线", req.StartDate, req.EndDate)
 	}
-	if initialCapital < 1 {
-		initialCapital = 100000
-	}
-	metrics := backtest.CalculateMetrics(result.Snapshots, result.Trades, initialCapital)
-	metrics.ScopeWarning = s.backtestScopeWarning(codes, len(result.Trades))
+	// 初始资金已在组装 cfg 时定好（回落到 100000），这里直接用 ——
+	// 引擎与指标、落库三处必须是同一个数。
+	metrics := backtest.CalculateMetrics(result.Snapshots, result.Trades, cfg.InitialCapital)
+	metrics.ScopeWarning = s.backtestScopeWarning(codes, len(result.Trades), days)
 
 	// ⑤ 落库
 	runID := portfolio.NewBacktestRunID()
@@ -287,24 +332,38 @@ func (s *PortfolioService) DeleteBacktest(runID string) error {
 
 // buildStrengthDays 把区间评分按交易日分组。
 //
+// **同时按组合范围过滤** —— 原实现是先 `_scope_filter` 再交给引擎的
+// （portfolio_service.py:1001 `scope_history = self._scope_filter(scope_history, portfolio)`），
+// 引擎的 `_held_score_map` 就建在这个过滤后的帧上
+// （portfolio_backtest_engine.py:86-92）。所以：
+//   - 范围外的持仓在引擎里"左连接落空"→ 评分/现价记 0 → 被判弱持仓清仓/换出
+//   - 广度帧 `universe_count` 也只数范围**内**的票
+//
+// 范围外的行被剔掉后，如果某天一只都不剩，这一天就**不产出计划**
+// （等价于原实现 `daily_strength.empty` → `pending_plan = None`）。
+//
 // 同时收集"有价格但没评分"的日期，供调用方记日志 ——
 // 那些日期回测不会生成新计划（原实现同样要求评分日与价格日都有）。
 func (s *PortfolioService) buildStrengthDays(
-	store *portfolio.Store, strengths []portfolio.StrengthRow,
+	store *portfolio.Store, strengths []portfolio.StrengthRow, pf portfolio.Portfolio,
 ) ([]backtest.StrengthDay, []string, []string) {
 	byDate := map[string][]score.Row{}
 	marketByDate := map[string]string{}
 	var order []string
+	matcher := s.scopeMatcher()
 
-	for _, item := range strengths {
-		date := fmt.Sprintf("%d", item.TradeDate)
+	for _, row := range strengths {
+		if !inPortfolioScope(row, pf, matcher) {
+			continue
+		}
+		date := fmt.Sprintf("%d", row.TradeDate)
 		if _, seen := byDate[date]; !seen {
 			order = append(order, date)
-			if state, err := store.LoadMarketState(item.TradeDate); err == nil {
+			if state, err := store.LoadMarketState(row.TradeDate); err == nil {
 				marketByDate[date] = state.State
 			}
 		}
-		byDate[date] = append(byDate[date], strengthToRow(item))
+		byDate[date] = append(byDate[date], strengthToRow(row))
 	}
 	sort.Strings(order)
 
@@ -418,49 +477,69 @@ func (s *PortfolioService) loadBacktestBars(codes []string, start, end int) ([]b
 //
 // 逻辑与实盘 `BuildPlan` 一致（同用 `buildCandidatePoolFrom` 与
 // `score.BuildRotationPlan`），差别只是数据来自内存而非当天查库。
+//
+// targetCount / maxStocks 传的是**回测请求生效后**的数值（请求可覆盖组合配置），
+// 原实现同样把生效值传进 `build_strategy_config` 与 `build_rotation_plan`
+// （portfolio_backtest_engine.py:436-437,555-565）。传组合行里的原始值会让
+// `ready_score` / `max_replace_count` / 期望只数 / 开仓上限与引擎的买入上限不一致。
+//
+// indexGates 是逐日的低吸指数闸门（按交易日 YYYYMMDD 索引）。
 func (s *PortfolioService) backtestPlanBuilder(
 	item portfolio.Portfolio, store *portfolio.Store, states map[string]string,
+	targetCount, maxStocks int, indexGates map[string]score.LowBuyIndexGate,
 ) backtest.PlanBuilder {
 	return func(held []score.Row, day backtest.StrengthDay) score.RotationPlan {
 		marketState := day.MarketState
 		// 当日评分行（转回 StrengthRow 以便复用候选池过滤）
 		all := make([]portfolio.StrengthRow, 0, len(day.Rows))
-		rowsByCode := map[string]score.Row{}
-		for _, row := range day.Rows {
-			rowsByCode[row.Code] = row
-		}
 		for _, row := range day.Rows {
 			all = append(all, rowToStrength(row, ""))
 		}
+		// ⚠ **持仓但当天没评分的行不进 `all`**。
+		//
+		// 它们本来就会被"剔除已持仓"过滤掉（`buildCandidatePoolFrom` 的 held 集合），
+		// 所以对候选池毫无影响；唯一的副作用是**把 0 分塞进广度帧**，
+		// 把 `universe_count` 抬高（能翻转 `universe_count >= 100` 的启用判定）。
+		// 原实现的广度帧就是当日的评分帧（portfolio_rotation_logic.py:1749），
+		// 不含这类行。
 		heldCodes := make([]string, 0, len(held))
-		heldByCode := map[string]score.Row{}
 		for _, row := range held {
 			heldCodes = append(heldCodes, row.Code)
-			heldByCode[row.Code] = row
-			if _, ok := rowsByCode[row.Code]; !ok {
-				all = append(all, rowToStrength(row, ""))
-			}
 		}
+
+		// 低吸广度就绪数：**逐日**在当日评分行上数，口径与
+		// `Store.LowBuyBreadthReadyCount` 的 SQL 逐字一致。
+		// 原实现把它挂在每一行上（portfolio_rotation_logic.py:2044），
+		// 所以候选池过滤（dd20 档位）与建仓额度都要用它 ——
+		// **必须在建候选池之前写进 cfg**。
+		breadthReady := lowBuyBreadthReadyCountOf(day.Rows)
 
 		cfg := score.BuildStrategyConfig(
 			item.StrategyID, marketState,
-			item.TargetPositionCount, item.TotalLayers,
+			targetCount, item.TotalLayers,
 			maxLayersForBacktest(item.StrategyID, item.TotalLayers),
 			marketScopeKey(item),
 		)
+		cfg.LowBuyBreadthReadyCount = breadthReady
 		poolBegan := time.Now()
-		candidates, universeScores := s.buildCandidatePoolFrom(all, item, cfg, heldCodes)
+		candidates, universeScores := s.buildCandidatePoolFrom(nil, all, item, cfg, heldCodes)
 		poolElapsed := time.Since(poolBegan)
 		slog.Info("回测候选池完成",
 			"date", day.Date, "持仓", len(held),
 			"评分行", len(all), "候选池", len(candidates),
+			"低吸广度就绪", breadthReady,
 			"耗时", poolElapsed.Round(time.Millisecond))
 
 		planBegan := time.Now()
 		plan := score.BuildRotationPlan(score.RotationInput{
 			Holdings: held, Candidates: candidates, Config: cfg,
-			MarketState: marketState, MaxStockLimit: item.MaxStockCount,
+			MarketState: marketState,
+			// 与原实现 :2492 一致：max_stock_count = max(target_count, max_stock_count)
+			MaxStockLimit:  maxInt(maxStocks, targetCount),
 			UniverseScores: universeScores,
+			// 低吸的两道闸门 —— 缺了它们低吸回测必然零成交
+			LowBuyBreadthReadyCount: breadthReady,
+			LowBuyIndex:             indexGates[day.Date],
 		})
 		planElapsed := time.Since(planBegan)
 
@@ -474,12 +553,19 @@ func (s *PortfolioService) backtestPlanBuilder(
 				exec++
 			}
 		}
+		gate := indexGates[day.Date]
+		breadthOK := score.LowBuyBreadthEntryAllowed(breadthReady, cfg.LowBuyPositionMode)
+		indexOK := score.LowBuyIndexEntryAllowed(gate, breadthReady)
 		slog.Info("回测逐日诊断",
 			"date", day.Date, "state", marketState,
 			"评分行", len(day.Rows), "持仓", len(held),
 			"候选池", len(candidates), "广度可用", len(universeScores),
 			"entryAllowed", plan.EntryAllowed,
+			"低吸广度就绪", breadthReady, "低吸广度放行", breadthOK,
+			"低吸指数就绪", gate.Ready, "低吸指数放行", indexOK,
+			"指数收盘", gate.Close, "指数MA20", gate.Ma20, "指数MA60", gate.Ma60,
 			"计划动作", len(plan.Rows), "可买入", adds, "可执行", exec,
+			"无建议原因", plan.NoActionReasons,
 			"计划耗时", planElapsed.Round(time.Millisecond))
 
 		return plan
@@ -499,13 +585,39 @@ func (s *PortfolioService) backtestPlanBuilder(
 //
 // ⚠ 这里**不修改**闸门算法 —— 原版就是拿手里那份评分帧算的，
 // 改了才是偏离。只把"样本不够"这件事明确讲出来。
-func (s *PortfolioService) backtestScopeWarning(codes []string, trades int) string {
+func (s *PortfolioService) backtestScopeWarning(
+	codes []string, trades int, days []backtest.StrengthDay,
+) string {
+	// ---- ① 评分表"每天只覆盖一小段"的检测：各日行数差异悬殊 ----
+	//
+	// 判据是**每天的行数**，不是"有没有被删"。实测本机库的形态：
+	//   健康日 4517 行（覆盖 000/001/002/003/300/301/302/600/601/603/605/688/689/920）
+	//   异常日 1000 行，且**只有 000/001/002** —— 正是"代码序前 1000 只"
+	//
+	// 成因有两类，都真实存在（两处都已修，但**已落库的旧数据要重算才恢复**）：
+	//   ① 「回填股票数」填了非 0：旧版取的是代码序前 N 只 → 只覆盖深市主板
+	//   ② 增量刷新的落库曾是整分区替换 → 把当天其余行删掉
+	//
+	// 危害不是"少几只票"，而是**范围整体偏了**：低吸广度按"全市场
+	// close>MA60 且 MA20>MA60 的只数"统计，样本偏了就会恒判「广度不足 < 900」
+	// → 清仓 + 禁止开新仓 → **回测恒为 0 成交**。
+	thinWarning := ""
+	if minRows, maxRows, thinDays := strengthRowSpread(days); maxRows > 0 && thinDays > 0 {
+		thinWarning = fmt.Sprintf(
+			"评分表里有 %d 个交易日明显只覆盖了一部分股票（最少 %d 行，最多 %d 行）——"+
+				"常见成因是「回填股票数」填了非 0（旧版取的是**代码序前 N 只**，"+
+				"往往只覆盖到 000/001/002 这一段），或早期增量落库把当天其余行删掉了。"+
+				"广度类判定按**全市场**统计，样本偏了会恒判「广度不足」→ 清仓且不开新仓 → 回测零成交。"+
+				"请把「回填股票数」填 0（全市场）并对区间执行一次「全量重算区间」。",
+			thinDays, minRows, maxRows)
+	}
+
 	if s.stock == nil || len(codes) == 0 {
-		return ""
+		return thinWarning
 	}
 	universe, err := s.stock.GetStockUniverse(false)
 	if err != nil || universe == nil || len(universe.Stocks) == 0 {
-		return ""
+		return thinWarning
 	}
 	market := 0
 	for _, item := range universe.Stocks {
@@ -514,21 +626,60 @@ func (s *PortfolioService) backtestScopeWarning(codes []string, trades int) stri
 		}
 	}
 	if market == 0 || len(codes) >= market {
-		return ""
+		return thinWarning
 	}
 	ratio := float64(len(codes)) / float64(market)
 	// 覆盖到一半以上就不提示了（广度指标的偏差已不显著）
 	if ratio >= 0.5 {
-		return ""
+		return thinWarning
 	}
 	msg := fmt.Sprintf(
 		"回填只覆盖 %d / %d 只（%.0f%%）—— 广度闸门按**全市场**统计「评分≥70 的只数」，"+
 			"样本不足会让它一直判「广度不足」，从而删掉所有买入信号。",
 		len(codes), market, ratio*100)
 	if trades == 0 {
-		return msg + "本次回测一笔都没成交，很可能就是这个原因；请把「回填股票数」填 0（全市场）后重跑。"
+		msg += "本次回测一笔都没成交，很可能就是这个原因；请把「回填股票数」填 0（全市场）后重跑。"
+	} else {
+		msg += "本次虽有成交，但结果仍可能偏保守；建议用全市场回填后复核。"
 	}
-	return msg + "本次虽有成交，但结果仍可能偏保守；建议用全市场回填后复核。"
+	if thinWarning != "" {
+		return thinWarning + " " + msg
+	}
+	return msg
+}
+
+// strengthRowSpread 看各交易日的评分行数是否**参差不齐**。
+//
+// 返回 (最少行数, 最多行数, "明显偏少"的天数)。判据用最多行的 60%：
+// 正常的行数波动（新股上市、停牌）远小于增量写入造成的量级差异。
+func strengthRowSpread(days []backtest.StrengthDay) (int, int, int) {
+	if len(days) == 0 {
+		return 0, 0, 0
+	}
+	minRows, maxRows := -1, 0
+	for _, day := range days {
+		n := len(day.Rows)
+		if minRows < 0 || n < minRows {
+			minRows = n
+		}
+		if n > maxRows {
+			maxRows = n
+		}
+	}
+	if minRows < 0 || maxRows <= 0 {
+		return 0, 0, 0
+	}
+	floor := int(float64(maxRows) * 0.6)
+	thin := 0
+	for _, day := range days {
+		if len(day.Rows) < floor {
+			thin++
+		}
+	}
+	if thin == 0 {
+		return minRows, maxRows, 0
+	}
+	return minRows, maxRows, thin
 }
 
 // persistBacktest 把回测结果写进三张表。
@@ -542,7 +693,7 @@ func (s *PortfolioService) persistBacktest(
 	if len(result.Snapshots) > 0 {
 		finalValue = result.Snapshots[len(result.Snapshots)-1].TotalValue
 	}
-	summary := metricsToJSON(metrics)
+	summary := metricsToJSON(metrics, result.Trades)
 	run := portfolio.BacktestRun{
 		RunID: runID, PortfolioID: item.ID, PortfolioName: item.Name,
 		StrategyID: item.StrategyID, StrategyLabel: item.StrategyLabel,
@@ -651,14 +802,26 @@ func marketScopeKey(item portfolio.Portfolio) string {
 }
 
 // rowToStrength 把评分行转回 StrengthRow（候选池过滤要用它的字段）。
+//
+// ⚠ **必须逐字段镜像 `strengthToRow`（plan.go）**。它是它的逆变换，
+// 少抄一个字段就会在回测里静默改变行为 —— 这里曾经漏了两个：
+//
+//   - `Market`：漏了就是空串 → `MarketInScope("")` 恒 false →
+//     只要组合设了市场范围（界面默认就是「主板+创业板」），
+//     **候选池与广度帧全为空** → 回测零成交、净值一条直线。
+//   - `Amount`：低吸候选是**按成交额**排入场顺序的
+//     （`prioritizeLowBuy` 的 amount_entry / deep_amount / board_norm_amount），
+//     漏了就是全部 0 → 排序退化成"按代码"，与原版选出的票完全不同。
 func rowToStrength(row score.Row, industry string) portfolio.StrengthRow {
 	return portfolio.StrengthRow{
 		Code: row.Code, Name: row.Name, Industry: industry,
+		Market:     row.Market,
 		TotalScore: row.TotalScore, TrendScore: row.TrendScore,
 		StructureScore: row.StructureScore, RSScore: row.RSScore,
 		CapitalScore: row.CapitalScore, RepairScore: row.RepairScore,
 		Close: row.Close, High: row.High, Low: row.Low, Open: row.Open, PctChg: row.PctChg,
-		Ma5: row.Ma5, Ma20: row.Ma20, Ma30: row.Ma30,
+		Amount: row.Amount,
+		Ma5:    row.Ma5, Ma20: row.Ma20, Ma30: row.Ma30,
 		Ma60: row.Ma60, Ma120: row.Ma120, Ma250: row.Ma250,
 		RelativeStrength20D: row.RelativeStrength20D,
 		DrawdownFromHigh20:  row.DrawdownFromHigh20,
@@ -678,7 +841,19 @@ func rowToStrength(row score.Row, industry string) portfolio.StrengthRow {
 }
 
 // metricsToJSON 把指标序列化成 summary_json。
-func metricsToJSON(m backtest.Metrics) string {
+//
+// ⚠ 两处必须对齐，否则界面上永远是"—"或空：
+//  1. **相对基准的四项**（excess_return / beta / alpha / information_ratio）
+//     在 `CalculateMetrics` 里算了，但此前根本没写进来 —— 前端与库里都看不到。
+//  2. **scope_warning 用的是蛇形键**。`BacktestView.vue` 读的是
+//     `metrics["scope_warning"]`，而 Go 字段的 json tag 是 `scopeWarning`，
+//     两边都不匹配 → 那条"回填范围太小导致广度闸门误判"的提示**永远不显示**。
+//     这里显式写 `scope_warning`（同时保留驼峰，谁读都不落空）。
+//
+// 另外把原实现里有、而 `Metrics` 结构体没有的成本项也补上
+// （portfolio_service.py:1059-1068 写 total_commission / total_tax /
+// total_transaction_cost 与费率），便于对账手续费。
+func metricsToJSON(m backtest.Metrics, trades []backtest.Trade) string {
 	raw, err := json.Marshal(map[string]any{
 		"total_return": m.TotalReturn, "annual_return": m.AnnualReturn,
 		"max_drawdown": m.MaxDrawdown, "volatility": m.Volatility,
@@ -689,12 +864,77 @@ func metricsToJSON(m backtest.Metrics) string {
 		"avg_position_ratio": m.AvgPositionRatio, "trading_days": m.TradingDays,
 		"profit_days": m.ProfitDays, "loss_days": m.LossDays,
 		"avg_profit": m.AvgProfit, "avg_loss": m.AvgLoss,
+		"max_drawdown_duration": m.MaxDrawdownDuration,
+		"max_profit":            m.MaxProfit, "max_loss": m.MaxLoss,
+		// 相对基准（此前算了却没写进来）
+		"excess_return": m.ExcessReturn, "beta": m.Beta,
+		"alpha": m.Alpha, "information_ratio": m.InformationRatio,
 		"is_short_period": m.IsShortPeriod, "annual_return_warning": m.AnnualReturnWarning,
+		// 成本项（原实现 :1059-1068）
+		"total_commission":       totalCommission(trades),
+		"total_tax":              totalTax(trades),
+		"total_transaction_cost": round4(totalCommission(trades) + totalTax(trades)),
+		// 回填范围过小的提示 —— **蛇形键**，前端读的就是这个
+		"scope_warning": m.ScopeWarning,
+		"scopeWarning":  m.ScopeWarning,
 	})
 	if err != nil {
 		return "{}"
 	}
 	return string(raw)
+}
+
+// strengthPriceOverlap 数"既是评分日、又有日线价格"的交易日个数。
+//
+// 原实现（portfolio_service.py:1011-1018）在交集为空时直接抛
+// "回测区间内评分结果为空，无法执行无未来函数回测" ——
+// 这里先用它把"看起来成功、其实一条计划都产不出来"的情况挡掉。
+func strengthPriceOverlap(days []backtest.StrengthDay, bars []backtest.PriceBar) int {
+	if len(days) == 0 || len(bars) == 0 {
+		return 0
+	}
+	strengthDates := make(map[string]bool, len(days))
+	for _, day := range days {
+		strengthDates[day.Date] = true
+	}
+	priceDates := make(map[string]bool, len(bars))
+	for _, bar := range bars {
+		priceDates[bar.Date] = true
+	}
+	overlap := 0
+	for date := range strengthDates {
+		if priceDates[date] {
+			overlap++
+		}
+	}
+	return overlap
+}
+
+// distinctBarDates 数不同的价格交易日个数（只用于错误信息）。
+func distinctBarDates(bars []backtest.PriceBar) int {
+	seen := make(map[string]bool, len(bars))
+	for _, bar := range bars {
+		seen[bar.Date] = true
+	}
+	return len(seen)
+}
+
+// totalCommission / totalTax 汇总成交里的手续费与印花税
+// （原实现 portfolio_service.py:1059-1060）。
+func totalCommission(trades []backtest.Trade) float64 {
+	sum := 0.0
+	for _, trade := range trades {
+		sum += trade.Commission
+	}
+	return round4(sum)
+}
+
+func totalTax(trades []backtest.Trade) float64 {
+	sum := 0.0
+	for _, trade := range trades {
+		sum += trade.Tax
+	}
+	return round4(sum)
 }
 
 // parseJSONObject 解析一个 JSON 对象；失败返回 nil。

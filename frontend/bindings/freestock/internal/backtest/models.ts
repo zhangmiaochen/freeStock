@@ -30,6 +30,18 @@ export class Metrics {
     "avgLoss": number;
 
     /**
+     * MaxDrawdownDuration 是最长回撤持续天数（原实现 `max_drawdown_duration`）。
+     * 此前这里算了却丢掉，摘要里也就永远没有这个数。
+     */
+    "maxDrawdownDuration": number;
+
+    /**
+     * MaxProfit / MaxLoss 是单笔最大盈利 / 最大亏损百分比（原实现同名指标）。
+     */
+    "maxProfit": number;
+    "maxLoss": number;
+
+    /**
      * 短期回测警告（少于 60 个交易日时年化会被显著放大）
      * ---- 相对基准的指标（原实现 _calculate_relative_metrics）----
      * 
@@ -108,6 +120,15 @@ export class Metrics {
         }
         if (!("avgLoss" in $$source)) {
             this["avgLoss"] = 0;
+        }
+        if (!("maxDrawdownDuration" in $$source)) {
+            this["maxDrawdownDuration"] = 0;
+        }
+        if (!("maxProfit" in $$source)) {
+            this["maxProfit"] = 0;
+        }
+        if (!("maxLoss" in $$source)) {
+            this["maxLoss"] = 0;
         }
         if (!("excessReturn" in $$source)) {
             this["excessReturn"] = 0;

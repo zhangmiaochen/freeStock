@@ -203,7 +203,7 @@ func TestBackfillStageProfile(t *testing.T) {
 
 		// ⑩ 落库（先删后插，一天一个事务）
 		began = time.Now()
-		_ = svc.saveScoringResult(store, result, score.StrategyTrendGrowth)
+		_ = svc.saveScoringResult(store, result, score.StrategyTrendGrowth, false)
 		saveTotal += time.Since(began)
 
 		rows = append(rows, row)

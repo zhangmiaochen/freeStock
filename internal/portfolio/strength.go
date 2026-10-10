@@ -148,8 +148,13 @@ func (s *Store) StrengthCount(tradeDate int64, strategyID string) (int, error) {
 
 // SaveStrength 覆盖写入某日某策略的评分。
 //
-// 先删后插：一次刷新的结果应当**完整替换**该 (日期, 策略) 的旧数据，
+// **整分区替换**：先 `DELETE ... WHERE trade_date=? AND strategy_id=?` 再插入。
+// 一次刷新的结果应当**完整替换**该 (日期, 策略) 的旧数据，
 // 否则上一轮评上、这一轮数据不足被跳过的股票会残留成幽灵行。
+//
+// ⚠ **只能用于"这一批 rows 就是该日该策略的全集"的场合**。
+// 增量刷新/增量回填只拿到"这次新算的那部分代码"，把它们交给本函数
+// 会把该日**已经算好的其余行整片删掉** —— 见 `UpsertStrength`。
 //
 // **写入按批做**（`strengthInsertBatch` 行一条 INSERT）。语义完全不变：
 // 同一个事务、同一个表、**同一行顺序**，只是把"一行一次 Exec"换成
@@ -159,24 +164,52 @@ func (s *Store) StrengthCount(tradeDate int64, strategyID string) (int, error) {
 // 再走一次 VDBE，实测 **7600 行 = 108ms**（约 14µs/行、每行 28 次分配）——
 // 指标算完只要 69ms，落库反而成了回填单日最大的一块。
 func (s *Store) SaveStrength(tradeDate int64, strategyID string, rows []StrengthRow) error {
+	return s.writeStrength(tradeDate, strategyID, rows, true)
+}
+
+// UpsertStrength 按键写入某日某策略的评分：**只覆盖这一批代码**，
+// 该日其它代码的既有行**原样保留**。
+//
+// 主键是 `(trade_date, strategy_id, ts_code)`，所以 `INSERT OR REPLACE`
+// 就是"按 (日期, 策略, 代码) 替换" —— 与原实现一致
+// （`portfolio_store.py` 的 `_write_batches(..., key_columns=[...], replace=True)`
+// 是按 key 删，不是删整个分区）。
+//
+// ⚠ **增量刷新必须用它**。用 `SaveStrength` 会把当天已有的评分整片删掉：
+// 实测本机库就出现过这种损伤 —— 大部分交易日只剩 ~990 行
+// （正常应是 4400~7600 行），广度就绪数随之被系统性低估，
+// 低吸直接判"广度不足 < 900"把仓位清掉。
+func (s *Store) UpsertStrength(tradeDate int64, strategyID string, rows []StrengthRow) error {
+	return s.writeStrength(tradeDate, strategyID, rows, false)
+}
+
+// writeStrength 是两种写入的公共实现。
+//
+// replaceAll=true → 先清空 (日期, 策略) 分区（`SaveStrength` 的语义）
+// replaceAll=false → `INSERT OR REPLACE`，只按主键覆盖这一批（`UpsertStrength`）
+func (s *Store) writeStrength(
+	tradeDate int64, strategyID string, rows []StrengthRow, replaceAll bool,
+) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return fmt.Errorf("开启评分写入事务失败：%w", err)
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.Exec(
-		`DELETE FROM stock_strength WHERE trade_date=? AND strategy_id=?`,
-		tradeDate, strategyID,
-	); err != nil {
-		return fmt.Errorf("清理旧评分失败：%w", err)
+	if replaceAll {
+		if _, err := tx.Exec(
+			`DELETE FROM stock_strength WHERE trade_date=? AND strategy_id=?`,
+			tradeDate, strategyID,
+		); err != nil {
+			return fmt.Errorf("清理旧评分失败：%w", err)
+		}
 	}
 
 	now := nowText()
 	// 满批的语句只 Prepare 一次、反复执行；余数单独 Prepare 一次。
 	fullBatches := len(rows) / strengthInsertBatch
 	if fullBatches > 0 {
-		stmt, err := tx.Prepare(strengthInsertSQL(strengthInsertBatch))
+		stmt, err := tx.Prepare(strengthInsertSQL(strengthInsertBatch, !replaceAll))
 		if err != nil {
 			return fmt.Errorf("准备评分写入失败：%w", err)
 		}
@@ -195,7 +228,7 @@ func (s *Store) SaveStrength(tradeDate int64, strategyID string, rows []Strength
 	if rest := len(rows) % strengthInsertBatch; rest > 0 {
 		batch := rows[fullBatches*strengthInsertBatch:]
 		args := appendStrengthArgs(make([]any, 0, rest*strengthColumnCount), batch, tradeDate, strategyID, now)
-		if _, err := tx.Exec(strengthInsertSQL(rest), args...); err != nil {
+		if _, err := tx.Exec(strengthInsertSQL(rest, !replaceAll), args...); err != nil {
 			return fmt.Errorf("写入评分失败（%s 起 %d 行）：%w",
 				batch[0].Code, len(batch), err)
 		}
@@ -228,12 +261,19 @@ const strengthInsertColumns = `
 	industry_return_20d, benchmark_return_20d, created_at`
 
 // strengthInsertSQL 拼出写入 n 行的 INSERT 语句。
-func strengthInsertSQL(n int) string {
+//
+// orReplace=true 时用 `INSERT OR REPLACE` —— 按主键
+// （trade_date, strategy_id, ts_code）覆盖，只动这一批键（`UpsertStrength`）。
+func strengthInsertSQL(n int, orReplace bool) string {
 	if n < 1 {
 		n = 1
 	}
 	var b strings.Builder
-	b.WriteString("INSERT INTO stock_strength (")
+	if orReplace {
+		b.WriteString("INSERT OR REPLACE INTO stock_strength (")
+	} else {
+		b.WriteString("INSERT INTO stock_strength (")
+	}
 	b.WriteString(strengthInsertColumns)
 	b.WriteString(") VALUES ")
 	group := "(?" + strings.Repeat(",?", strengthColumnCount-1) + ")"
@@ -268,13 +308,51 @@ func appendStrengthArgs(
 	return args
 }
 
-// LatestStrengthDate 返回已物化的最新评分日（无数据返回 0）。
+// LatestStrengthDate 返回**某个策略**已物化的最新评分日（无数据返回 0）。
+//
+// ⚠ 原实现没有这个概念：`_get_latest_strength_trade_date`
+// （portfolio_service.py:2611-2612）查的是
+// `SELECT MAX(trade_date) FROM stock_strength_history` —— **不带 strategy_id**。
+//
+// 需要"原版那个最新评分日"的场合请用 `LatestStrengthDateAny`。
+// 本函数只在**确实要问某个策略自己算到哪天**时使用（例如界面按策略展示）。
 func (s *Store) LatestStrengthDate(strategyID string) (int64, error) {
 	var date sql.NullInt64
 	err := s.db.QueryRow(
 		`SELECT MAX(trade_date) FROM stock_strength WHERE strategy_id=?`,
 		strategyID,
 	).Scan(&date)
+	if err != nil {
+		return 0, fmt.Errorf("查询最新评分日失败：%w", err)
+	}
+	if !date.Valid {
+		return 0, nil
+	}
+	return date.Int64, nil
+}
+
+// LatestStrengthDateAny 返回**全表**最新评分日（不按策略过滤，无数据返回 0）。
+//
+// 这是原实现 `_get_latest_strength_trade_date`（portfolio_service.py:2611-2612）
+// 的 1:1 对应：
+//
+//	return _safe_str(self.store.scalar("SELECT MAX(trade_date) FROM stock_strength_history"))
+//
+// 原版在下面这些地方都用它，**先用全表最新日、再按策略去取那一帧**：
+//
+//	建/删持仓的日期回落（:513 / :571）
+//	自动建组合（:2281）
+//	调仓建议（`get_rotation_payload` :839、`apply_rotation` :862）
+//	持仓行的 holding_trade_days（`_merge_position_scores` :3207）
+//
+// ⚠ 与"取该策略自己的最新日"的差别在**两套评分不同步**时显现：
+// 策略 A 更到 20261009、策略 B 停在 20260601，原版会拿 20261009 去查 B 的帧
+// → **空帧** → 报"该策略没有最新评分"或把持仓全判成 0 分（原版的失败方式），
+// 而取 B 自己的最新日会**静默地用一份过期评分**出建议。
+// 正常路径下所有活跃策略是一起刷新的，两者相同。
+func (s *Store) LatestStrengthDateAny() (int64, error) {
+	var date sql.NullInt64
+	err := s.db.QueryRow(`SELECT MAX(trade_date) FROM stock_strength`).Scan(&date)
 	if err != nil {
 		return 0, fmt.Errorf("查询最新评分日失败：%w", err)
 	}

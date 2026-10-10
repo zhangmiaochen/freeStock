@@ -26,6 +26,9 @@ import * as score$0 from "../score/models.js";
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore: Unused imports
 import * as stockdb$0 from "../stockdb/models.js";
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore: Unused imports
+import * as time$0 from "../../../time/models.js";
 
 /**
  * AppliedChange 是一条实际改动。
@@ -3349,6 +3352,195 @@ export class ShareholderCountItem {
     static createFrom($$source: any = {}): ShareholderCountItem {
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         return new ShareholderCountItem($$parsedSource as Partial<ShareholderCountItem>);
+    }
+}
+
+/**
+ * SignalGenerateOptions 是信号生成的可选参数。
+ */
+export class SignalGenerateOptions {
+    /**
+     * Limit 限制处理的股票数（0 表示不限制）。按代码升序取样，便于复现。
+     */
+    "Limit": number;
+
+    /**
+     * LookbackDays 是量价特征需要的回溯天数。
+     * 
+     * 对应 `_load_stock_bars`：趋势回踩要 420 个自然日，其余 220 ——
+     * 因为 trend_pullback 的评估窗口是 120 根，且特征要 60 根预热。
+     */
+    "LookbackDays": number;
+
+    /**
+     * OnlyModelIDs 为空时跑全部模型。
+     */
+    "OnlyModelIDs": string[];
+
+    /**
+     * Progress 每处理完一批股票回调一次（可为 nil）。
+     */
+    "Progress": any;
+
+    /** Creates a new SignalGenerateOptions instance. */
+    constructor($$source: Partial<SignalGenerateOptions> = {}) {
+        if (!("Limit" in $$source)) {
+            this["Limit"] = 0;
+        }
+        if (!("LookbackDays" in $$source)) {
+            this["LookbackDays"] = 0;
+        }
+        if (!("OnlyModelIDs" in $$source)) {
+            this["OnlyModelIDs"] = [];
+        }
+        if (!("Progress" in $$source)) {
+            this["Progress"] = null;
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new SignalGenerateOptions instance from a string or object.
+     */
+    static createFrom($$source: any = {}): SignalGenerateOptions {
+        const $$createField2_0 = $$createType13;
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        if ("OnlyModelIDs" in $$parsedSource) {
+            $$parsedSource["OnlyModelIDs"] = $$createField2_0($$parsedSource["OnlyModelIDs"]);
+        }
+        return new SignalGenerateOptions($$parsedSource as Partial<SignalGenerateOptions>);
+    }
+}
+
+/**
+ * SignalGenerateResult 是生成结果。
+ */
+export class SignalGenerateResult {
+    "tradeDate": number;
+
+    /**
+     * Codes 是实际处理的股票数
+     */
+    "codes": number;
+
+    /**
+     * Rows 是写入的信号条数
+     */
+    "rows": number;
+
+    /**
+     * Skipped 是日线不足 35 根而跳过的股票数
+     */
+    "skipped": number;
+
+    /**
+     * PerModel 是按模型统计的信号条数
+     */
+    "perModel": { [_ in string]?: number };
+
+    /**
+     * MarketStateDays 是拿到的市场状态天数（0 表示没拿到缓存 —— 信号会显著偏少）
+     */
+    "marketStateDays": number;
+
+    /**
+     * Elapsed 是耗时
+     */
+    "elapsed": time$0.Duration;
+
+    /** Creates a new SignalGenerateResult instance. */
+    constructor($$source: Partial<SignalGenerateResult> = {}) {
+        if (!("tradeDate" in $$source)) {
+            this["tradeDate"] = 0;
+        }
+        if (!("codes" in $$source)) {
+            this["codes"] = 0;
+        }
+        if (!("rows" in $$source)) {
+            this["rows"] = 0;
+        }
+        if (!("skipped" in $$source)) {
+            this["skipped"] = 0;
+        }
+        if (!("perModel" in $$source)) {
+            this["perModel"] = {};
+        }
+        if (!("marketStateDays" in $$source)) {
+            this["marketStateDays"] = 0;
+        }
+        if (!("elapsed" in $$source)) {
+            this["elapsed"] = time$0.Duration.$zero;
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new SignalGenerateResult instance from a string or object.
+     */
+    static createFrom($$source: any = {}): SignalGenerateResult {
+        const $$createField4_0 = $$createType14;
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        if ("perModel" in $$parsedSource) {
+            $$parsedSource["perModel"] = $$createField4_0($$parsedSource["perModel"]);
+        }
+        return new SignalGenerateResult($$parsedSource as Partial<SignalGenerateResult>);
+    }
+}
+
+/**
+ * SignalSummary 是信号表的概览（界面状态栏用）。
+ */
+export class SignalSummary {
+    /**
+     * Total 是信号总条数
+     */
+    "total": number;
+
+    /**
+     * LatestDate 是表里最大的交易日（0 表示空表）
+     */
+    "latestDate": number;
+
+    /**
+     * Dates 是有信号的交易日数
+     */
+    "dates": number;
+
+    /**
+     * Generated 标记本机是否至少跑过一次生成。
+     * 
+     * ⚠ 这个字段要显示出来：`score.HasSignalSource` 已经打开，
+     * **表为空时熊市下的入场会被全部挡掉**（与原版一致）。用户需要知道
+     * "我不是没有候选，而是还没生成信号"。
+     */
+    "generated": boolean;
+
+    /** Creates a new SignalSummary instance. */
+    constructor($$source: Partial<SignalSummary> = {}) {
+        if (!("total" in $$source)) {
+            this["total"] = 0;
+        }
+        if (!("latestDate" in $$source)) {
+            this["latestDate"] = 0;
+        }
+        if (!("dates" in $$source)) {
+            this["dates"] = 0;
+        }
+        if (!("generated" in $$source)) {
+            this["generated"] = false;
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new SignalSummary instance from a string or object.
+     */
+    static createFrom($$source: any = {}): SignalSummary {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new SignalSummary($$parsedSource as Partial<SignalSummary>);
     }
 }
 

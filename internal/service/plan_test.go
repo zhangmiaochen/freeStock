@@ -48,9 +48,13 @@ func TestBuildPlanEndToEnd(t *testing.T) {
 	if refresh.Saved == 0 {
 		t.Fatal("应物化出评分")
 	}
-	// **持仓必须被评上**（哪怕不在股票列表前 300 只里）
-	if refresh.Saved < 300 {
-		t.Errorf("评分条数应 >= limit(300)，实际 %d", refresh.Saved)
+	// ⚠ **不要求恰好 limit 条**：`limit` 现在是**跨板块的等距抽样**
+	//（旧版取的是"代码序前 N 只"，只会命中 000/001/002），
+	// 抽样里可能落到历史不足的次新股，那种票被 `ScoreStocks` **合法跳过**。
+	// 要钉住的是"抽样整体成功"；更要紧的是紧接着那条 ——
+	// **持仓必须被评上**，哪怕它不在抽样集合里。
+	if refresh.Saved*10 < 300*9 {
+		t.Errorf("评分条数应接近 limit(300)（至少 90%%），实际 %d", refresh.Saved)
 	}
 	t.Logf("评分：日 %d，物化 %d 条，市场状态 %s（%s）bull=%.1f bear=%.1f",
 		refresh.TradeDate, refresh.Saved, refresh.MarketState.State,

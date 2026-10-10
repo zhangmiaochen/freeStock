@@ -118,27 +118,39 @@ func (s *PortfolioService) CreateAutoPortfolio(req AutoPortfolioRequest) (*AutoP
 	}
 	ctx.item = created
 
-	// 初始持仓：source_type / last_action 都是 auto_compose、strategy_tag 是策略 ID
+	// 初始持仓落库。
+	//
+	// ⚠ **不能走 `store.AddPosition`**（手动新增那条路）：它把层数 clamp 到 [1,2]，
+	// 而原实现里自动组合是**直接写 `portfolio_position`**（portfolio_service.py:405-442），
+	// 层数只有 `max(1, target_layers)`、**没有上限**，权重也用未截断的层数算。
+	//
+	// 走 AddPosition 的后果是：低吸的 3/5 层被砍成 2 层，但权重仍按 5 层算
+	// → 落库成 `position_layers=2 / position_weight=50%`，层数与权重自相矛盾，
+	// 界面上的仓位占比与实际层数对不上。
+	//
+	// 同时原实现的流水是 `reason="自动组合生成"`、
+	// `source_signal_id="{pid}:{trade_date}:auto_compose"`，
+	// 走 AddPosition 会写成"手动新增持仓"/"manual"。
 	entryDate := fmt.Sprintf("%d", ctx.tradeDate)
-	written := 0
-	// 直接走 store 层：service 层的 AddPosition 有额度限制（防止误建几十个仓），
-	// 而自动组合本来就是**一次性建一批** —— 那是设计目标，不是误操作。
+	signalID := fmt.Sprintf("%s:%d:auto_compose", created.ID, ctx.tradeDate)
+	inputs := make([]portfolio.AutoComposePosition, 0, len(ctx.selected))
 	for _, row := range ctx.selected {
-		layers := atLeastOne(row.PositionLayers)
-		_, err := store.AddPosition(created.ID, portfolio.PositionInput{
-			Code: row.Code, Name: row.Name,
-			EntryPrice: row.Close, EntryDate: entryDate,
-			Layers:      intPtr(layers),
-			Weight:      floatPtr(portfolio.WeightFromLayers(layers, created.TotalLayers)),
-			StrategyTag: created.StrategyID,
-			SourceType:  "auto_compose",
-			LastAction:  "auto_compose",
-		})
-		if err != nil {
-			slog.Warn("自动组合写入持仓失败", "code", row.Code, "err", err)
+		if row.Code == "" || row.Close <= 0 {
+			// 与原实现一致：跳过无效行，由"一只都没写进去"兜底报错
 			continue
 		}
-		written++
+		inputs = append(inputs, portfolio.AutoComposePosition{
+			Code: row.Code, Name: row.Name,
+			EntryPrice: row.Close, EntryDate: entryDate,
+			Layers:         atLeastOne(row.PositionLayers),
+			Weight:         row.PositionWeight,
+			StrategyTag:    created.StrategyID,
+			SourceSignalID: signalID,
+		})
+	}
+	written, err := store.AddAutoComposePositions(created.ID, inputs)
+	if err != nil {
+		return nil, err
 	}
 	if written == 0 {
 		return nil, fmt.Errorf("自动组合没有可落库的候选持仓")
@@ -162,7 +174,12 @@ func (s *PortfolioService) buildAutoCompose(req AutoPortfolioRequest) (*autoComp
 	}
 	strategyID := portfolio.NormalizeStrategy(req.StrategyID, "")
 
-	strengthDate, err := store.LatestStrengthDate(strategyID)
+	// ⚠ **全表**最新评分日，再按策略取帧 —— 原实现
+	// `_build_auto_compose_context`（portfolio_service.py:2281/2296）：
+	//   latest_trade_date = self._get_latest_strength_trade_date()   # MAX(trade_date) 不带策略
+	//   raw_scores = self._latest_strength_frame(latest_trade_date, strategy_id)
+	//   if raw_scores.empty: raise "...策略没有最新评分，请先刷新组合评分"
+	strengthDate, err := store.LatestStrengthDateAny()
 	if err != nil || strengthDate <= 0 {
 		return nil, fmt.Errorf("暂无最新评分数据，请先执行组合刷新")
 	}
@@ -197,23 +214,49 @@ func (s *PortfolioService) buildAutoCompose(req AutoPortfolioRequest) (*autoComp
 	if len(all) == 0 {
 		return nil, fmt.Errorf("%s策略没有最新评分，请先刷新组合评分", strategyLabelOf(strategyID))
 	}
+	// 范围过滤后一只都不剩时，原实现给的是这条更明确的错误
+	//（portfolio_service.py:2304-2305 `if score_frame.empty`）——
+	// 否则会一路走到"没有通过质量过滤的候选"，把**范围空**误报成**质量不过**。
+	scopeMatcher := s.scopeMatcher()
+	inScope := 0
+	for _, row := range all {
+		if inPortfolioScope(row, item, scopeMatcher) {
+			inScope++
+		}
+	}
+	if inScope == 0 {
+		return nil, fmt.Errorf("当前范围内没有可用于自动组合的评分股票")
+	}
 
 	marketState, _ := store.LoadMarketState(strengthDate)
 	state := marketState.State
 	if state == "" {
 		state = score.StateRange
 	}
+	// 低吸的广度就绪数必须在**建候选池之前**算好并写进 cfg ——
+	// 候选池的低吸质量过滤（dd20 档位）与随后的建仓额度都依赖它。
+	breadthReady, err := store.LowBuyBreadthReadyCount(strengthDate, strategyID)
+	if err != nil {
+		return nil, err
+	}
 	cfg := score.BuildStrategyConfig(
 		strategyID, state, item.TargetPositionCount, item.TotalLayers,
 		maxLayersForBacktest(strategyID, item.TotalLayers), marketScopeKey(item),
 	)
+	cfg.LowBuyBreadthReadyCount = breadthReady
 
 	// 用**空持仓**跑一次正常计划 —— 计划里的 add 行就是首批建仓
-	candidates, universeScores := s.buildCandidatePoolFrom(all, item, cfg, nil)
+	candidates, universeScores := s.buildCandidatePoolFrom(store, all, item, cfg, nil)
 	plan := score.BuildRotationPlan(score.RotationInput{
 		Holdings: nil, Candidates: candidates, Config: cfg,
 		MarketState: state, MaxStockLimit: item.MaxStockCount,
 		UniverseScores: universeScores,
+		// ⚠ 低吸的两道闸门**必须**传：不传时 `LowBuyBreadthReadyCount=0` 会让
+		// `LowBuyDynamicTargetCount(0,…)=0`、广度/指数闸门双双不过 →
+		// `canAddNewPosition=false` → 一条 add 都产不出来，
+		// 自动组合必然报"当前策略和范围没有通过质量过滤的自动组合候选"。
+		LowBuyBreadthReadyCount: breadthReady,
+		LowBuyIndex:             s.loadLowBuyIndexGate(int(strengthDate)),
 	})
 
 	// 取 add / replace_in 且目标层数 > 0 的行
@@ -258,6 +301,13 @@ func (s *PortfolioService) buildAutoCompose(req AutoPortfolioRequest) (*autoComp
 		}
 		layers := atLeastOne(row.TargetLayers)
 		pool.PositionLayers = layers
+		// 权重在**选出持仓的这一刻**就算好，随预览返回、也随落库写下去。
+		//
+		// 原实现 portfolio_service.py:2371：
+		//   "position_weight": _weight_from_layers(layers, total_layers)
+		// 且落库时**原样使用**这个值（:414），不重算 ——
+		// 所以层数与权重永远自洽。
+		pool.PositionWeight = portfolio.WeightFromLayers(layers, item.TotalLayers)
 		pool.EntryPrice = pool.Close
 		pool.CurrentPrice = pool.Close
 		selected = append(selected, pool)
@@ -320,11 +370,9 @@ func atLeastOne(v int) int {
 	return v
 }
 
-// intPtr / floatPtr 造指针（`PortfolioInput` / `PositionInput` 用指针
+// intPtr / scopePtr 造指针（`PortfolioInput` / `PositionInput` 用指针
 // 区分"未提供"与"显式传 0"）。
 func intPtr(v int) *int { return &v }
 
 // scopePtr 让"显式提供了范围"在指针类型下可表达（区分"没传"与"传空"）。
 func scopePtr(v portfolio.ScopeValue) *portfolio.ScopeValue { return &v }
-
-func floatPtr(v float64) *float64 { return &v }

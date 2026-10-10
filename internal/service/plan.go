@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"math"
 	"sort"
+	"strconv"
 	"strings"
 
 	"freestock/internal/portfolio"
@@ -77,6 +78,9 @@ func (s *PortfolioService) RefreshStrength(strategyID string, limit int, force b
 	}
 
 	reused := 0
+	// incremental 表示 `codes` 被裁成了"这次没算过的那部分"。
+	// 它决定落库用**按主键覆盖**还是**整分区替换** —— 见 saveScoringResult。
+	incremental := false
 	if !force && tradeDate > 0 {
 		existing, err := store.StrengthCodes(int64(tradeDate), strategyID)
 		if err != nil {
@@ -92,6 +96,7 @@ func (s *PortfolioService) RefreshStrength(strategyID string, limit int, force b
 				missing = append(missing, code)
 			}
 			codes = missing
+			incremental = true
 		}
 	}
 
@@ -121,13 +126,13 @@ func (s *PortfolioService) RefreshStrength(strategyID string, limit int, force b
 	}
 
 	// 行业与市场从板块归属补，然后落库（回填复用同一段）
-	if err := s.saveScoringResult(store, result, strategyID); err != nil {
+	if err := s.saveScoringResult(store, result, strategyID, incremental); err != nil {
 		return nil, err
 	}
 	total, _ := store.StrengthCount(int64(result.TradeDate), strategyID)
 	slog.Info("评分完成",
 		"tradeDate", result.TradeDate, "新增", len(result.Rows),
-		"复用已有", reused, "含持仓", heldCount)
+		"复用已有", reused, "含持仓", heldCount, "增量落库", incremental)
 	return &RefreshResult{
 		TradeDate: result.TradeDate, Saved: len(result.Rows), Skipped: result.Skipped,
 		Reused: reused, Total: total,
@@ -139,8 +144,19 @@ func (s *PortfolioService) RefreshStrength(strategyID string, limit int, force b
 // saveScoringResult 把一次评分结果落库（评分表 + 市场状态）。
 //
 // 抽出来是因为**历史回填**要复用同一段 —— 之前它内联在 RefreshStrength 里。
+//
+// incremental 标记"这次落库的 rows 只是该日该策略的**一部分代码**"：
+//
+//	true  → `UpsertStrength`（按主键覆盖这一批，当天其余行保留）
+//	false → `SaveStrength`（整分区替换，rows 就是全集）
+//
+// ⚠ 这个参数**必须传对**。增量刷新只拿到"这次新算的代码"，
+// 交给整分区替换会把当天已经算好的其余行**整片删掉** —— 那不是"少算几只"，
+// 而是**数据丢失**：本机库就是这么坏掉的（多数交易日只剩 ~990 行，
+// 正常 4400~7600 行），随后低吸广度就绪数被系统性低估、
+// 回测/建议都判"广度不足"。
 func (s *PortfolioService) saveScoringResult(
-	store *portfolio.Store, result *ScoringResult, strategyID string,
+	store *portfolio.Store, result *ScoringResult, strategyID string, incremental bool,
 ) error {
 	rows := make([]portfolio.StrengthRow, 0, len(result.Rows))
 
@@ -222,7 +238,11 @@ func (s *PortfolioService) saveScoringResult(
 		})
 	}
 
-	if err := store.SaveStrength(int64(result.TradeDate), strategyID, rows); err != nil {
+	if incremental {
+		if err := store.UpsertStrength(int64(result.TradeDate), strategyID, rows); err != nil {
+			return err
+		}
+	} else if err := store.SaveStrength(int64(result.TradeDate), strategyID, rows); err != nil {
 		return err
 	}
 	// 市场状态跟着评分一起存
@@ -244,11 +264,31 @@ func (s *PortfolioService) saveScoringResult(
 	return nil
 }
 
-// scoringUniverse 决定这次要评哪些股票：股票列表前 limit 只 + 所有持仓代码。
+// scoringUniverse 决定这次要评哪些股票：股票列表里抽样的 limit 只 + 所有持仓代码。
 //
 // 持仓必须无条件纳入 —— 候选池是从评分表里选的，如果持仓不在表里，
 // 参考实现"左连接落空 → 现价记 0"就会让所有持仓评分变 0，
 // 轮动建议直接失去意义。
+//
+// ⚠ **limit 是"等距抽样"，不是"取前 limit 只"。**
+//
+// `GetStockUniverse` 返回的列表是**按代码升序**的（stock.go 里
+// `sort.Slice(targets, code <)`）。直接取前 limit 只等于**只评代码最小的那一段**：
+// limit=1000 时命中的全是 000/001/002（深市主板），
+// **创业板（300/301）、科创板（688/689）、沪市主板（600/603）、北交所（920）一只都不评**。
+//
+// 实测本机库就是这个后果：用 1000 回填出来的交易日只有 1000 行，
+// 代码前缀分布 `000:412 / 001:115 / 002:473`；而全市场日有 4517 行，
+// 覆盖 000/001/002/003/300/301/302/600/601/603/605/688/689/920。
+//
+// 危害不是"少评几千只"，而是**范围整体偏了**：
+//   - 组合设了「主板+创业板」时，创业板候选恒为空
+//   - 低吸广度就绪数（close>MA60 且 MA20>MA60 的只数）被系统性低估 →
+//     恒低于 900 的清仓线 → 清仓 + 禁止开新仓 → **回测恒为 0 成交**
+//   - 非低吸的广度闸门同样失真
+//
+// 生产路径应当传 **0（全市场）**；传非 0 时也要是**跨板块的代表性样本**，
+// 所以这里改成等距抽样。
 func (s *PortfolioService) scoringUniverse(store *portfolio.Store, limit int) ([]string, int, error) {
 	seen := map[string]bool{}
 	codes := make([]string, 0, 1024)
@@ -261,19 +301,19 @@ func (s *PortfolioService) scoringUniverse(store *portfolio.Store, limit int) ([
 		codes = append(codes, code)
 	}
 
-	// 1) 股票列表前 limit 只
+	// 1) 从"有行情"的股票里抽样 limit 只（limit<=0 = 全市场）
 	universe, err := s.stock.GetStockUniverse(false)
 	if err != nil {
 		return nil, 0, err
 	}
+	eligible := make([]string, 0, len(universe.Stocks))
 	for _, item := range universe.Stocks {
-		if !item.HasQuote {
-			continue
+		if item.HasQuote {
+			eligible = append(eligible, item.Code)
 		}
-		if limit > 0 && len(codes) >= limit {
-			break
-		}
-		add(item.Code)
+	}
+	for _, code := range sampleUniverse(eligible, limit) {
+		add(code)
 	}
 	universeCount := len(codes)
 
@@ -296,6 +336,35 @@ func (s *PortfolioService) scoringUniverse(store *portfolio.Store, limit int) ([
 	slog.Info("本次评分范围",
 		"universeTop", universeCount, "heldAdded", heldCount, "total", len(codes))
 	return codes, heldCount, nil
+}
+
+// sampleUniverse 从**按代码升序**的全市场列表里取出 limit 只。
+//
+//	limit <= 0 或 >= len(eligible) → 全量返回
+//	否则 → **等距抽样**：把有序列表均分 limit 段，每段取起点
+//
+// 为什么不能"取前 limit 只"：列表是按代码升序的，前 1000 只全是
+// 000/001/002（深市主板）—— 创业板 300/301、科创板 688、沪市主板 600/603、
+// 北交所 920 **一只都不在里面**。于是：
+//   - 组合设「主板+创业板」时候选恒为空
+//   - 低吸广度（全市场 close>MA60 且 MA20>MA60 的只数）被系统性低估
+//     → 恒判「广度不足 < 900」→ 清仓 + 不许开新仓 → **回测恒为 0 成交**
+//
+// 等距抽样保持"评 N 只"的语义，同时让板块分布与全市场一致。
+func sampleUniverse(eligible []string, limit int) []string {
+	if limit <= 0 || limit >= len(eligible) {
+		return eligible
+	}
+	out := make([]string, 0, limit)
+	stride := float64(len(eligible)) / float64(limit)
+	for i := 0; i < limit; i++ {
+		idx := int(float64(i) * stride)
+		if idx >= len(eligible) {
+			break
+		}
+		out = append(out, eligible[idx])
+	}
+	return out
 }
 
 // PlanResult 是一次调仓建议。
@@ -333,7 +402,11 @@ func (s *PortfolioService) BuildPlan(portfolioID string) (*PlanResult, error) {
 	}
 
 	strategyID := item.StrategyID
-	strengthDate, err := store.LatestStrengthDate(strategyID)
+	// ⚠ **全表**最新评分日，不是该策略自己的 —— 原实现
+	// `get_rotation_payload`（portfolio_service.py:839）与 `apply_rotation`（:862）
+	// 都是先 `_get_latest_strength_trade_date()`（`MAX(trade_date)` 不带 strategy_id），
+	// 再按策略去取那一帧（`_latest_strength_frame(latest_trade_date, strategy_id)`）。
+	strengthDate, err := store.LatestStrengthDateAny()
 	if err != nil {
 		return nil, err
 	}
@@ -423,6 +496,24 @@ func (s *PortfolioService) BuildPlan(portfolioID string) (*PlanResult, error) {
 			"有 %d 只持仓在评分表里没有记录（停牌/数据不足），它们的评分按 0 计", missing))
 	}
 
+	// ---- 低吸广度就绪数 ----
+	//
+	// ⚠ **必须在建候选池之前算出来并写进 cfg**。
+	//
+	// 它同时驱动两件事，而且两处都发生在候选池里：
+	//   - 候选池的低吸质量过滤 `isLowBuyCandidate` 用 dd20 档位（>=1200 紧档 -18~-1.5）
+	//   - 计划里的动态目标只数 / 每只层数 / 强制清仓阈值（< 900）
+	//
+	// 原实现把这些值挂在**每一行**上（`strength_df["low_buy_breadth_ready_count"]`，
+	// portfolio_rotation_logic.py:2044），所以候选池过滤时行里已经有正确值。
+	// 此前 Go 把它写在 `buildCandidatePool` **之后** —— 候选池那一遍
+	// 是按"广度 0"的宽档 dd20 过滤的，与原实现不是同一个集合。
+	breadthReady, err := store.LowBuyBreadthReadyCount(strengthDate, strategyID)
+	if err != nil {
+		return nil, err
+	}
+	cfg.LowBuyBreadthReadyCount = breadthReady
+
 	// ---- 候选池 ----
 	candidates, universeScores, err := s.buildCandidatePool(store, item, cfg, marketState, strengthDate, holdingCodes)
 	if err != nil {
@@ -430,14 +521,6 @@ func (s *PortfolioService) BuildPlan(portfolioID string) (*PlanResult, error) {
 	}
 
 	// ---- 跑轮动 ----
-	// 低吸广度就绪数必须**真算出来**：传 0 会让低吸组合的每只持仓都被判
-	// "广度不足 < 900" 而强制清仓（原实现从评分帧里取，这里从物化表数）
-	breadthReady, err := store.LowBuyBreadthReadyCount(strengthDate, strategyID)
-	if err != nil {
-		return nil, err
-	}
-	// 低吸候选的 dd20 档位依赖它（>=1200 用紧档 -18~-1.5）
-	cfg.LowBuyBreadthReadyCount = breadthReady
 	// 指数闸门与广度并列，共同决定低吸能否开新仓
 	lowBuyIndex := s.loadLowBuyIndexGate(int(strengthDate))
 	plan := score.BuildRotationPlan(score.RotationInput{
@@ -549,7 +632,7 @@ func (s *PortfolioService) buildCandidatePool(
 	if err != nil {
 		return nil, nil, err
 	}
-	rows, scores := s.buildCandidatePoolFrom(all, item, cfg, holdingCodes)
+	rows, scores := s.buildCandidatePoolFrom(store, all, item, cfg, holdingCodes)
 	return rows, scores, nil
 }
 
@@ -557,7 +640,13 @@ func (s *PortfolioService) buildCandidatePool(
 //
 // 抽出来是因为**回测要逐日复用同一段逻辑** —— 它不能每天去查一次库
 // （回测要把整个区间的评分一次性读出来）。
+// `stored` 用来读 `signal_history`：原实现在范围过滤之后、广度统计之前做了
+// `_attach_signal_candidates`（portfolio_service.py:2469），所以这里也必须
+// **先贴信号、再统计 universeScores** —— attach 可能丢弃不在交易日历里的行，
+// 顺序颠倒会让广度闸门用的集合与 Python 不同。
+// 传 nil 表示不贴信号（回测路径逐日查库代价太高，它自己的贴信号在别处）。
 func (s *PortfolioService) buildCandidatePoolFrom(
+	stored *portfolio.Store,
 	all []portfolio.StrengthRow,
 	item portfolio.Portfolio,
 	cfg score.StrategyConfig,
@@ -576,11 +665,6 @@ func (s *PortfolioService) buildCandidatePoolFrom(
 	for _, code := range scope.Codes {
 		scopeCodes[code] = true
 	}
-	markets := map[string]bool{}
-	for _, market := range scope.Markets {
-		markets[market] = true
-	}
-
 	// ---- ① 范围 + 市场过滤 ----
 	//
 	// ⚠ 这一步的集合就是**广度闸门用的帧**（原实现 portfolio_service.py:2469
@@ -592,7 +676,6 @@ func (s *PortfolioService) buildCandidatePoolFrom(
 	// 窄范围组合（自定义 20 只、行业范围）在原版里 `universe < 100` → 闸门**不启用**，
 	// 在 Go 里却按全市场数千只启用，行为正好相反。
 	scoped := make([]portfolio.StrengthRow, 0, len(all))
-	universeScores := make([]float64, 0, len(all))
 	for _, strength := range all {
 		// 范围过滤（行业/概念走数据湖成员表，与持仓侧同一口径）
 		switch item.ScopeType {
@@ -610,28 +693,48 @@ func (s *PortfolioService) buildCandidatePoolFrom(
 			}
 		}
 		// 市场过滤
-		if len(markets) > 0 && !markets[strength.Market] {
+		//
+		// ⚠ **必须走 `score.MarketInScope`**：`strength.Market` 存的是本项目
+		// `market.KeyOf` 的 key（sh-main / sz-main / chinext / star / bse / ...），
+		// 而组合范围的 `markets` 是原实现词汇（main / gem / star）。
+		// 直接 `!markets[strength.Market]` 会把**每一行**都判成范围外
+		// → 候选池恒为空 → 回测零成交、自动组合报"没有通过质量过滤的候选"。
+		if !score.MarketInScope(strength.Market, scope.Markets) {
 			continue
 		}
 		scoped = append(scoped, strength)
-		universeScores = append(universeScores, strength.TotalScore)
+	}
+
+	// ---- ①.5 信号 attach（原实现 :2469，在广度统计之前）----
+	scopedRows := make([]score.Row, 0, len(scoped))
+	scopedDates := make([]int64, 0, len(scoped))
+	for _, strength := range scoped {
+		scopedRows = append(scopedRows, strengthToRow(strength))
+		scopedDates = append(scopedDates, strength.TradeDate)
+	}
+	scopedRows = s.attachSignalsToRows(stored, scopedRows, scopedDates)
+
+	// 广度闸门用的是**贴完信号之后**的帧（见函数注释）
+	universeScores := make([]float64, 0, len(scopedRows))
+	for _, row := range scopedRows {
+		universeScores = append(universeScores, row.TotalScore)
 	}
 
 	// ---- ② 候选池过滤（剔 ST、剔已持仓、分数下限）----
-	out := make([]score.Row, 0, len(scoped))
-	for _, strength := range scoped {
-		if held[strength.Code] {
+	out := make([]score.Row, 0, len(scopedRows))
+	for _, row := range scopedRows {
+		if held[row.Code] {
 			continue
 		}
 		// 剔除 ST（参考实现按名称含 "ST" 判断）
-		if strings.Contains(strings.ToUpper(strength.Name), "ST") {
+		if strings.Contains(strings.ToUpper(row.Name), "ST") {
 			continue
 		}
 		// 分数下限
-		if strength.TotalScore < cfg.CandidateScoreFloor {
+		if row.TotalScore < cfg.CandidateScoreFloor {
 			continue
 		}
-		out = append(out, strengthToRow(strength))
+		out = append(out, row)
 	}
 
 	// 入场优先级重排（原实现 :1646-1698）——
@@ -709,44 +812,60 @@ func inPortfolioScope(strength portfolio.StrengthRow, item portfolio.Portfolio, 
 	}
 
 	// 市场范围：空 = 全部市场
-	if len(scope.Markets) > 0 {
-		found := false
-		for _, market := range scope.Markets {
-			if market == strength.Market {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return false
-		}
-	}
-	return true
+	//
+	// ⚠ 同样必须经 `score.MarketInScope` 映射（理由见 `buildCandidatePoolFrom`）。
+	// 这里判错的话，范围**内**的持仓会被当成"左连接落空"→ 评分/现价记 0
+	// → 实盘建议会把所有持仓判成弱持仓清仓/换出。
+	return score.MarketInScope(strength.Market, scope.Markets)
 }
 
 // matchScopeItem 判定股票是否命中范围里的**任意一个**行业/概念名。
 //
-// 成员表可用时用多值匹配；不可用时退回单值 `strength.Industry`。
+// ⚠ **行业与概念的口径不一样**，必须分开实现 —— 这是原实现
+// `_scope_filter`（portfolio_service.py:3284-3324）里两段不同的代码：
+//
+//	# 行业：单值行业名 OR 成员表命中 —— 是**并集**
+//	filtered = out[out["industry"].isin(board_names)
+//	               | out["ts_code"].str.upper().isin(board_codes_by_stock)]
+//
+//	# 概念：**只看成员表**；成员表为空 → 空帧
+//	if board_df.empty:
+//	    filtered = out.iloc[0:0].copy()
+//	else:
+//	    filtered = out[out["ts_code"].str.upper().isin(allowed)]
+//
+// 此前 Go 把两者混成一个函数，且 `useMembers` 为真时**丢掉了单值那一支**
+// （`continue` 跳过了 `strength.Industry == want`）→ 行业范围少选一批票；
+// 概念在成员表不可用时又**退回按行业名单值匹配** → 概念范围多选一批票。
+//
+// items 为空 → 返回 false（匹配不到任何票），与原实现的空集一致。
+//
+// 已知未实现：原实现还允许用**板块代码**（`board_code`）匹配 items，
+// 而本项目的 `ScopeMatcher` 只按名称建索引。界面的范围选择器传的是板块名，
+// 所以这条路径实际不可达；若以后要支持，需要给成员表补一份 code 索引。
 func matchScopeItem(items []string, strength portfolio.StrengthRow, matcher *ScopeMatcher, industry bool) bool {
 	if len(items) == 0 {
-		return true
+		return false
 	}
-	useMembers := matcher.Ready()
-	for _, want := range items {
-		if useMembers {
-			if industry {
-				if matcher.HasIndustry(strength.Code, want) {
-					return true
-				}
-				continue
-			}
-			if matcher.HasSector(strength.Code, want) {
+	if industry {
+		// 并集：单值行业名命中即可，不必依赖成员表
+		useMembers := matcher.HasIndustryData()
+		for _, want := range items {
+			if strength.Industry == want {
 				return true
 			}
-			continue
+			if useMembers && matcher.HasIndustry(strength.Code, want) {
+				return true
+			}
 		}
-		// 退回单值：与旧行为一致
-		if strength.Industry == want {
+		return false
+	}
+	// 概念：成员表不可用 → **匹配不到任何票**（原实现返回空帧）
+	if !matcher.HasSectorData() {
+		return false
+	}
+	for _, want := range items {
+		if matcher.HasSector(strength.Code, want) {
 			return true
 		}
 	}
@@ -923,7 +1042,21 @@ func (s *StockService) lowBuyIndexGateFor(tradeDate int) score.LowBuyIndexGate {
 	if err != nil || len(benchCloses) == 0 {
 		return gate
 	}
+	return lowBuyIndexGateFrom(indexCloses, benchCloses, tradeDate)
+}
 
+// lowBuyIndexGateFrom 用**已经取好的**两条收盘序列算某一天的低吸指数闸门。
+//
+// 从 `lowBuyIndexGateFor` 里抽出来，是为了**回测能一次取数、逐日算闸门** ——
+// 否则 240 个交易日要打 480 次数据源（每年两次 2 年窗口的指数日线）。
+// 计算本身与单日版**逐字相同**，不会有口径差异。
+func lowBuyIndexGateFrom(
+	indexCloses, benchCloses map[int64]float64, tradeDate int,
+) score.LowBuyIndexGate {
+	gate := score.LowBuyIndexGate{Code: score.LowBuyIndexCode}
+	if tradeDate <= 0 || len(indexCloses) == 0 || len(benchCloses) == 0 {
+		return gate
+	}
 	indexSeries := sortedCloses(indexCloses, tradeDate)
 	benchSeries := sortedCloses(benchCloses, tradeDate)
 	if len(indexSeries) == 0 {
@@ -941,6 +1074,64 @@ func (s *StockService) lowBuyIndexGateFor(tradeDate int) score.LowBuyIndexGate {
 	// 收盘价与 20/60 日线都必须真的取到，否则不算 Ready
 	gate.Ready = gate.Close > 0 && gate.Ma20 > 0 && gate.Ma60 > 0
 	return gate
+}
+
+// lowBuyIndexGatesForRange 批量算多日的低吸指数闸门（回测用）。
+//
+// 取一次指数日线（窗口 = 最早一天往前推两年 起，到最晚一天），
+// 再对每一天调 `lowBuyIndexGateFrom`。取不到数据时返回空 map ——
+// 调用方据此拿到"未就绪"的零值闸门，也就是**关闸**（与原实现
+// "指数数据取不到 → index_entry_allowed=false" 一致）。
+//
+// 键是 YYYYMMDD 字符串（与回测的交易日表示一致）。
+func (s *StockService) lowBuyIndexGatesForRange(dates []string) map[string]score.LowBuyIndexGate {
+	out := map[string]score.LowBuyIndexGate{}
+	if s == nil || len(dates) == 0 {
+		return out
+	}
+	parsed := make([]int, 0, len(dates))
+	for _, date := range dates {
+		if value, err := strconv.Atoi(date); err == nil && value > 0 {
+			parsed = append(parsed, value)
+		}
+	}
+	if len(parsed) == 0 {
+		return out
+	}
+	sort.Ints(parsed)
+	first, last := parsed[0], parsed[len(parsed)-1]
+	start := (first/10000-2)*10000 + 101
+
+	indexCloses, err := s.loadBenchmark(score.LowBuyIndexCode, start, last)
+	if err != nil || len(indexCloses) == 0 {
+		return out
+	}
+	benchCloses, err := s.loadBenchmark(score.LowBuyIndexBenchmarkCode, start, last)
+	if err != nil || len(benchCloses) == 0 {
+		return out
+	}
+	for _, date := range parsed {
+		out[strconv.Itoa(date)] = lowBuyIndexGateFrom(indexCloses, benchCloses, date)
+	}
+	return out
+}
+
+// lowBuyBreadthReadyCountOf 从**当日评分行**数低吸广度就绪数。
+//
+// 与 `Store.LowBuyBreadthReadyCount` 的 SQL 口径**逐字一致**
+// （close>0 且 ma60>0 且 close>ma60 且 ma20>ma60）。抽成内存版是因为
+// 回测已经把整个区间的评分读进来了 —— 再按天回查一次库既慢又没必要。
+//
+// ⚠ 必须传**当日评分行**（`day.Rows`），不能混入"持仓但当天没评分"的行 ——
+// 那些行的价格/均线是 0，会被 SQL 口径直接排除，混进来只是白算。
+func lowBuyBreadthReadyCountOf(rows []score.Row) int {
+	count := 0
+	for _, row := range rows {
+		if row.Close > 0 && row.Ma60 > 0 && row.Close > row.Ma60 && row.Ma20 > row.Ma60 {
+			count++
+		}
+	}
+	return count
 }
 
 // sortedCloses 把 date→close 拍成"到 tradeDate 为止、按日期升序"的收盘序列。

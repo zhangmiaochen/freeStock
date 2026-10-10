@@ -212,13 +212,27 @@ func (e *Engine) executePlan(
 
 // heldRows 生成"当日持仓行"给计划构建器用：持仓代码取当日评分，
 // 再把成本/层数/最高价等持仓状态覆盖上去（原实现 `_build_held_rows` :192-232）。
+//
+// ⚠ **顺序必须稳定**（按代码升序）。`positions` 是 map，Go 的 map 迭代顺序
+// 每次运行都不同 —— 而计划构建器会**按传入顺序**给换股配对分配 `rank_no`
+// （score.buildReplacementPairs），引擎又按 `rank_no` 排序决定买入先后。
+// 现金不够时，"先买哪只"就会随运行变化，回测结果不可复现。
+//
+// 原实现 `for code, pos in positions.items()` 是 dict 插入序 = 建仓先后，
+// 同样是确定的；这里取代码升序，稳定且与原实现的"确定性"要求一致。
 func (e *Engine) heldRows(positions map[string]*Position, day StrengthDay) []score.Row {
 	if len(positions) == 0 {
 		return nil
 	}
 	byCode := e.scoreByDate[day.Date]
+	codes := make([]string, 0, len(positions))
+	for code := range positions {
+		codes = append(codes, code)
+	}
+	sort.Strings(codes)
 	out := make([]score.Row, 0, len(positions))
-	for code, pos := range positions {
+	for _, code := range codes {
+		pos := positions[code]
 		row, ok := byCode[code]
 		if !ok {
 			// 当日没有该股评分：仍要产出（否则会被当成"没建议"而漏掉），

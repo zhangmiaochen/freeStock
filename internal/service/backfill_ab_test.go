@@ -97,7 +97,7 @@ func TestBackfillAB(t *testing.T) {
 		rows += len(result.Rows)
 
 		began = time.Now()
-		if err := svc.saveScoringResult(store, result, score.StrategyTrendGrowth); err != nil {
+		if err := svc.saveScoringResult(store, result, score.StrategyTrendGrowth, false); err != nil {
 			t.Fatalf("%d 落库失败：%v", date, err)
 		}
 		saveTotal += time.Since(began)

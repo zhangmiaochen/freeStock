@@ -572,9 +572,13 @@ func LowBuyDynamicTargetCount(readyCount, targetPositionCount, maxStockCount int
 // （原实现 `market_breadth_status` 低吸分支的 `breadth_entry_allowed`，:1754-1758）。
 //
 // ⚠ 原实现的 `entry_allowed = breadth_entry_allowed AND index_entry_allowed`，
-// 其中 `index_entry_allowed` 依赖 `low_buy_index_*` 列（创业板指 close>ma20 且 close>ma60）。
-// 本项目 `stock_strength` 表**没有这些列**，所以这里只实现广度那一支。
-// 指数那一支属于"做不到"的部分，**不伪造一个恒真的判定**。
+// 这里**只实现广度那一支** —— 指数那一支由 `LowBuyIndexEntryAllowed`
+// （lowbuy_index.go）单独判定，两处都由调用方显式 AND 起来：
+//
+//	rotation.go `canAddNewPosition`（决定**是否开新仓**）
+//	no_action.go                 （决定"为什么没有建议"的文案）
+//
+// 本函数**不是**最终的入场判定，别单独拿它当闸门用。
 func LowBuyBreadthEntryAllowed(readyCount int, positionMode string) bool {
 	thresholds := lowBuyPositionThresholds(positionMode)
 	return readyCount >= thresholds[0][0]

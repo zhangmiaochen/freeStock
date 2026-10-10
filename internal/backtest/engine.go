@@ -342,6 +342,16 @@ func (e *Engine) sellPosition(
 		}
 		pos.Shares = remaining
 		pos.CurrentPrice = rawPrice
+		// ⚠ 部分卖出时**最高价也要跟着抬**。
+		//
+		// 原实现走的是 `pos.update_price(raw_price)`（portfolio_backtest_engine.py:302），
+		// 而 `Position.update_price`（backtest_engine.py:74-81）是
+		// `current_price = price; if price > highest_price: highest_price = price`。
+		// 只写 CurrentPrice 的话，partial reduce 之后喂给计划器的
+		// `highest_price` 会偏低 → 浮盈保护的 runup 算小 → 少减仓/少清仓。
+		if rawPrice > pos.HighestPrice {
+			pos.HighestPrice = rawPrice
+		}
 		pos.Layers = max1(currentLayers - min(currentLayers-1, soldLayers))
 	}
 	return cash

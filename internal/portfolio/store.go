@@ -800,6 +800,10 @@ func (s *Store) migrate() error {
 	if _, err := s.db.Exec(snapshotSchema); err != nil {
 		return fmt.Errorf("建留档表失败：%w", err)
 	}
+	// 量价信号表（见 signal.go）
+	if err := s.migrateSignal(); err != nil {
+		return err
+	}
 	return nil
 }
 

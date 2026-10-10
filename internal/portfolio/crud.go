@@ -586,14 +586,18 @@ func (s *Store) AddPosition(portfolioID string, in PositionInput) (Position, err
 	if entryDate == "" {
 		// 缺省用**最新评分日**，不是"今天"（原实现 :513/524
 		// `latest_trade_date = self._get_latest_strength_trade_date() or ... or
-		//  pro.get_latest_daily_trade_date()`，再 `entry_date = ... or latest_trade_date`）。
+		//  pro.get_latest_daily_trade_date()`，再 `entry_date = payload.entry_date or latest_trade_date`）。
+		//
+		// ⚠ 那个"最新评分日"是**全表 MAX**，不是该策略自己的 MAX
+		//（原实现 :2611-2612 的 SQL 不带 strategy_id）—— 见 `LatestStrengthDateAny`。
+		// 显式传了 entry_date 时仍以传入值为准，与原实现 :524 的顺序一致。
 		//
 		// 用今天的话，周末/节假日/盘前建仓会得一个非交易日 ——
 		// 持有交易日数与最高价窗口的起点都会偏。
-		if date, err := s.LatestStrengthDate(item.StrategyID); err == nil && date > 0 {
+		if date, err := s.LatestStrengthDateAny(); err == nil && date > 0 {
 			entryDate = fmt.Sprintf("%d", date)
 		} else {
-			// 该策略还没评分过：退到"今天"是最后的兜底
+			// 任何策略都还没评分：退到"今天"是最后的兜底
 			//（调用方 service 层会用股票列表的交易日覆盖，正常路径走不到这里）
 			entryDate = time.Now().Format("20060102")
 		}
@@ -646,6 +650,114 @@ func (s *Store) AddPosition(portfolioID string, in PositionInput) (Position, err
 	return position, nil
 }
 
+// ---------------------------------------------------------------------------
+// 自动组合的初始持仓
+// ---------------------------------------------------------------------------
+
+// AutoComposePosition 是自动建组合要落的**一只**初始持仓。
+//
+// ⚠ 它与 `PositionInput` 是**两条不同的写入路径**，对应原实现里两个不同的函数：
+//
+//	手动新增 → `add_position`（portfolio_service.py:503）
+//	           层数 `min(2, max(1, ...))`，权重按**截断后**的层数算
+//	自动组合 → `create_auto_portfolio`（:392）
+//	           **直接写 `portfolio_position` 表**，层数只有 `max(1, ...)`、
+//	           **没有上限**，权重用**未截断**的层数算
+//
+// 所以自动组合**不能**复用 `AddPosition`：它的 `[1,2]` clamp 会把低吸的
+// 3/5 层砍成 2 层，而权重仍按原层数算 —— 层数与权重自相矛盾
+// （磁盘上 `position_layers=2` 却 `position_weight=50%`）。
+type AutoComposePosition struct {
+	Code       string
+	Name       string
+	EntryPrice float64
+	EntryDate  string
+	// Layers 由调用方按 `max(1, target_layers)` 算好（**不做上限截断**）
+	Layers int
+	// Weight 由调用方按 `WeightFromLayers(Layers, totalLayers)` 算好
+	Weight float64
+	// StrategyTag 写组合的策略 ID
+	StrategyTag string
+	// SourceSignalID 写流水的来源标识，形如 `{portfolioId}:{tradeDate}:auto_compose`
+	SourceSignalID string
+}
+
+// AddAutoComposePositions 一次性写入自动组合的初始持仓（含买入流水），
+// 返回**实际写入**的条数。
+//
+// 语义 1:1 对齐 `create_auto_portfolio`（portfolio_service.py:405-442）：
+//
+//   - 代码为空、或建仓价 <= 0 的行**跳过**（原实现是 `continue`）——
+//     调用方在全被跳过时报错
+//   - `position_layers = max(1, layers)`，**没有上限**
+//   - `position_weight` 取传入值（原实现取 `item["position_weight"]`，不重算）
+//   - `source_type = "auto_compose"` / `holding_type = ""` / `last_action = "auto_compose"`
+//   - 每行补一条 `buy` 流水：`reason = "自动组合生成"`、`layers_delta`/`weight_delta`
+//     取实际落库的层数与权重
+//
+// 与原实现有**一处有意差异**：原实现是"先写持仓、再逐条写流水"，
+// 中途失败会留下一个写了一半的组合；这里放在**同一个事务**里，
+// 要么全成、要么全不写。
+func (s *Store) AddAutoComposePositions(
+	portfolioID string, rows []AutoComposePosition,
+) (int, error) {
+	if len(rows) == 0 {
+		return 0, nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("开启自动组合写入事务失败：%w", err)
+	}
+	defer tx.Rollback()
+
+	now := nowText()
+	written := 0
+	for _, row := range rows {
+		code := BareCode(row.Code)
+		if code == "" || row.EntryPrice <= 0 {
+			// 与原实现一致：静默跳过，由调用方判断"一只都没写进去"
+			continue
+		}
+		name := strings.TrimSpace(row.Name)
+		if name == "" {
+			name = code
+		}
+		// 层数只有下界，**没有上界** —— 这是与手动新增的关键差别
+		layers := row.Layers
+		if layers < 1 {
+			layers = 1
+		}
+		weight := round(math.Max(0, row.Weight), 4)
+		entryDate := NormalizeDate(row.EntryDate)
+
+		if _, err := tx.Exec(`
+			INSERT INTO portfolio_position (
+				portfolio_id, ts_code, name, entry_price, entry_date, position_layers, position_weight,
+				source_type, holding_type, strategy_tag, last_action, created_at, updated_at
+			) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			portfolioID, code, name, row.EntryPrice, entryDate, layers, weight,
+			"auto_compose", "", strings.TrimSpace(row.StrategyTag), "auto_compose", now, now,
+		); err != nil {
+			return 0, fmt.Errorf("自动组合写入持仓失败（%s）：%w", code, err)
+		}
+		if _, err := tx.Exec(`
+			INSERT INTO portfolio_position_txn (
+				txn_id, portfolio_id, ts_code, name, trade_date, action, price,
+				layers_delta, weight_delta, reason, source_signal_id, created_at
+			) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+			newTxnID(), portfolioID, code, name, entryDate, "buy", row.EntryPrice,
+			layers, weight, "自动组合生成", strings.TrimSpace(row.SourceSignalID), now,
+		); err != nil {
+			return 0, fmt.Errorf("自动组合写入流水失败（%s）：%w", code, err)
+		}
+		written++
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("提交自动组合写入失败：%w", err)
+	}
+	return written, nil
+}
+
 // DeletePosition 删除持仓，并补一条 clear 流水。
 //
 // 与原项目一致：**硬删 + 补流水**。
@@ -666,11 +778,12 @@ func (s *Store) DeletePosition(portfolioID, code string) error {
 	// 流水日期：**最新评分日 → 建仓日 → 今天**（原实现 portfolio_service.py:576
 	// `latest_strength_date or entry_date or now`）。
 	// 直接写"今天"的话，周末/盘前清仓会落一个非交易日的流水。
+	//
+	// ⚠ "最新评分日"是**全表** MAX（原实现 :2611-2612 不带 strategy_id）——
+	// 所以这里不需要组合的策略 ID，见 `LatestStrengthDateAny`。
 	tradeDate := ""
-	if item, err := s.Get(portfolioID); err == nil {
-		if date, err := s.LatestStrengthDate(item.StrategyID); err == nil && date > 0 {
-			tradeDate = fmt.Sprintf("%d", date)
-		}
+	if date, err := s.LatestStrengthDateAny(); err == nil && date > 0 {
+		tradeDate = fmt.Sprintf("%d", date)
 	}
 	if tradeDate == "" {
 		tradeDate = NormalizeDate(existing.EntryDate)

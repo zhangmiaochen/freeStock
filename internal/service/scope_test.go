@@ -135,12 +135,77 @@ func TestMatchScopeItemFallsBackToSingleValue(t *testing.T) {
 	if matchScopeItem([]string{"银行"}, strength, empty, true) {
 		t.Error("退回单值时不该命中别的行业")
 	}
-	// 空条件 = 不限
-	if !matchScopeItem(nil, strength, empty, true) {
-		t.Error("空条件应视为不限")
+	// 空条件 = **空集**（不是"不限"）—— 与原实现 `if not items: out.iloc[0:0]` 一致。
+	// 设了行业范围却没勾行业时，原版选不出任何候选；这里必须一样。
+	if matchScopeItem(nil, strength, empty, true) {
+		t.Error("空的行业条件应匹配不到任何股票（原实现返回空集）")
+	}
+	if matchScopeItem([]string{}, strength, empty, false) {
+		t.Error("空的概念条件应匹配不到任何股票（原实现返回空集）")
 	}
 	// matcher 为 nil 也不能 panic
 	if !matchScopeItem([]string{"白酒"}, strength, nil, true) {
 		t.Error("matcher 为 nil 时应退回单值")
+	}
+}
+
+// **行业是"单值行业名 OR 成员表命中"的并集；概念只看成员表。**
+//
+// 这是原实现 `_scope_filter`（portfolio_service.py:3302-3324）里两段不同的代码：
+//
+//	行业：out["industry"].isin(board_names) | out["ts_code"].isin(board_codes_by_stock)
+//	概念：board_df.empty → 空帧；否则只看 ts_code 是否在 allowed 里
+//
+// 之前 Go 把两者合成一个函数，且成员表可用时 `continue` 掉了单值那一支 ——
+// 行业范围**少选**一批票；概念在成员表不可用时又退回按行业名单值匹配 ——
+// 概念范围**多选**一批票。
+func TestMatchScopeItemIndustryUnionSectorOnly(t *testing.T) {
+	// 股票 600519：单值行业是"白酒"；成员表里它属于"银行"（故意的错配，
+	// 用来区分"命中的是单值那一支"还是"成员表那一支"）
+	strength := strengthRowWithIndustry("600519", "白酒")
+
+	// 只有行业表、没有概念表的匹配器（ready=true，但概念表是空的）
+	industryOnly := &ScopeMatcher{
+		industries: map[string]map[string]bool{
+			"600519": {"银行": true},
+		},
+		ready: true,
+	}
+	both := &ScopeMatcher{
+		industries: map[string]map[string]bool{"600519": {"银行": true}},
+		sectors:    map[string]map[string]bool{"600519": {"锂电池": true}},
+		ready:      true,
+	}
+
+	// ① 行业：即使成员表可用，**单值那一支仍要生效**（并集）
+	if !matchScopeItem([]string{"白酒"}, strength, industryOnly, true) {
+		t.Error("行业范围：成员表可用时也必须保留「单值行业名 OR」那一支（原实现是并集）")
+	}
+	// ② 行业：成员表那一支单独也要生效
+	if !matchScopeItem([]string{"银行"}, strength, industryOnly, true) {
+		t.Error("行业范围：成员表命中也应算范围内")
+	}
+	// ③ 行业：两支都不命中才算范围外
+	if matchScopeItem([]string{"半导体"}, strength, industryOnly, true) {
+		t.Error("行业范围：两支都不该命中")
+	}
+
+	// ④ 概念：**只看成员表**。行业名刚好等于概念名也不算命中
+	if matchScopeItem([]string{"白酒"}, strength, both, false) {
+		t.Error("概念范围不能靠单值行业名命中（原实现只看成员表）")
+	}
+	if !matchScopeItem([]string{"锂电池"}, strength, both, false) {
+		t.Error("概念范围应命中成员表里的概念")
+	}
+	// ⑤ 概念：成员表不可用（只有行业表）→ **匹配不到任何票**，不是退回单值
+	if matchScopeItem([]string{"白酒"}, strength, industryOnly, false) {
+		t.Error("概念表不可用时应匹配不到任何票（原实现返回空帧），不能退回单值行业名")
+	}
+	// ⑥ 数据可用性判定必须分开
+	if !industryOnly.HasIndustryData() || industryOnly.HasSectorData() {
+		t.Error("HasIndustryData / HasSectorData 应分别反映两张表")
+	}
+	if !industryOnly.Ready() {
+		t.Error("行业表有数据时 Ready() 应为真")
 	}
 }

@@ -141,6 +141,16 @@ export class ReplacementPair {
     "expectedPortfolioUplift": number;
     "rankNo": number;
 
+    /**
+     * EntryLayers 是换入时应给的层数（原实现 :2250）：
+     * full_replace → `initial_entry_layers(candidate, policy)`；partial_rotate → 1。
+     * 
+     * ⚠ 此前恒为 1 —— 整仓换股只给 1 层，与"趋势成长在震荡市首次建仓给 2 层 /
+     * 超跌反弹高分给 2 层"直接冲突，而且会连带改变 free_layers，
+     * 让后续的 add / add_layer 数量也跟着偏。
+     */
+    "entryLayers": number;
+
     /** Creates a new ReplacementPair instance. */
     constructor($$source: Partial<ReplacementPair> = {}) {
         if (!("holdingTsCode" in $$source)) {
@@ -181,6 +191,9 @@ export class ReplacementPair {
         }
         if (!("rankNo" in $$source)) {
             this["rankNo"] = 0;
+        }
+        if (!("entryLayers" in $$source)) {
+            this["entryLayers"] = 0;
         }
 
         Object.assign(this, $$source);
@@ -496,14 +509,34 @@ export class Row {
     "currentPrice": number;
     "highestPrice": number;
     "profitLossPct": number;
+
+    /**
+     * PositionWeight 是持仓权重百分数（层数 / 总层数 × 100）。
+     * 
+     * 自动建组合在**选出持仓的那一刻**就要把它算好并随预览返回 ——
+     * 原实现的 `selected_positions` 项里就带 `position_weight`
+     * （portfolio_service.py:2371，经 `_position_row_payload` 输出到预览）。
+     */
+    "positionWeight": number;
     "holdingTradeDays": number;
 
     /**
-     * 信号（原项目不入库，运行时 merge_asof 回填）
+     * 信号（由 signal_history 经 merge_asof 回看 29 个交易日回填，
+     * 见 internal/score/signal_attach.go）。
+     * 
+     * 原实现的 9 个 `active_signal_*` / `signal_*` 列在
+     * `portfolio_rotation_logic.py` 里**全部有消费点**，所以这里一并建模，
+     * 不能只留三个（少一个就会让"信号模型/级别"在候选说明里变空）。
      */
     "activeSignalType": string;
     "signalAge": number;
     "activeSignalScore": number;
+    "activeSignalModelId": string;
+    "activeSignalModelName": string;
+    "activeSignalLevel": string;
+    "activeSignalLevelLabel": string;
+    "signalTradeDate": number;
+    "signalCount": number;
 
     /** Creates a new Row instance. */
     constructor($$source: Partial<Row> = {}) {
@@ -636,6 +669,9 @@ export class Row {
         if (!("profitLossPct" in $$source)) {
             this["profitLossPct"] = 0;
         }
+        if (!("positionWeight" in $$source)) {
+            this["positionWeight"] = 0;
+        }
         if (!("holdingTradeDays" in $$source)) {
             this["holdingTradeDays"] = 0;
         }
@@ -647,6 +683,24 @@ export class Row {
         }
         if (!("activeSignalScore" in $$source)) {
             this["activeSignalScore"] = 0;
+        }
+        if (!("activeSignalModelId" in $$source)) {
+            this["activeSignalModelId"] = "";
+        }
+        if (!("activeSignalModelName" in $$source)) {
+            this["activeSignalModelName"] = "";
+        }
+        if (!("activeSignalLevel" in $$source)) {
+            this["activeSignalLevel"] = "";
+        }
+        if (!("activeSignalLevelLabel" in $$source)) {
+            this["activeSignalLevelLabel"] = "";
+        }
+        if (!("signalTradeDate" in $$source)) {
+            this["signalTradeDate"] = 0;
+        }
+        if (!("signalCount" in $$source)) {
+            this["signalCount"] = 0;
         }
 
         Object.assign(this, $$source);

@@ -92,12 +92,82 @@ func TestSaveStrengthBatchedOverwriteRemovesStale(t *testing.T) {
 	}
 }
 
+// **增量写入绝不能删掉当天其余的行**。
+//
+// 这是真实的**数据丢失**路径：增量刷新/增量回填只把"这次新算的代码"
+// （`codes = missing`）交给落库，而 `SaveStrength` 是整分区替换 ——
+// 于是当天已经算好的几千行被删光，只剩这次的增量。
+//
+// 本机库就是这么坏的：多数交易日只剩 ~990 行，正常应是 4400~7600 行。
+// 后果不是"少几只票"，而是低吸广度就绪数被系统性低估 →
+// 判定"广度不足 < 900" → 清仓 + 禁止开新仓 → **回测恒为 0 成交**。
+//
+// `UpsertStrength` 按主键 (trade_date, strategy_id, ts_code) 覆盖，
+// 与原实现 `_write_batches(..., key_columns=[...], replace=True)` 一致。
+func TestUpsertStrengthKeepsOtherRows(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "upsert.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	const tradeDate = int64(20261009)
+	// 第一轮：整批
+	first := benchStrengthRows(strengthInsertBatch)
+	if err := store.SaveStrength(tradeDate, StrategyTrendGrowth, first); err != nil {
+		t.Fatal(err)
+	}
+
+	// 第二轮：增量 —— 只有 2 行，且**改过分数**（要能覆盖生效）
+	delta := benchStrengthRows(2)
+	delta[0].TotalScore = 11.5
+	delta[1].Name = "增量改名"
+	if err := store.UpsertStrength(tradeDate, StrategyTrendGrowth, delta); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := store.LoadStrength(tradeDate, StrategyTrendGrowth, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != strengthInsertBatch {
+		t.Fatalf("增量写入后应仍有 %d 行，实际 %d 行 —— 当天的其它行被删了",
+			strengthInsertBatch, len(got))
+	}
+	// 增量的那两行必须被**覆盖**
+	byCode := map[string]StrengthRow{}
+	for _, row := range got {
+		byCode[row.Code] = row
+	}
+	if row := byCode[delta[0].Code]; row.TotalScore != 11.5 {
+		t.Errorf("增量行 %s 的分数没被覆盖：%v", delta[0].Code, row.TotalScore)
+	}
+	if row := byCode[delta[1].Code]; row.Name != "增量改名" {
+		t.Errorf("增量行 %s 的名称没被覆盖：%q", delta[1].Code, row.Name)
+	}
+
+	// 另一个策略完全不受影响
+	if err := store.UpsertStrength(tradeDate, StrategyOversold, delta); err != nil {
+		t.Fatal(err)
+	}
+	other, err := store.LoadStrength(tradeDate, StrategyOversold, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(other) != 2 {
+		t.Errorf("另一个策略应只有 2 行，实际 %d", len(other))
+	}
+	if again, _ := store.LoadStrength(tradeDate, StrategyTrendGrowth, 0); len(again) != strengthInsertBatch {
+		t.Errorf("写入别的策略后，本策略行数被改动：%d", len(again))
+	}
+}
+
 // TestStrengthInsertSQLShape 语句形状：占位符个数必须与列数对上。
 //
 // 列顺序错位不会报错，只会**静默存错数据** —— 所以这里直接数一遍。
 func TestStrengthInsertSQLShape(t *testing.T) {
 	for _, n := range []int{1, 2, 5} {
-		sql := strengthInsertSQL(n)
+		sql := strengthInsertSQL(n, false)
 		if got := strings.Count(sql, "?"); got != n*strengthColumnCount {
 			t.Errorf("%d 行的语句有 %d 个占位符，期望 %d", n, got, n*strengthColumnCount)
 		}

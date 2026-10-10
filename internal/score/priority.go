@@ -43,20 +43,37 @@ func trendGrowthEntryPriority(rows []Row) []float64 {
 	n := len(rows)
 	total := make([]float64, n)
 	structure := make([]float64, n)
-	ma30Gap := make([]float64, n)
 	volumeRatio := make([]float64, n)
 	rs20 := make([]float64, n)
 	drawdown := make([]float64, n)
 
+	// ma30_gap_pct = (close/ma30 - 1)*100，**ma30 为 0 时该行不参与排名**。
+	//
+	// 原实现两步（portfolio_rotation_logic.py:1618-1624 + `_series_rank_score` :1604-1613）：
+	//
+	//	ma30 = ma30_price.replace(0, NaN)          # 0 → 缺失
+	//	ma30_gap_pct = (close/ma30 - 1) * 100
+	//	ranked = values.rank(pct=True, na_option="keep")   # 缺失行保持缺失
+	//	if not high_first: ranked = 1 - ranked
+	//	return ranked.fillna(default=0.0)          # 缺失行 → 0.0
+	//
+	// ⚠ 此前是"把 0 当成真实 gap 去排名" —— 而 low_first 下 `1 - pct(0)`
+	// 通常接近 1（接近满分），等于给**没有 MA30 的票**（数据不足）
+	// 一个高分，把入场优先级排序整体带偏。正确值是 **0.0**。
+	ma30Gap := make([]float64, n)
+	ma30Valid := make([]bool, n)
+	ma30RankInput := make([]float64, 0, n)
+	for i, row := range rows {
+		if row.Ma30 != 0 {
+			ma30Gap[i] = (row.Close/row.Ma30 - 1) * 100
+			ma30Valid[i] = true
+			ma30RankInput = append(ma30RankInput, ma30Gap[i])
+		}
+	}
+
 	for i, row := range rows {
 		total[i] = row.TotalScore
 		structure[i] = row.StructureScore
-		// ma30_gap_pct = (close/ma30 - 1)*100；ma30 为 0 时原实现置 NaN（该行 rank 缺失）
-		gap := 0.0
-		if row.Ma30 != 0 {
-			gap = (row.Close/row.Ma30 - 1) * 100
-		}
-		ma30Gap[i] = gap
 		volumeRatio[i] = row.VolumeRatio20
 		rs20[i] = row.RelativeStrength20D
 		drawdown[i] = row.DrawdownFromHigh120
@@ -65,14 +82,19 @@ func trendGrowthEntryPriority(rows []Row) []float64 {
 	// 六列各自"排序一次、按行查询" —— 与逐行 RankPct 的结果逐位相同，
 	// 但把 O(6n²) 降成 O(6n log n)。回测里这个函数**每个交易日都要跑一遍**。
 	rankers := [6]*RankLookup{
-		NewRankLookup(total), NewRankLookup(structure), NewRankLookup(ma30Gap),
+		NewRankLookup(total), NewRankLookup(structure), NewRankLookup(ma30RankInput),
 		NewRankLookup(volumeRatio), NewRankLookup(rs20), NewRankLookup(drawdown),
 	}
 	out := make([]float64, n)
 	for i := range rows {
+		// 缺失 MA30 的行：排名分量取 default=0.0，不参与排名也不查询
+		ma30Term := 0.0
+		if ma30Valid[i] {
+			ma30Term = seriesRankScoreRanked(rankers[2], ma30Gap[i], false)
+		}
 		out[i] = seriesRankScoreRanked(rankers[0], total[i], true)*0.25 +
 			seriesRankScoreRanked(rankers[1], structure[i], true)*0.25 +
-			seriesRankScoreRanked(rankers[2], ma30Gap[i], false)*0.18 +
+			ma30Term*0.18 +
 			seriesRankScoreRanked(rankers[3], volumeRatio[i], false)*0.12 +
 			seriesRankScoreRanked(rankers[4], rs20[i], false)*0.12 +
 			seriesRankScoreRanked(rankers[5], drawdown[i], true)*0.08
@@ -165,11 +187,26 @@ func prioritizeLowBuy(rows []Row, cfg StrategyConfig) []Row {
 	}
 
 	// board_norm_amount 需要"市场内"的成交额百分位
+	//
+	// ⚠ **按原实现的词汇分组，不是按本项目的 market key**。
+	// 原实现 `frame.groupby("market")`（portfolio_rotation_logic.py:1642），
+	// 而它的 market 列是 主板 / 创业板 / 科创板 —— 也就是说
+	// **沪市主板与深市主板是同一个组**。
+	//
+	// 本项目 `market` 列是 `market.KeyOf` 的 key（sh-main / sz-main / ...），
+	// 直接分组会把沪深主板拆成两组、各算各的百分位 → 候选顺序与原版不同。
+	// 映射不出来时（bse / 基金）退回原始 key，至少不会把互不相干的市场并成一组。
 	marketRank := make([]float64, len(out))
 	if strings.EqualFold(cfg.LowBuySortMode, "board_norm_amount") {
 		byMarket := map[string][]float64{}
+		keys := make([]string, len(out))
 		for i := range out {
-			byMarket[out[i].Market] = append(byMarket[out[i].Market], out[i].Amount)
+			key := StockMarketOf(out[i].Market)
+			if key == "" {
+				key = out[i].Market
+			}
+			keys[i] = key
+			byMarket[key] = append(byMarket[key], out[i].Amount)
 		}
 		// 每个市场一个查询器（市场数是几个，不是几千）
 		lookupByMarket := make(map[string]*RankLookup, len(byMarket))
@@ -177,7 +214,7 @@ func prioritizeLowBuy(rows []Row, cfg StrategyConfig) []Row {
 			lookupByMarket[market] = NewRankLookup(values)
 		}
 		for i := range out {
-			marketRank[i] = lookupByMarket[out[i].Market].Pct(out[i].Amount)
+			marketRank[i] = lookupByMarket[keys[i]].Pct(out[i].Amount)
 		}
 	}
 

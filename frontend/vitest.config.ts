@@ -14,5 +14,8 @@ export default defineConfig({
     globals: true,
     include: ["tests/**/*.spec.ts"],
     css: false,
+    // Node 25 内置的 localStorage 占位会盖掉 happy-dom 的实现，
+    // 使 `localStorage` 变成没有方法的空对象。见 vitest.setup.ts。
+    setupFiles: ["./vitest.setup.ts"],
   },
 });

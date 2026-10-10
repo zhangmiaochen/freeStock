@@ -144,6 +144,13 @@ func buildReplacementPairs(in RotationInput, protectStart, protectRetrace float6
 			}
 
 			totalGap := round(cand.TotalScore-hold.TotalScore, 4)
+			// 换入层数（原实现 :2250）：
+			//   `initial_entry_layers(chosen, policy) if pair_mode == "full_replace" else 1`
+			// full_replace 是整仓换股，按正常建仓层数给；partial_rotate 只承接释放出来的 1 层。
+			entryLayers := 1
+			if mode == "full_replace" {
+				entryLayers = initialEntryLayers(cand, cfg, 0)
+			}
 			pairs = append(pairs, ReplacementPair{
 				HoldingCode:    hold.Code,
 				HoldingName:    hold.Name,
@@ -158,6 +165,7 @@ func buildReplacementPairs(in RotationInput, protectStart, protectRetrace float6
 				MainReason:     reason,
 				ExpectedUplift: round(math.Max(0, totalGap), 4),
 				RankNo:         len(pairs) + 1,
+				EntryLayers:    entryLayers,
 			})
 			used[cand.Code] = true
 			found = true
@@ -182,17 +190,21 @@ func strategyIsOversold(strategyID string) bool {
 // 候选入场质量（3.2.2）
 // ---------------------------------------------------------------------------
 
-// HasSignalSource 表示本项目是否接入了 ML 信号表（`active_signal_*`）。
+// HasSignalSource 表示本项目是否接入了信号表（`active_signal_*`）。
 //
-// ⚠ **恒为 false** —— 参考项目依赖 ML 模型信号表，本项目没有该数据源。
+// **已置为 true**：量价信号栈（特征 / 市场状态 / 三种模型 / 回测 / signal_history
+// / merge_asof 回填）已按原版 1:1 移植（见 `internal/volprice`），
+// 与 Python 侧的分层比对全部通过；信号由 `PortfolioService.RefreshSignals`
+// 生成、由 `signal_attach.go` 回填到评分行。
 //
-// 它的影响很具体：原实现在**熊市**下要求候选必须有"新鲜买入信号"。
-// 没有信号源时这条闸门**无法判定**；若把"无法判定"当成"不合格"，
-// 熊市里所有候选都会被拒 → 候选池为空 → 从现金起步的回测永远零成交。
+// 它的影响很具体：原实现在**熊市**下要求候选必须有"新鲜买入信号"
+// （`active_signal_type in {buy, candidate_buy}` 且 `signal_age <= 状态上限`）。
 //
-// 所以凡是"依赖信号才能判定"的闸门都要以它为前置条件，
-// 并在界面上把这类偏差列出来（见 ScoringResult.Unavailable）。
-const HasSignalSource = false
+// ⚠ **运维前提**：打开之后，若 `signal_history` 为空，熊市状态下的入场会被
+// **全部挡掉** —— 这与原版行为一致（原版 `signal_df` 为空时
+// `active_signal_type=""` → `has_fresh_signal=false`）。
+// 所以启用前应先跑一次信号生成（`RefreshSignals`）。
+const HasSignalSource = true
 
 // CandidateQualityOK 判定候选是否达到入场质量。
 //
@@ -220,17 +232,23 @@ func CandidateQualityOK(row Row, cfg StrategyConfig, marketState string, replace
 	}
 
 	// 均线位置门槛（各策略不同）
+	//
+	// ⚠ 三条都要 **close > 0** 守卫。原实现（portfolio_rotation_logic.py:1141-1147）：
+	// 高手/超跌分支显式写 `close_price > 0 and ma30 > 0 and ...`，
+	// 默认分支走 `_price_below_ma`（:449-450）同样先判 `price > 0`。
+	// 少了守卫，`close == 0`（停牌/数据不足）的行会被判"跌破 MA30"而拒掉 ——
+	// 原实现这些行是**通过**这条门槛的。
 	switch cfg.StrategyID {
 	case StrategyExpert:
-		if row.Ma30 > 0 && row.Close < row.Ma30*0.958 {
+		if row.Close > 0 && row.Ma30 > 0 && row.Close < row.Ma30*0.958 {
 			return false, "跌破MA30过多"
 		}
 	case StrategyOversold:
-		if row.Ma30 > 0 && row.Close < row.Ma30*0.90 {
+		if row.Close > 0 && row.Ma30 > 0 && row.Close < row.Ma30*0.90 {
 			return false, "跌破MA30过多"
 		}
 	default:
-		if row.Ma30 > 0 && row.Close < row.Ma30*0.995 {
+		if row.Close > 0 && row.Ma30 > 0 && row.Close < row.Ma30*(1-MaBreakTolerance) {
 			return false, "跌破MA30"
 		}
 	}
@@ -403,6 +421,41 @@ func StockMarketOf(key string) string {
 		return "star"
 	}
 	return ""
+}
+
+// MarketInScope 判定"评分行/持仓行上的市场 key"是否落在组合的市场范围里。
+//
+// ⚠ **必须走 StockMarketOf 映射，不能直接比较字符串。**
+//
+// 两套词汇表：
+//   - `StrengthRow.Market` 来自 `market.KeyOf(code)`，值是 sh-main / sz-main /
+//     chinext / star / bse / sh-fund / sz-fund（见 `market.Definitions`）
+//   - 组合范围 `scope_value_json.markets` 沿用原实现的词汇，值是 main / gem / star
+//     （见 `PortfolioOptions.Markets` 与 portfolio_service.py 的
+//     `PORTFOLIO_MARKET_SCOPE_LABELS`）
+//
+// 直接比较的后果不是"过滤偏严一点"，而是**每一行都被判成范围外** ——
+// 候选池恒为空 → 计划一条动作都产不出 → 回测零成交、净值一条直线；
+// 同时所有持仓也被判成范围外（按"左连接落空"记 0 分）→ 实盘建议全清仓；
+// 自动组合则直接报"没有通过质量过滤的候选"。
+//
+// scope 为空 = 全部市场（原实现 `if filtered.empty or not market_scope: return filtered`）。
+// 映射不出来的（bse / 基金 / unknown）在设了市场范围时一律排除 ——
+// 原实现的市场列只有 主板/创业板/科创板 三种取值，等价。
+func MarketInScope(rowMarket string, scope []string) bool {
+	if len(scope) == 0 {
+		return true
+	}
+	key := StockMarketOf(rowMarket)
+	if key == "" {
+		return false
+	}
+	for _, want := range scope {
+		if want == key {
+			return true
+		}
+	}
+	return false
 }
 
 // marketScopeFloor 是市场档位的分数下限。

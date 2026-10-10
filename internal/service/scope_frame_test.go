@@ -38,12 +38,12 @@ func TestBreadthFrameIsScopeFiltered(t *testing.T) {
 	cfg := score.BuildStrategyConfig(score.StrategyTrendGrowth, score.StateRange, 5, 10, 3, "all")
 
 	all := []portfolio.StrengthRow{
-		scopeRow("600519", "main", "白酒", 80),
-		scopeRow("601318", "main", "保险", 70),
-		scopeRow("300750", "gem", "电池", 90),
+		scopeRow("600519", "sh-main", "白酒", 80),
+		scopeRow("601318", "sh-main", "保险", 70),
+		scopeRow("300750", "chinext", "电池", 90),
 		scopeRow("688981", "star", "半导体", 85),
 	}
-	_, universeScores := svc.buildCandidatePoolFrom(all, item, cfg, nil)
+	_, universeScores := svc.buildCandidatePoolFrom(nil, all, item, cfg, nil)
 
 	// **只有主板的两只**应进入广度帧
 	if len(universeScores) != 2 {
@@ -67,11 +67,11 @@ func TestBreadthFrameIncludesAllWhenScopeAll(t *testing.T) {
 	cfg := score.BuildStrategyConfig(score.StrategyTrendGrowth, score.StateRange, 5, 10, 3, "all")
 
 	all := []portfolio.StrengthRow{
-		scopeRow("600519", "main", "白酒", 80),
-		scopeRow("000001", "main", "银行", 10), // 低于 candidate floor，但**仍算进广度帧**
-		scopeRow("300750", "gem", "电池", 90),
+		scopeRow("600519", "sh-main", "白酒", 80),
+		scopeRow("000001", "sz-main", "银行", 10), // 低于 candidate floor，但**仍算进广度帧**
+		scopeRow("300750", "chinext", "电池", 90),
 	}
-	_, universeScores := svc.buildCandidatePoolFrom(all, item, cfg, nil)
+	_, universeScores := svc.buildCandidatePoolFrom(nil, all, item, cfg, nil)
 	if len(universeScores) != 3 {
 		t.Errorf("全市场范围的广度帧应含 3 只（不受分数下限影响），实际 %d", len(universeScores))
 	}
@@ -94,13 +94,13 @@ func TestLowBuyFiltersBeforeTruncation(t *testing.T) {
 	// 若先截断，合格的票**根本进不了 head-80** → 候选池为空。
 	var all []portfolio.StrengthRow
 	for i := 0; i < 100; i++ {
-		row := scopeRow("A"+pad(i), "main", "白酒", 95)
+		row := scopeRow("A"+pad(i), "sh-main", "白酒", 95)
 		row.Close = 200 // 远高于均线 → 会被"过热"等质量门槛拒掉
 		row.Ma20 = 100
 		row.Ma30 = 100
 		all = append(all, row)
 	}
-	good := scopeRow("Z00001", "main", "白酒", 80)
+	good := scopeRow("Z00001", "sh-main", "白酒", 80)
 	// 低吸的结构条件要求 ma20 > ma30 > ma60、ma120 > ma250 > ma250_prev
 	good.Close, good.Ma5, good.Ma20, good.Ma30 = 100, 99, 102, 100
 	good.Ma60, good.Ma120, good.Ma250 = 95, 90, 85
@@ -110,7 +110,7 @@ func TestLowBuyFiltersBeforeTruncation(t *testing.T) {
 	good.DrawdownFromHigh20 = -10
 	all = append(all, good)
 
-	out, _ := svc.buildCandidatePoolFrom(all, item, cfg, nil)
+	out, _ := svc.buildCandidatePoolFrom(nil, all, item, cfg, nil)
 
 	// 关键断言：合格的那只**必须在**候选池里（先过滤再截断才能保住它）
 	found := false
@@ -121,6 +121,81 @@ func TestLowBuyFiltersBeforeTruncation(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("低吸应先过滤再截断；合格的 Z00001 被截断丢掉了（候选池 %d 只）", len(out))
+	}
+}
+
+// ---- 市场词汇表回归：组合范围的 main/gem/star vs 评分行的 sh-main/chinext/star ----
+//
+// 这是"回测结果恒为 0 / 自动组合选不出票 / 实盘建议全清仓"的根因：
+// 评分行存的是 `market.KeyOf` 的 key（sh-main / sz-main / chinext / star / bse），
+// 组合范围存的是原实现词汇（main / gem / star）。直接比较会让**每一行**都被
+// 判成范围外 → 候选池恒为空。上面几个用例之所以没发现，是因为它们把
+// `Market` 字段直接写成了 main / gem（用了范围那套词汇），恰好"对上了"。
+
+func TestMarketScopeVocabularyMismatch(t *testing.T) {
+	svc := &PortfolioService{}
+	item := portfolio.Portfolio{
+		ID: "pf_market", StrategyID: score.StrategyTrendGrowth,
+		TargetPositionCount: 5, TotalLayers: 10,
+		ScopeType:      portfolio.ScopeAll,
+		ScopeValueJSON: `{"markets":["main","gem"]}`, // 与库里真实组合一致
+	}
+	cfg := score.BuildStrategyConfig(score.StrategyTrendGrowth, score.StateRange, 5, 10, 3, "main_gem")
+
+	all := []portfolio.StrengthRow{
+		scopeRow("600519", "sh-main", "白酒", 80),
+		scopeRow("000001", "sz-main", "银行", 80),
+		scopeRow("300750", "chinext", "电池", 90),
+		scopeRow("688981", "star", "半导体", 85), // 范围外（未勾科创板）
+		scopeRow("920001", "bse", "其他", 88),   // 范围外（映射不出来）
+	}
+	out, universe := svc.buildCandidatePoolFrom(nil, all, item, cfg, nil)
+
+	if len(universe) == 0 {
+		t.Fatal("广度帧为空 —— 市场过滤把每一行都剔掉了（词汇表没映射）")
+	}
+	if len(universe) != 3 {
+		t.Errorf("广度帧应含主板×2 + 创业板×1 = 3 只，实际 %d 只", len(universe))
+	}
+	if len(out) == 0 {
+		t.Fatal("候选池为空 —— 回测必然零成交")
+	}
+	for _, row := range out {
+		if row.Code == "688981" || row.Code == "920001" {
+			t.Errorf("%s 在组合市场范围之外，不该进候选池", row.Code)
+		}
+	}
+}
+
+// 持仓侧同一口径：范围**内**的持仓不能被判成"左连接落空"。
+func TestInPortfolioScopeUsesMarketVocabulary(t *testing.T) {
+	svc := &PortfolioService{}
+	item := portfolio.Portfolio{
+		ID: "pf_market", ScopeType: portfolio.ScopeAll,
+		ScopeValueJSON: `{"markets":["main","gem"]}`,
+	}
+
+	cases := []struct {
+		code, market string
+		want         bool
+	}{
+		{"600519", "sh-main", true},
+		{"000001", "sz-main", true},
+		{"300750", "chinext", true},
+		{"688981", "star", false}, // 未勾科创板
+		{"920001", "bse", false},  // 映射不出来
+	}
+	for _, c := range cases {
+		strength := portfolio.StrengthRow{Code: c.code, Market: c.market}
+		if got := inPortfolioScope(strength, item, svc.scopeMatcher()); got != c.want {
+			t.Errorf("inPortfolioScope(%s, %s) = %v，期望 %v", c.code, c.market, got, c.want)
+		}
+	}
+
+	// 没设市场范围 = 全部市场，连 bse 也要放行
+	open := portfolio.Portfolio{ID: "pf_open", ScopeType: portfolio.ScopeAll, ScopeValueJSON: `{}`}
+	if !inPortfolioScope(portfolio.StrengthRow{Code: "920001", Market: "bse"}, open, svc.scopeMatcher()) {
+		t.Error("未设市场范围时应视为全部市场")
 	}
 }
 
