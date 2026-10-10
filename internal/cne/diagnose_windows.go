@@ -172,6 +172,7 @@ func Diagnose() string {
 	p("=== 进程上下文 ===")
 	p("  会话 ID: %d", processSessionID())
 	p("  是否管理员: %v", isElevated())
+	p("  完整性级别: %s%s", integrityLevel(), integrityHint())
 	p("  父进程 PID: %d", os.Getppid())
 	if pp, err := parentName(); err == nil {
 		p("  父进程: %s", pp)

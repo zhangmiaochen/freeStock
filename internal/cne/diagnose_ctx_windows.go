@@ -26,9 +26,13 @@ var (
 // "系统找不到指定的路径"（ERROR_PATH_NOT_FOUND）—— 与"任务不存在"极像，
 // 所以必须先把这个可能性排除掉。
 func processSessionID() uint32 {
+	// ⚠ **第一个参数是进程 ID，不是句柄。**
+	// 我第一版传了 `GetCurrentProcess()` 的伪句柄（0xFFFFFFFF），
+	// 于是永远返回 0xFFFFFFFF —— 用户报告里那个"会话 ID: 4294967295"
+	// 是我的 bug，不是真实值。这里改用 GetCurrentProcessId。
 	var sid uint32
-	h, _, _ := procGetCurProcess.Call()
-	r, _, _ := procProcessIdToSess.Call(h, uintptr(unsafe.Pointer(&sid)))
+	pid := uintptr(os.Getpid())
+	r, _, _ := procProcessIdToSess.Call(pid, uintptr(unsafe.Pointer(&sid)))
 	if r == 0 {
 		return 0xFFFFFFFF
 	}
@@ -117,4 +121,51 @@ func probeAppCompat(p func(string, ...any), exe string) {
 	}
 	p("  ⚠ **该 exe 设了兼容性标志**：%s", strings.TrimSpace(firstLineOf(text)))
 	p("     这会让子进程继承 __COMPAT_LAYER，可能触发文件系统虚拟化")
+}
+
+// integrityLevel 取当前进程令牌的完整性级别。
+//
+// ⚠ 为什么查：**COM 激活依赖令牌**。如果进程跑在低完整性、AppContainer
+// 或受限令牌下，`CoCreateInstance` 会失败 —— 而报错恰好常是
+// `ERROR_PATH_NOT_FOUND`（找不到注册的服务器路径）。
+//
+// 实测这台机器上的现象与这一条完全吻合：
+//
+//	schtasks /?            成功   （只打帮助，不连服务）
+//	schtasks /query        失败   （走 COM）
+//	Get-ScheduledTask      失败   （走 CIM）
+//	sc query Schedule      成功   （走 SCM，不经 COM）
+//	Get-Service Schedule   成功   （同上）
+//
+// 用 `whoami /groups` 取，而不是直接调 token API ——
+// `x/sys/windows` 没导出 GetTokenInformation，自己拼一遍不划算。
+func integrityLevel() string {
+	out, err := hiddenCommand("whoami", "/groups").CombinedOutput()
+	if err != nil {
+		return "取不到"
+	}
+	for _, line := range strings.Split(decodeConsole(out), "\n") {
+		// 形如：Mandatory Label\Medium Mandatory Level  S-1-16-8192
+		if !strings.Contains(strings.ToLower(line), "mandatory level") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) >= 2 {
+			return fields[1]
+		}
+		return strings.TrimSpace(line)
+	}
+	return "取不到"
+}
+
+// integrityHint 在完整性级别异常时附加一句提示。
+func integrityHint() string {
+	lv := strings.ToLower(integrityLevel())
+	if lv == "" || strings.Contains(lv, "取不到") {
+		return ""
+	}
+	if strings.Contains(lv, "medium") || strings.Contains(lv, "high") || strings.Contains(lv, "system") {
+		return ""
+	}
+	return "  ⚠ **不是 Medium/High 完整性 —— COM 激活很可能因此失败（正是当前症状）**"
 }
