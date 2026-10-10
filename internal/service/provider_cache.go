@@ -44,13 +44,33 @@ type rangeCachingProvider struct {
 	// hits/misses/fetches 用来观察缓存到底有没有生效 ——
 	// "以为命中了其实没有"是这类缓存最容易出的问题，必须能看见。
 	hits, misses, fetches int
+
+	// barHits/barMisses/barFetches 是 DailyBars 那一组的统计。
+	//
+	// ⚠ **必须分开统计**：`DailyHistory`（组装完整 Quote）与 `DailyBars`
+	// （只要 OHLCV）是两条独立的缓存。评分现在走 DailyBars，若日志只报
+	// Quote 那一组，数字**完全不反映实际情况** —— 之前一直显示 401 就是这么来的。
+	barHits, barMisses, barFetches int
+}
+
+// cacheStats 是一次回填的缓存命中情况，两组分开报。
+type cacheStats struct {
+	QuoteHits, QuoteMisses, QuoteFetches int
+	BarHits, BarMisses, BarFetches       int
 }
 
 // stats 返回 (命中, 未命中, 真实取数) 次数。
-func (p *rangeCachingProvider) stats() (int, int, int) {
+func (p *rangeCachingProvider) stats() cacheStats {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.hits, p.misses, p.fetches
+	quoteHits, quoteMisses, quoteFetches := p.hits, p.misses, p.fetches
+	p.mu.Unlock()
+	p.barMu.Lock()
+	barHits, barMisses, barFetches := p.barHits, p.barMisses, p.barFetches
+	p.barMu.Unlock()
+	return cacheStats{
+		QuoteHits: quoteHits, QuoteMisses: quoteMisses, QuoteFetches: quoteFetches,
+		BarHits: barHits, BarMisses: barMisses, BarFetches: barFetches,
+	}
 }
 
 // newRangeCachingProvider 包装一个数据源，预取窗口为 [from, to]。
@@ -141,6 +161,9 @@ func (p *rangeCachingProvider) DailyBars(
 
 	p.barMu.Lock()
 	cached, ok := p.barCache[code]
+	if ok {
+		p.barHits++
+	}
 	p.barMu.Unlock()
 
 	if !ok {
@@ -160,9 +183,12 @@ func (p *rangeCachingProvider) DailyBars(
 		}
 
 		p.barMu.Lock()
-		// 并发下可能已有别的 worker 写进去了，保留先到的（内容相同）
+		p.barMisses++
+		// 并发下可能已有别的 worker 写进去了，保留先到的（内容相同）。
+		// 真实取数只统计**真正发起并写入**的那一次。
 		if _, exists := p.barCache[code]; !exists {
 			p.barCache[code] = full
+			p.barFetches++
 		}
 		cached = p.barCache[code]
 		p.barMu.Unlock()

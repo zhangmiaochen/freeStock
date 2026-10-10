@@ -118,7 +118,7 @@ func (s *PortfolioService) RefreshBackfill(
 	// 这里把每只股票在 [最早的评分窗口起点, 区间终点] 的日线缓存起来，
 	// 逐日评分时从缓存按区间切片 —— 结果与真实请求一致（见 provider_cache.go）。
 	scoring := NewScoringService(s.stock)
-	var cacheHits, cacheMisses, cacheFetches int
+	var stats cacheStats
 	var cacheRef *rangeCachingProvider
 	if provider, _ := s.stock.snapshot(); provider != nil && startDate > 0 {
 		windowStart := scoreWindowStart(startDate, scoreLookbackTradingDays)
@@ -196,13 +196,17 @@ func (s *PortfolioService) RefreshBackfill(
 
 	out.Elapsed = time.Since(began).Round(time.Millisecond).String()
 	if cacheRef != nil {
-		cacheHits, cacheMisses, cacheFetches = cacheRef.stats()
+		stats = cacheRef.stats()
 	}
 	slog.Info("历史回填阶段耗时",
 		"tradingDates", datesElapsed.Round(time.Millisecond),
 		"scoringUniverse", universeElapsed.Round(time.Millisecond),
 		"评分(取数+指标)", scoreTotal.Round(time.Millisecond),
-		"缓存命中", cacheHits, "未命中", cacheMisses, "真实取数", cacheFetches,
+		// ⚠ 分两组报：评分走的是 **bars** 那组（只要 OHLCV），
+		// quote 那组是 K 线/列表等其他路径用的。只报一组会完全读错 ——
+		// 之前日志里一直显示 401，就是因为报的是没人用的 quote 缓存。
+		"quote命中", stats.QuoteHits, "quote未命中", stats.QuoteMisses, "quote真实取数", stats.QuoteFetches,
+		"bars命中", stats.BarHits, "bars未命中", stats.BarMisses, "bars真实取数", stats.BarFetches,
 		"落库", saveTotal.Round(time.Millisecond),
 		"合计", out.Elapsed)
 	slog.Info("历史回填完成",
