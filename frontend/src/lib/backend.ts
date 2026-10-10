@@ -88,9 +88,10 @@ import * as PortfolioService from "../../bindings/freestock/internal/service/por
 export type { BollPrefs, KlinePrefs, MaPrefs, MacdPrefs };
 // cne 数据更新相关类型（对应 internal/service/cneupdate.go 的 json tag）
 import type { JobInfo, UpdatePrefsInfo } from "../../bindings/freestock/internal/service/models";
-import type { Status as CneUpdateStatus } from "../../bindings/freestock/internal/cne/models";
+import type { Status as CneUpdateStatus, FreshnessReport, CatchUpState } from "../../bindings/freestock/internal/cne/models";
+import type { CatchUpInfo } from "../../bindings/freestock/internal/service/models";
 import type { UpdatePrefs } from "../../bindings/freestock/internal/config/models";
-export type { JobInfo, UpdatePrefsInfo, CneUpdateStatus, UpdatePrefs };
+export type { JobInfo, UpdatePrefsInfo, CneUpdateStatus, UpdatePrefs, FreshnessReport, CatchUpState, CatchUpInfo };
 export type {
   AppliedChange,
   ApplyResult,
@@ -241,6 +242,22 @@ export const api = {
   getUpdatePrefs: () => CneUpdateService.GetUpdatePrefs() as Promise<UpdatePrefsInfo>,
   setUpdatePrefs: (prefs: UpdatePrefs) =>
     CneUpdateService.SetUpdatePrefs(prefs) as Promise<UpdatePrefsInfo>,
+
+  /**
+   * 检查各关键数据集的新鲜度：最新日期 vs 最后已收盘交易日，含缺失的交易日。
+   *
+   * ⚠ 这是**漏日补跑的依据**。方案 §2.2 实测 `--stale-only` 算出的落后清单里
+   * 根本没有 daily_bars —— 只看它的结论会以为"没落后"，而行情可能缺了一天。
+   */
+  checkFreshness: () => CneUpdateService.CheckFreshness() as Promise<FreshnessReport | null>,
+  /**
+   * 按新鲜度结果**逐日串行**补跑缺失的交易日，立即返回。
+   * 服务端会自己再跑一次新鲜度检查，不听前端传来的日期。
+   */
+  startCatchUp: () => CneUpdateService.StartCatchUp() as Promise<CatchUpInfo | null>,
+  catchUpState: () => CneUpdateService.CatchUpState() as Promise<CatchUpState>,
+  /** 请求停止补跑：当前这一天跑完后不再继续（不中途掐断） */
+  cancelCatchUp: () => CneUpdateService.CancelCatchUp() as Promise<void>,
   /** 条件选股 */
   getScreenOptions: () => StockService.GetScreenOptions() as Promise<ScreenOptions | null>,
   screenStocks: (cond: ScreenCondition) =>

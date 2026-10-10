@@ -17,12 +17,16 @@ import {
   api,
   errorMessage,
   type CneUpdateStatus,
+  type CatchUpState,
+  type FreshnessReport,
   type UpdatePrefs,
   type UpdatePrefsInfo,
 } from "@/lib/backend";
 
 const status = ref<CneUpdateStatus | null>(null);
 const prefs = ref<UpdatePrefsInfo | null>(null);
+const freshness = ref<FreshnessReport | null>(null);
+const catchUp = ref<CatchUpState | null>(null);
 const projectDir = ref("");
 const cnePath = ref("");
 const tradeDate = ref("");
@@ -35,8 +39,24 @@ let timer: number | undefined;
 async function loadStatus() {
   try {
     status.value = await api.updateStatus();
+    catchUp.value = await api.catchUpState();
   } catch {
     // 轮询失败不打扰用户
+  }
+}
+
+/**
+ * 新鲜度检查。
+ *
+ * ⚠ 它不是"锦上添花" —— 方案 §2.2 实测 `--stale-only` 的落后清单里
+ * **没有 daily_bars**，只看它会以为数据没落后，而行情可能缺了一天。
+ */
+async function loadFreshness() {
+  try {
+    freshness.value = await api.checkFreshness();
+  } catch (e) {
+    // 数据湖没配好时这里会失败 —— 属于正常情况，不当作错误弹出来
+    freshness.value = null;
   }
 }
 
@@ -107,6 +127,60 @@ async function cancel() {
   }
 }
 
+/**
+ * 发起逐日补跑。
+ *
+ * ⚠ 服务端会**自己再跑一次新鲜度检查**来决定补哪些天，不听前端传来的日期 ——
+ * 所以这里不传参数，避免界面过期导致补错。
+ *
+ * 补跑是**串行**的（cne 有写入锁），缺口多时可能跑很久，
+ * 界面上把"落后几天"先摆出来让用户自己判断。
+ */
+async function startCatchUp() {
+  if (busy.value || running.value) return;
+  busy.value = "catchup";
+  error.value = "";
+  message.value = "";
+  try {
+    const info = await api.startCatchUp();
+    message.value = info?.message ?? "已发起补跑";
+    if (info && !info.started) {
+      // 没有缺口时不是错误，只是没必要跑
+      await loadFreshness();
+    }
+    await loadStatus();
+    startPolling();
+  } catch (e) {
+    error.value = errorMessage(e);
+  } finally {
+    busy.value = "";
+  }
+}
+
+/** 请求停止补跑：当前这一天跑完后不再继续（不中途掐断，避免补一半的状态）。 */
+async function cancelCatchUp() {
+  if (busy.value) return;
+  busy.value = "cancelCatchUp";
+  error.value = "";
+  try {
+    await api.cancelCatchUp();
+    message.value = "已请求停止：当前这一天跑完后不再继续。";
+    await loadStatus();
+  } catch (e) {
+    error.value = errorMessage(e);
+  } finally {
+    busy.value = "";
+  }
+}
+
+/** 把 20261009 显示成 2026-10-09。 */
+function fmtDate(n?: number): string {
+  if (!n) return "—";
+  const s = String(n);
+  if (s.length !== 8) return s;
+  return `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6)}`;
+}
+
 async function savePrefs() {
   if (busy.value) return;
   busy.value = "save";
@@ -145,6 +219,7 @@ async function savePrefs() {
 onMounted(async () => {
   await loadPrefs();
   await loadStatus();
+  await loadFreshness();
   // 打开页面时如果任务在跑，直接开始轮询
   if (status.value?.running) startPolling();
 });
@@ -169,6 +244,73 @@ onUnmounted(stopPolling);
     </div>
 
     <div class="space-y-4 p-4">
+      <!-- 新鲜度：数据集 / 最新日期 / 最后交易日 / 落后几天。
+           方案 §2.2：stale 的落后清单里没有 daily_bars，所以这张表才是
+           "数据到底缺没缺"的依据。 -->
+      <div class="space-y-2">
+        <div class="flex flex-wrap items-center gap-2">
+          <span class="text-sm font-medium">数据新鲜度</span>
+          <Badge
+            v-if="freshness && freshness.behindDays?.length"
+            variant="destructive"
+            class="text-[10px]"
+          >
+            落后 {{ freshness.behindDays.length }} 个交易日
+          </Badge>
+          <Badge v-else-if="freshness" variant="secondary" class="text-[10px]">
+            已是最新
+          </Badge>
+          <Badge v-else variant="outline" class="text-[10px]">未检查</Badge>
+          <Button size="xs" variant="ghost" :disabled="!!busy" class="ml-auto" @click="loadFreshness">
+            <RefreshCw /> 重新检查
+          </Button>
+          <Button
+            v-if="freshness && freshness.behindDays?.length"
+            size="sm"
+            variant="outline"
+            :disabled="running || !!busy"
+            @click="startCatchUp"
+          >
+            {{ busy === 'catchup' ? '发起中…' : '逐日补跑' }}
+          </Button>
+          <Button v-if="catchUp?.running" size="sm" variant="ghost" :disabled="!!busy" @click="cancelCatchUp">
+            停止补跑
+          </Button>
+        </div>
+
+        <div v-if="freshness?.datasets?.length" class="overflow-hidden rounded border text-xs">
+          <div class="bg-muted grid grid-cols-4 gap-2 px-3 py-1.5 font-medium">
+            <span>数据集</span><span>最新日期</span><span>最后交易日</span><span>落后</span>
+          </div>
+          <div
+            v-for="d in freshness.datasets"
+            :key="d.name"
+            class="grid grid-cols-4 gap-2 border-t px-3 py-1.5"
+          >
+            <span>{{ d.name }}</span>
+            <span>{{ d.missing ? '未入库' : fmtDate(d.latestDate) }}</span>
+            <span>{{ fmtDate(d.lastTrading) }}</span>
+            <span :class="d.behindDays?.length ? 'text-destructive' : 'text-muted-foreground'">
+              {{ d.missing ? '—' : d.behindDays?.length ? `${d.behindDays.length} 天` : '已最新' }}
+            </span>
+          </div>
+        </div>
+        <p v-if="freshness" class="text-muted-foreground text-[11px]">{{ freshness.summary }}</p>
+
+        <!-- 补跑进度：串行执行，一条一条来 -->
+        <div v-if="catchUp?.running || catchUp?.done" class="text-[11px]">
+          <span class="text-muted-foreground">
+            补跑：第 {{ catchUp.current }} / {{ catchUp.dates?.length ?? 0 }} 天，
+            成功 {{ catchUp.done }} 天<template v-if="catchUp.failed?.length"
+              >，失败 {{ catchUp.failed.length }} 天（{{ catchUp.failed.map(fmtDate).join('、') }}）</template
+            ><template v-if="catchUp.skipped?.length">，跳过 {{ catchUp.skipped.length }} 天</template>
+          </span>
+          <p v-if="catchUp.message" class="text-muted-foreground">{{ catchUp.message }}</p>
+        </div>
+      </div>
+
+      <Separator />
+
       <!-- 手动更新：三个入口。
            方案 §2.2/§2.3 实测：stale 不覆盖日行情；非交易日跑普通日更会跳过行情组。 -->
       <div class="space-y-2">
