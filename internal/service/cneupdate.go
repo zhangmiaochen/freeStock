@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"freestock/internal/cne"
 	"freestock/internal/config"
@@ -115,6 +116,29 @@ func describeKind(kind, tradeDate string) string {
 	default:
 		return "已开始「更新到今天」。单次通常需要 8~60 分钟，可以关掉这个页面。"
 	}
+}
+
+// CheckFreshness 检查数据湖里关键数据集的新鲜度（方案 §4.3）。
+//
+// 这是**漏日补跑**的判断依据：只看 `--stale-only` 的结论会以为"没落后"，
+// 因为它的落后清单里根本没有 daily_bars（方案 §2.2 实测），
+// 而行情可能确实缺了一天。
+func (s *CneUpdateService) CheckFreshness() (*cne.FreshnessReport, error) {
+	if s.store == nil {
+		return nil, errors.New("缺少配置存储")
+	}
+	prefs, _ := s.store.UpdatePrefs()
+	if prefs.ProjectDir == "" {
+		return nil, errors.New("还没设置 cne 工程目录，无法找到数据湖")
+	}
+	report, err := cne.Check(prefs.ProjectDir, time.Now())
+	if err != nil {
+		return nil, err
+	}
+	slog.Info("数据新鲜度检查完成",
+		"lastTrading", report.LastTrading, "behind", len(report.BehindDays),
+		"summary", report.Summary)
+	return report, nil
 }
 
 // UpdateStatus 返回当前/最近任务的进度快照。

@@ -285,6 +285,44 @@ func (l *Lake) DatasetStatus(name string) DatasetStatus {
 	return status
 }
 
+// LatestDatasetDate 导出 latestDate，供新鲜度检查使用。
+//
+// 只扫最后两个文件 —— 判断"落后没有"只需要最大值，
+// 不该为了一个展示值把整库读一遍。
+func (l *Lake) LatestDatasetDate(name string) int64 {
+	return l.latestDate(name)
+}
+
+// TradingCalendar 返回日历里**所有交易日**（YYYYMMDD 升序）。
+//
+// 用于判断"按日历该有哪些交易日、实际缺了哪几天" —— 这是方案 §2.2/§2.3
+// 里漏日补跑的关键：普通日更和 --stale-only 都不覆盖日行情缺口，
+// 只有按日历逐日执行 `--trade-date` 才能补上。
+func (l *Lake) TradingCalendar() ([]int64, error) {
+	type calendarRow struct {
+		TradeDate int32 `parquet:"trade_date,date"`
+		IsTrading bool  `parquet:"is_trading"`
+	}
+	rows, err := readTyped[calendarRow](l.DatasetFiles("trading_calendar"), func(row *calendarRow) bool {
+		return row.IsTrading
+	})
+	if err != nil {
+		return nil, fmt.Errorf("cnlake: 读取 trading_calendar 失败：%w", err)
+	}
+	seen := make(map[int64]bool, len(rows))
+	out := make([]int64, 0, len(rows))
+	for _, row := range rows {
+		date := daysToDate(row.TradeDate)
+		if date <= 0 || seen[date] {
+			continue
+		}
+		seen[date] = true
+		out = append(out, date)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out, nil
+}
+
 // latestDate 从数据集里找出最大的日期列值（YYYYMMDD）。
 // 只扫最后两个文件，够用且不会为了一个展示值把整库读一遍。
 func (l *Lake) latestDate(name string) int64 {

@@ -33,11 +33,24 @@ export function CancelUpdate(): $CancellablePromise<void> {
 }
 
 /**
+ * CheckFreshness 检查数据湖里关键数据集的新鲜度（方案 §4.3）。
+ * 
+ * 这是**漏日补跑**的判断依据：只看 `--stale-only` 的结论会以为"没落后"，
+ * 因为它的落后清单里根本没有 daily_bars（方案 §2.2 实测），
+ * 而行情可能确实缺了一天。
+ */
+export function CheckFreshness(): $CancellablePromise<cne$0.FreshnessReport | null> {
+    return $Call.ByID(1299744870).then(($result: any) => {
+        return $$createType1($result);
+    });
+}
+
+/**
  * GetUpdatePrefs 返回当前设置（未保存过时给默认值）。
  */
 export function GetUpdatePrefs(): $CancellablePromise<$models.UpdatePrefsInfo> {
     return $Call.ByID(3588240232).then(($result: any) => {
-        return $$createType0($result);
+        return $$createType2($result);
     });
 }
 
@@ -53,7 +66,7 @@ export function GetUpdatePrefs(): $CancellablePromise<$models.UpdatePrefsInfo> {
  */
 export function ManualUpdate(kind: string, tradeDate: string): $CancellablePromise<$models.JobInfo | null> {
     return $Call.ByID(4236573058, kind, tradeDate).then(($result: any) => {
-        return $$createType2($result);
+        return $$createType4($result);
     });
 }
 
@@ -66,7 +79,7 @@ export function ManualUpdate(kind: string, tradeDate: string): $CancellablePromi
  */
 export function SetUpdatePrefs(prefs: config$0.UpdatePrefs): $CancellablePromise<$models.UpdatePrefsInfo> {
     return $Call.ByID(1336538668, prefs).then(($result: any) => {
-        return $$createType0($result);
+        return $$createType2($result);
     });
 }
 
@@ -75,13 +88,15 @@ export function SetUpdatePrefs(prefs: config$0.UpdatePrefs): $CancellablePromise
  */
 export function UpdateStatus(): $CancellablePromise<cne$0.Status | null> {
     return $Call.ByID(1563115678).then(($result: any) => {
-        return $$createType4($result);
+        return $$createType6($result);
     });
 }
 
 // Private type creation functions
-const $$createType0 = $models.UpdatePrefsInfo.createFrom;
-const $$createType1 = $models.JobInfo.createFrom;
-const $$createType2 = $Create.Nullable($$createType1);
-const $$createType3 = cne$0.Status.createFrom;
+const $$createType0 = cne$0.FreshnessReport.createFrom;
+const $$createType1 = $Create.Nullable($$createType0);
+const $$createType2 = $models.UpdatePrefsInfo.createFrom;
+const $$createType3 = $models.JobInfo.createFrom;
 const $$createType4 = $Create.Nullable($$createType3);
+const $$createType5 = cne$0.Status.createFrom;
+const $$createType6 = $Create.Nullable($$createType5);

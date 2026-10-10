@@ -10,6 +10,130 @@ import { Create as $Create } from "@wailsio/runtime";
 import * as time$0 from "../../../time/models.js";
 
 /**
+ * DatasetFreshness 是一个数据集的新鲜度。
+ */
+export class DatasetFreshness {
+    "name": string;
+
+    /**
+     * LatestDate 是数据集里实际的最新日期（YYYYMMDD，0 表示没有数据）
+     */
+    "latestDate": number;
+
+    /**
+     * LastTrading 是日历上**最后一个已收盘交易日**（YYYYMMDD）
+     */
+    "lastTrading": number;
+
+    /**
+     * BehindDays 是缺失的交易日（升序）。空表示不落后。
+     */
+    "behindDays": number[];
+
+    /**
+     * Missing 表示数据集根本没入库
+     */
+    "missing": boolean;
+
+    /** Creates a new DatasetFreshness instance. */
+    constructor($$source: Partial<DatasetFreshness> = {}) {
+        if (!("name" in $$source)) {
+            this["name"] = "";
+        }
+        if (!("latestDate" in $$source)) {
+            this["latestDate"] = 0;
+        }
+        if (!("lastTrading" in $$source)) {
+            this["lastTrading"] = 0;
+        }
+        if (!("behindDays" in $$source)) {
+            this["behindDays"] = [];
+        }
+        if (!("missing" in $$source)) {
+            this["missing"] = false;
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new DatasetFreshness instance from a string or object.
+     */
+    static createFrom($$source: any = {}): DatasetFreshness {
+        const $$createField3_0 = $$createType0;
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        if ("behindDays" in $$parsedSource) {
+            $$parsedSource["behindDays"] = $$createField3_0($$parsedSource["behindDays"]);
+        }
+        return new DatasetFreshness($$parsedSource as Partial<DatasetFreshness>);
+    }
+}
+
+/**
+ * FreshnessReport 是整体结论。
+ */
+export class FreshnessReport {
+    "datasets": DatasetFreshness[];
+
+    /**
+     * LastTrading 是日历上最后一个已收盘交易日
+     */
+    "lastTrading": number;
+
+    /**
+     * MaxBehind 是所有数据集里落后的**最多**交易日数
+     */
+    "maxBehind": number;
+
+    /**
+     * BehindDays 是需要补的交易日（各数据集的并集，升序）
+     */
+    "behindDays": number[];
+
+    /**
+     * Summary 是人类可读的一句话
+     */
+    "summary": string;
+
+    /** Creates a new FreshnessReport instance. */
+    constructor($$source: Partial<FreshnessReport> = {}) {
+        if (!("datasets" in $$source)) {
+            this["datasets"] = [];
+        }
+        if (!("lastTrading" in $$source)) {
+            this["lastTrading"] = 0;
+        }
+        if (!("maxBehind" in $$source)) {
+            this["maxBehind"] = 0;
+        }
+        if (!("behindDays" in $$source)) {
+            this["behindDays"] = [];
+        }
+        if (!("summary" in $$source)) {
+            this["summary"] = "";
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new FreshnessReport instance from a string or object.
+     */
+    static createFrom($$source: any = {}): FreshnessReport {
+        const $$createField0_0 = $$createType2;
+        const $$createField3_0 = $$createType0;
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        if ("datasets" in $$parsedSource) {
+            $$parsedSource["datasets"] = $$createField0_0($$parsedSource["datasets"]);
+        }
+        if ("behindDays" in $$parsedSource) {
+            $$parsedSource["behindDays"] = $$createField3_0($$parsedSource["behindDays"]);
+        }
+        return new FreshnessReport($$parsedSource as Partial<FreshnessReport>);
+    }
+}
+
+/**
  * Status 是给前端的进度快照。
  */
 export class Status {
@@ -64,8 +188,8 @@ export class Status {
      * Creates a new Status instance from a string or object.
      */
     static createFrom($$source: any = {}): Status {
-        const $$createField7_0 = $$createType0;
-        const $$createField8_0 = $$createType2;
+        const $$createField7_0 = $$createType3;
+        const $$createField8_0 = $$createType5;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("logTail" in $$parsedSource) {
             $$parsedSource["logTail"] = $$createField7_0($$parsedSource["logTail"]);
@@ -116,5 +240,8 @@ export class StepInfo {
 
 // Private type creation functions
 const $$createType0 = $Create.Array($Create.Any);
-const $$createType1 = StepInfo.createFrom;
+const $$createType1 = DatasetFreshness.createFrom;
 const $$createType2 = $Create.Array($$createType1);
+const $$createType3 = $Create.Array($Create.Any);
+const $$createType4 = StepInfo.createFrom;
+const $$createType5 = $Create.Array($$createType4);
