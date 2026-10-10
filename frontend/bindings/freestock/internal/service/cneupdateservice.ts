@@ -74,6 +74,16 @@ export function GetUpdatePrefs(): $CancellablePromise<$models.UpdatePrefsInfo> {
 }
 
 /**
+ * LatestRunResult 返回最近一次运行的详细结果：每个数据集写了多少行、
+ * 是失败还是"上游暂无数据"。
+ */
+export function LatestRunResult(): $CancellablePromise<cne$0.RunDetail | null> {
+    return $Call.ByID(2761471014).then(($result: any) => {
+        return $$createType5($result);
+    });
+}
+
+/**
  * ManualUpdate 发起一次手动更新，**立即返回**（不等任务跑完）。
  * 
  * kind：`full` 更新到今天 / `stale` 补抓落后 / `date` 补指定交易日。
@@ -85,7 +95,21 @@ export function GetUpdatePrefs(): $CancellablePromise<$models.UpdatePrefsInfo> {
  */
 export function ManualUpdate(kind: string, tradeDate: string): $CancellablePromise<$models.JobInfo | null> {
     return $Call.ByID(4236573058, kind, tradeDate).then(($result: any) => {
-        return $$createType5($result);
+        return $$createType7($result);
+    });
+}
+
+/**
+ * RecentRuns 读最近的运行记录（来自 cne 的 manifest.db）。
+ * 
+ * ⚠ **这是判断"这次更新到底成没成"的唯一可靠方式**。
+ * 方案 §2.1 实测：一次 `--stale-only` 补跑 exit=1、run 状态 failed，
+ * 而 8 个步骤里 5 个成功、写了 25,159 行；反过来 degraded 的运行 exit=0。
+ * **退出码不能当成功判据。**
+ */
+export function RecentRuns(limit: number): $CancellablePromise<cne$0.RunSummary[]> {
+    return $Call.ByID(393987276, limit).then(($result: any) => {
+        return $$createType9($result);
     });
 }
 
@@ -105,7 +129,7 @@ export function ManualUpdate(kind: string, tradeDate: string): $CancellablePromi
  */
 export function ScheduleState(): $CancellablePromise<cne$0.ScheduleState | null> {
     return $Call.ByID(4153802545).then(($result: any) => {
-        return $$createType7($result);
+        return $$createType11($result);
     });
 }
 
@@ -137,7 +161,7 @@ export function SetUpdatePrefs(prefs: config$0.UpdatePrefs): $CancellablePromise
  */
 export function StartCatchUp(): $CancellablePromise<$models.CatchUpInfo | null> {
     return $Call.ByID(1149046919).then(($result: any) => {
-        return $$createType9($result);
+        return $$createType13($result);
     });
 }
 
@@ -146,7 +170,7 @@ export function StartCatchUp(): $CancellablePromise<$models.CatchUpInfo | null> 
  */
 export function UpdateStatus(): $CancellablePromise<cne$0.Status | null> {
     return $Call.ByID(1563115678).then(($result: any) => {
-        return $$createType11($result);
+        return $$createType15($result);
     });
 }
 
@@ -155,11 +179,15 @@ const $$createType0 = cne$0.CatchUpState.createFrom;
 const $$createType1 = cne$0.FreshnessReport.createFrom;
 const $$createType2 = $Create.Nullable($$createType1);
 const $$createType3 = $models.UpdatePrefsInfo.createFrom;
-const $$createType4 = $models.JobInfo.createFrom;
+const $$createType4 = cne$0.RunDetail.createFrom;
 const $$createType5 = $Create.Nullable($$createType4);
-const $$createType6 = cne$0.ScheduleState.createFrom;
+const $$createType6 = $models.JobInfo.createFrom;
 const $$createType7 = $Create.Nullable($$createType6);
-const $$createType8 = $models.CatchUpInfo.createFrom;
-const $$createType9 = $Create.Nullable($$createType8);
-const $$createType10 = cne$0.Status.createFrom;
+const $$createType8 = cne$0.RunSummary.createFrom;
+const $$createType9 = $Create.Array($$createType8);
+const $$createType10 = cne$0.ScheduleState.createFrom;
 const $$createType11 = $Create.Nullable($$createType10);
+const $$createType12 = $models.CatchUpInfo.createFrom;
+const $$createType13 = $Create.Nullable($$createType12);
+const $$createType14 = cne$0.Status.createFrom;
+const $$createType15 = $Create.Nullable($$createType14);

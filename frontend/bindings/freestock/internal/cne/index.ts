@@ -4,7 +4,10 @@
 export {
     CatchUpState,
     DatasetFreshness,
+    DatasetResult,
     FreshnessReport,
+    RunDetail,
+    RunSummary,
     ScheduleState,
     Status,
     StepInfo,

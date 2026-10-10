@@ -228,6 +228,41 @@ func (s *CneUpdateService) CancelCatchUp() error {
 	return s.runner().CancelCatchUp()
 }
 
+// RecentRuns 读最近的运行记录（来自 cne 的 manifest.db）。
+//
+// ⚠ **这是判断"这次更新到底成没成"的唯一可靠方式**。
+// 方案 §2.1 实测：一次 `--stale-only` 补跑 exit=1、run 状态 failed，
+// 而 8 个步骤里 5 个成功、写了 25,159 行；反过来 degraded 的运行 exit=0。
+// **退出码不能当成功判据。**
+func (s *CneUpdateService) RecentRuns(limit int) ([]cne.RunSummary, error) {
+	dir, err := s.projectDir()
+	if err != nil {
+		return nil, err
+	}
+	return cne.RecentRuns(dir, limit)
+}
+
+// LatestRunResult 返回最近一次运行的详细结果：每个数据集写了多少行、
+// 是失败还是"上游暂无数据"。
+func (s *CneUpdateService) LatestRunResult() (*cne.RunDetail, error) {
+	dir, err := s.projectDir()
+	if err != nil {
+		return nil, err
+	}
+	return cne.LatestRun(dir)
+}
+
+func (s *CneUpdateService) projectDir() (string, error) {
+	if s.store == nil {
+		return "", errors.New("缺少配置存储")
+	}
+	prefs, _ := s.store.UpdatePrefs()
+	if strings.TrimSpace(prefs.ProjectDir) == "" {
+		return "", errors.New("还没设置 cne 工程目录")
+	}
+	return prefs.ProjectDir, nil
+}
+
 // UpdateStatus 返回当前/最近任务的进度快照。
 func (s *CneUpdateService) UpdateStatus() (*cne.Status, error) {
 	if s.store == nil {

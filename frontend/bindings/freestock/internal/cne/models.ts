@@ -166,6 +166,61 @@ export class DatasetFreshness {
 }
 
 /**
+ * DatasetResult 是某次运行里一个数据集的结果。
+ */
+export class DatasetResult {
+    "dataset": string;
+    "stage": string;
+    "status": string;
+    "criticality": string;
+
+    /**
+     * RowsWritten 是**真正写进去的行数** —— 判断"有没有真的更新"看它
+     */
+    "rowsWritten": number;
+
+    /**
+     * UsableResult 表示这个结果是否可用
+     */
+    "usableResult": boolean;
+    "errorCode"?: string;
+    "errorMessage"?: string;
+    "reasonCode"?: string;
+
+    /** Creates a new DatasetResult instance. */
+    constructor($$source: Partial<DatasetResult> = {}) {
+        if (!("dataset" in $$source)) {
+            this["dataset"] = "";
+        }
+        if (!("stage" in $$source)) {
+            this["stage"] = "";
+        }
+        if (!("status" in $$source)) {
+            this["status"] = "";
+        }
+        if (!("criticality" in $$source)) {
+            this["criticality"] = "";
+        }
+        if (!("rowsWritten" in $$source)) {
+            this["rowsWritten"] = 0;
+        }
+        if (!("usableResult" in $$source)) {
+            this["usableResult"] = false;
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new DatasetResult instance from a string or object.
+     */
+    static createFrom($$source: any = {}): DatasetResult {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new DatasetResult($$parsedSource as Partial<DatasetResult>);
+    }
+}
+
+/**
  * FreshnessReport 是整体结论。
  */
 export class FreshnessReport {
@@ -230,6 +285,139 @@ export class FreshnessReport {
 }
 
 /**
+ * RunDetail 是一次运行的完整结果。
+ */
+export class RunDetail {
+    "run": RunSummary;
+    "datasets": DatasetResult[];
+
+    /**
+     * Succeeded / Failed / Unavailable 是三类数据集的名字
+     */
+    "succeeded": string[];
+    "failed": string[];
+    "unavailable": string[];
+
+    /**
+     * RowsWritten 是所有数据集写入行数之和
+     */
+    "rowsWritten": number;
+
+    /**
+     * Conclusion 是**人类可读的结论**，措辞刻意区分"进程退出"和"数据更新"
+     */
+    "conclusion": string;
+
+    /** Creates a new RunDetail instance. */
+    constructor($$source: Partial<RunDetail> = {}) {
+        if (!("run" in $$source)) {
+            this["run"] = (new RunSummary());
+        }
+        if (!("datasets" in $$source)) {
+            this["datasets"] = [];
+        }
+        if (!("succeeded" in $$source)) {
+            this["succeeded"] = [];
+        }
+        if (!("failed" in $$source)) {
+            this["failed"] = [];
+        }
+        if (!("unavailable" in $$source)) {
+            this["unavailable"] = [];
+        }
+        if (!("rowsWritten" in $$source)) {
+            this["rowsWritten"] = 0;
+        }
+        if (!("conclusion" in $$source)) {
+            this["conclusion"] = "";
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new RunDetail instance from a string or object.
+     */
+    static createFrom($$source: any = {}): RunDetail {
+        const $$createField0_0 = $$createType3;
+        const $$createField1_0 = $$createType5;
+        const $$createField2_0 = $$createType6;
+        const $$createField3_0 = $$createType6;
+        const $$createField4_0 = $$createType6;
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        if ("run" in $$parsedSource) {
+            $$parsedSource["run"] = $$createField0_0($$parsedSource["run"]);
+        }
+        if ("datasets" in $$parsedSource) {
+            $$parsedSource["datasets"] = $$createField1_0($$parsedSource["datasets"]);
+        }
+        if ("succeeded" in $$parsedSource) {
+            $$parsedSource["succeeded"] = $$createField2_0($$parsedSource["succeeded"]);
+        }
+        if ("failed" in $$parsedSource) {
+            $$parsedSource["failed"] = $$createField3_0($$parsedSource["failed"]);
+        }
+        if ("unavailable" in $$parsedSource) {
+            $$parsedSource["unavailable"] = $$createField4_0($$parsedSource["unavailable"]);
+        }
+        return new RunDetail($$parsedSource as Partial<RunDetail>);
+    }
+}
+
+/**
+ * RunSummary 是一次运行。
+ */
+export class RunSummary {
+    "runId": string;
+    "jobName": string;
+    "status": string;
+    "startedAt": string;
+    "finishedAt": string;
+    "rowsWritten": number;
+    "executionStatus": string;
+    "coverageStatus": string;
+    "errorMessage"?: string;
+
+    /** Creates a new RunSummary instance. */
+    constructor($$source: Partial<RunSummary> = {}) {
+        if (!("runId" in $$source)) {
+            this["runId"] = "";
+        }
+        if (!("jobName" in $$source)) {
+            this["jobName"] = "";
+        }
+        if (!("status" in $$source)) {
+            this["status"] = "";
+        }
+        if (!("startedAt" in $$source)) {
+            this["startedAt"] = "";
+        }
+        if (!("finishedAt" in $$source)) {
+            this["finishedAt"] = "";
+        }
+        if (!("rowsWritten" in $$source)) {
+            this["rowsWritten"] = 0;
+        }
+        if (!("executionStatus" in $$source)) {
+            this["executionStatus"] = "";
+        }
+        if (!("coverageStatus" in $$source)) {
+            this["coverageStatus"] = "";
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new RunSummary instance from a string or object.
+     */
+    static createFrom($$source: any = {}): RunSummary {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new RunSummary($$parsedSource as Partial<RunSummary>);
+    }
+}
+
+/**
  * ScheduleState 是界面上要显示的整体状态。
  */
 export class ScheduleState {
@@ -279,8 +467,8 @@ export class ScheduleState {
      * Creates a new ScheduleState instance from a string or object.
      */
     static createFrom($$source: any = {}): ScheduleState {
-        const $$createField0_0 = $$createType3;
-        const $$createField1_0 = $$createType3;
+        const $$createField0_0 = $$createType7;
+        const $$createField1_0 = $$createType7;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("daily" in $$parsedSource) {
             $$parsedSource["daily"] = $$createField0_0($$parsedSource["daily"]);
@@ -347,8 +535,8 @@ export class Status {
      * Creates a new Status instance from a string or object.
      */
     static createFrom($$source: any = {}): Status {
-        const $$createField7_0 = $$createType4;
-        const $$createField8_0 = $$createType6;
+        const $$createField7_0 = $$createType6;
+        const $$createField8_0 = $$createType9;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("logTail" in $$parsedSource) {
             $$parsedSource["logTail"] = $$createField7_0($$parsedSource["logTail"]);
@@ -473,7 +661,10 @@ export class TaskInfo {
 const $$createType0 = $Create.Array($Create.Any);
 const $$createType1 = DatasetFreshness.createFrom;
 const $$createType2 = $Create.Array($$createType1);
-const $$createType3 = TaskInfo.createFrom;
-const $$createType4 = $Create.Array($Create.Any);
-const $$createType5 = StepInfo.createFrom;
-const $$createType6 = $Create.Array($$createType5);
+const $$createType3 = RunSummary.createFrom;
+const $$createType4 = DatasetResult.createFrom;
+const $$createType5 = $Create.Array($$createType4);
+const $$createType6 = $Create.Array($Create.Any);
+const $$createType7 = TaskInfo.createFrom;
+const $$createType8 = StepInfo.createFrom;
+const $$createType9 = $Create.Array($$createType8);
