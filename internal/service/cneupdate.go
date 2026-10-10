@@ -141,6 +141,77 @@ func (s *CneUpdateService) CheckFreshness() (*cne.FreshnessReport, error) {
 	return report, nil
 }
 
+// CatchUpInfo 是补跑的发起结果。
+type CatchUpInfo struct {
+	Started bool             `json:"started"`
+	Dates   []int64          `json:"dates"`
+	Message string           `json:"message"`
+	State   cne.CatchUpState `json:"state"`
+}
+
+// StartCatchUp 按新鲜度检查的结果**逐日串行**补跑缺失的交易日。
+//
+// ⚠ **这是显式入口，不接自动启动**。
+//
+// 方案 §5.2 希望"启动时落后 1~3 天自动补"。但那意味着**每次开机都可能
+// 跑几小时、并真的改动数据湖** —— 那是个独立的决定，不该和"把补跑编排写好"
+// 混在一起。现在由用户点按钮触发；要接自动启动，应作为单独一步，
+// 连同"如何提示、如何避免每次开机都跑"一起设计。
+//
+// 另外：这里会**先跑一次新鲜度检查**，用它的结果决定补哪些天 ——
+// 不听前端传来的日期，避免界面过期导致补错。
+func (s *CneUpdateService) StartCatchUp() (*CatchUpInfo, error) {
+	if s.store == nil {
+		return nil, errors.New("缺少配置存储")
+	}
+	prefs, _ := s.store.UpdatePrefs()
+	if prefs.ProjectDir == "" {
+		return nil, errors.New("还没设置 cne 工程目录，无法找到数据湖")
+	}
+	report, err := cne.Check(prefs.ProjectDir, time.Now())
+	if err != nil {
+		return nil, err
+	}
+	if len(report.BehindDays) == 0 {
+		return &CatchUpInfo{
+			Started: false,
+			Message: report.Summary,
+			State:   s.runner().CatchUpState(),
+		}, nil
+	}
+
+	if err := s.runner().StartCatchUp(report.BehindDays); err != nil {
+		return nil, err
+	}
+	return &CatchUpInfo{
+		Started: true,
+		Dates:   report.BehindDays,
+		Message: fmt.Sprintf("已开始逐日补跑 %d 个交易日：%v。"+
+			"补跑是串行的（cne 有写入锁），可能需要较久；"+
+			"每天跑完可以再查新鲜度确认。", len(report.BehindDays), report.BehindDays),
+		State: s.runner().CatchUpState(),
+	}, nil
+}
+
+// CatchUpState 返回补跑进度。
+func (s *CneUpdateService) CatchUpState() cne.CatchUpState {
+	if s.store == nil {
+		return cne.CatchUpState{}
+	}
+	return s.runner().CatchUpState()
+}
+
+// CancelCatchUp 请求停止补跑。
+//
+// 语义是"**当前这一天跑完后不再继续**"，不中途掐断正在跑的那天 ——
+// 补一半的状态比多等一会儿更糟。要立刻停用 CancelUpdate()。
+func (s *CneUpdateService) CancelCatchUp() error {
+	if s.store == nil {
+		return errors.New("缺少配置存储")
+	}
+	return s.runner().CancelCatchUp()
+}
+
 // UpdateStatus 返回当前/最近任务的进度快照。
 func (s *CneUpdateService) UpdateStatus() (*cne.Status, error) {
 	if s.store == nil {

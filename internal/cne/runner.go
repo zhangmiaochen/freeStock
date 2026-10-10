@@ -78,6 +78,9 @@ type Runner struct {
 	// buildArgs 是给测试留的接缝：默认拼 `run daily ... --config ...`。
 	buildArgs func(kind string, extra []string) ([]string, error)
 
+	// catchUp 是漏日补跑的编排状态（见 catchup.go）
+	catchUp catchUp
+
 	// foreignRunning 同样是接缝：默认扫系统进程表。
 	// 本机跑测试时可能**真的有 cne 在跑**（计划任务或上次残留），
 	// 那时用例会被正当拦住 —— 所以测试里替换成"总说没有"。

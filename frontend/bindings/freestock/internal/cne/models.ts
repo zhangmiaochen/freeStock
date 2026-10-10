@@ -10,6 +10,102 @@ import { Create as $Create } from "@wailsio/runtime";
 import * as time$0 from "../../../time/models.js";
 
 /**
+ * CatchUpState 是漏日补跑的进度。
+ * 
+ * 方案 §5.2 第 2 层：**这一层才是真正补上数据的地方** ——
+ * 实测里周五（10-09）的行情缺口，普通日更和 `--stale-only` 都不会补，
+ * 只有 `cne run daily --trade-date <那天>` 能补上（§2.2、§2.3）。
+ * 
+ * ⚠ **必须逐日串行**：cne 自己有 ingest 锁，并行跑要么失败要么空等；
+ * 而且每天是一次完整日更，本来就该等它结束再跑下一天。
+ */
+export class CatchUpState {
+    "running": boolean;
+
+    /**
+     * Dates 是本次要补的交易日（升序）
+     */
+    "dates": number[];
+
+    /**
+     * Current 是正在补第几个（1-based；0 表示还没开始）
+     */
+    "current": number;
+
+    /**
+     * Done 是已成功的天数
+     */
+    "done": number;
+
+    /**
+     * Failed 是跑失败或进程异常退出的交易日
+     */
+    "failed": number[];
+
+    /**
+     * Skipped 是因故没跑的交易日（例如已有别的任务在跑）
+     */
+    "skipped": number[];
+
+    /**
+     * LastError 是最近一次失败的原因（人类可读）
+     */
+    "lastError"?: string;
+
+    /**
+     * Message 是当前状态的一句话
+     */
+    "message": string;
+
+    /** Creates a new CatchUpState instance. */
+    constructor($$source: Partial<CatchUpState> = {}) {
+        if (!("running" in $$source)) {
+            this["running"] = false;
+        }
+        if (!("dates" in $$source)) {
+            this["dates"] = [];
+        }
+        if (!("current" in $$source)) {
+            this["current"] = 0;
+        }
+        if (!("done" in $$source)) {
+            this["done"] = 0;
+        }
+        if (!("failed" in $$source)) {
+            this["failed"] = [];
+        }
+        if (!("skipped" in $$source)) {
+            this["skipped"] = [];
+        }
+        if (!("message" in $$source)) {
+            this["message"] = "";
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new CatchUpState instance from a string or object.
+     */
+    static createFrom($$source: any = {}): CatchUpState {
+        const $$createField1_0 = $$createType0;
+        const $$createField4_0 = $$createType0;
+        const $$createField5_0 = $$createType0;
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        if ("dates" in $$parsedSource) {
+            $$parsedSource["dates"] = $$createField1_0($$parsedSource["dates"]);
+        }
+        if ("failed" in $$parsedSource) {
+            $$parsedSource["failed"] = $$createField4_0($$parsedSource["failed"]);
+        }
+        if ("skipped" in $$parsedSource) {
+            $$parsedSource["skipped"] = $$createField5_0($$parsedSource["skipped"]);
+        }
+        return new CatchUpState($$parsedSource as Partial<CatchUpState>);
+    }
+}
+
+/**
  * DatasetFreshness 是一个数据集的新鲜度。
  */
 export class DatasetFreshness {

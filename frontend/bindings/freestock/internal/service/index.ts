@@ -29,6 +29,7 @@ export {
     BoardMemberQuote,
     BoardQuote,
     BoardQuoteResult,
+    CatchUpInfo,
     DataLakeInfo,
     DataSourceInfo,
     DerivedFundamentals,

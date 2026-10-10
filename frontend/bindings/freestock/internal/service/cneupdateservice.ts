@@ -26,10 +26,29 @@ import * as config$0 from "../config/models.js";
 import * as $models from "./models.js";
 
 /**
+ * CancelCatchUp 请求停止补跑。
+ * 
+ * 语义是"**当前这一天跑完后不再继续**"，不中途掐断正在跑的那天 ——
+ * 补一半的状态比多等一会儿更糟。要立刻停用 CancelUpdate()。
+ */
+export function CancelCatchUp(): $CancellablePromise<void> {
+    return $Call.ByID(392529531);
+}
+
+/**
  * CancelUpdate 取消当前任务（杀整棵进程树，不留孤儿 python）。
  */
 export function CancelUpdate(): $CancellablePromise<void> {
     return $Call.ByID(2256926650);
+}
+
+/**
+ * CatchUpState 返回补跑进度。
+ */
+export function CatchUpState(): $CancellablePromise<cne$0.CatchUpState> {
+    return $Call.ByID(2972324642).then(($result: any) => {
+        return $$createType0($result);
+    });
 }
 
 /**
@@ -41,7 +60,7 @@ export function CancelUpdate(): $CancellablePromise<void> {
  */
 export function CheckFreshness(): $CancellablePromise<cne$0.FreshnessReport | null> {
     return $Call.ByID(1299744870).then(($result: any) => {
-        return $$createType1($result);
+        return $$createType2($result);
     });
 }
 
@@ -50,7 +69,7 @@ export function CheckFreshness(): $CancellablePromise<cne$0.FreshnessReport | nu
  */
 export function GetUpdatePrefs(): $CancellablePromise<$models.UpdatePrefsInfo> {
     return $Call.ByID(3588240232).then(($result: any) => {
-        return $$createType2($result);
+        return $$createType3($result);
     });
 }
 
@@ -66,7 +85,7 @@ export function GetUpdatePrefs(): $CancellablePromise<$models.UpdatePrefsInfo> {
  */
 export function ManualUpdate(kind: string, tradeDate: string): $CancellablePromise<$models.JobInfo | null> {
     return $Call.ByID(4236573058, kind, tradeDate).then(($result: any) => {
-        return $$createType4($result);
+        return $$createType5($result);
     });
 }
 
@@ -79,7 +98,26 @@ export function ManualUpdate(kind: string, tradeDate: string): $CancellablePromi
  */
 export function SetUpdatePrefs(prefs: config$0.UpdatePrefs): $CancellablePromise<$models.UpdatePrefsInfo> {
     return $Call.ByID(1336538668, prefs).then(($result: any) => {
-        return $$createType2($result);
+        return $$createType3($result);
+    });
+}
+
+/**
+ * StartCatchUp 按新鲜度检查的结果**逐日串行**补跑缺失的交易日。
+ * 
+ * ⚠ **这是显式入口，不接自动启动**。
+ * 
+ * 方案 §5.2 希望"启动时落后 1~3 天自动补"。但那意味着**每次开机都可能
+ * 跑几小时、并真的改动数据湖** —— 那是个独立的决定，不该和"把补跑编排写好"
+ * 混在一起。现在由用户点按钮触发；要接自动启动，应作为单独一步，
+ * 连同"如何提示、如何避免每次开机都跑"一起设计。
+ * 
+ * 另外：这里会**先跑一次新鲜度检查**，用它的结果决定补哪些天 ——
+ * 不听前端传来的日期，避免界面过期导致补错。
+ */
+export function StartCatchUp(): $CancellablePromise<$models.CatchUpInfo | null> {
+    return $Call.ByID(1149046919).then(($result: any) => {
+        return $$createType7($result);
     });
 }
 
@@ -88,15 +126,18 @@ export function SetUpdatePrefs(prefs: config$0.UpdatePrefs): $CancellablePromise
  */
 export function UpdateStatus(): $CancellablePromise<cne$0.Status | null> {
     return $Call.ByID(1563115678).then(($result: any) => {
-        return $$createType6($result);
+        return $$createType9($result);
     });
 }
 
 // Private type creation functions
-const $$createType0 = cne$0.FreshnessReport.createFrom;
-const $$createType1 = $Create.Nullable($$createType0);
-const $$createType2 = $models.UpdatePrefsInfo.createFrom;
-const $$createType3 = $models.JobInfo.createFrom;
-const $$createType4 = $Create.Nullable($$createType3);
-const $$createType5 = cne$0.Status.createFrom;
-const $$createType6 = $Create.Nullable($$createType5);
+const $$createType0 = cne$0.CatchUpState.createFrom;
+const $$createType1 = cne$0.FreshnessReport.createFrom;
+const $$createType2 = $Create.Nullable($$createType1);
+const $$createType3 = $models.UpdatePrefsInfo.createFrom;
+const $$createType4 = $models.JobInfo.createFrom;
+const $$createType5 = $Create.Nullable($$createType4);
+const $$createType6 = $models.CatchUpInfo.createFrom;
+const $$createType7 = $Create.Nullable($$createType6);
+const $$createType8 = cne$0.Status.createFrom;
+const $$createType9 = $Create.Nullable($$createType8);
