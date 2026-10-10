@@ -174,6 +174,10 @@ function stopPolling() {
 }
 
 const running = computed(() => status.value?.running ?? false);
+/** 被跳过的调度组（含原因）—— 用户最需要知道的信息 */
+const skippedSteps = computed(() => (status.value?.steps ?? []).filter((s) => s.state === "skipped"));
+/** 正在跑的步骤 */
+const runningSteps = computed(() => (status.value?.steps ?? []).filter((s) => s.state === "running"));
 const elapsedText = computed(() => {
   const sec = status.value?.elapsedSec ?? 0;
   if (sec < 60) return `${sec} 秒`;
@@ -577,6 +581,21 @@ onUnmounted(stopPolling);
           <span>日志</span>
           <code class="truncate">{{ status.logPath }}</code>
         </div>
+        <!-- ⚠ 非交易日跳过行情组是最容易被误解的情形：用户点"更新到今天"、
+             看到任务成功，却不知道**行情数据这次根本没碰**（方案 §2.3）。
+             所以这里单独用一句话说清楚。 -->
+        <p v-if="skippedSteps.length" class="text-[11px] text-amber-600">
+          本次跳过了 {{ skippedSteps.length }} 个调度组：
+          {{ skippedSteps.map((s) => s.name).join("、") }}。
+          <template v-if="skippedSteps.some((s) => s.rows?.includes('non_trading_day'))">
+            原因是<strong>今天不是交易日</strong> —— 普通日更不会碰行情数据。
+            要补某个交易日的行情，请用上方的「补指定交易日」。
+          </template>
+        </p>
+        <p v-if="runningSteps.length" class="text-muted-foreground text-[11px]">
+          正在跑：{{ runningSteps.map((s) => `${s.name}${s.elapsed ? ` (${s.elapsed})` : ""}`).join("、") }}
+          —— cne 每分钟会打一次心跳，长时间没新输出不等于卡死。
+        </p>
         <div v-if="status.steps?.length" class="flex flex-wrap gap-1">
           <Badge
             v-for="step in status.steps"
@@ -584,7 +603,8 @@ onUnmounted(stopPolling);
             :variant="step.state === 'failed' ? 'destructive' : step.state === 'success' ? 'secondary' : 'outline'"
             class="text-[10px]"
           >
-            {{ step.name }} · {{ step.state }}<template v-if="step.elapsed"> · {{ step.elapsed }}</template>
+            {{ step.name }} · {{ step.state }}<template v-if="step.elapsed"> · {{ step.elapsed }}</template
+            ><template v-if="step.rows"> · {{ step.rows }}</template>
           </Badge>
         </div>
         <pre

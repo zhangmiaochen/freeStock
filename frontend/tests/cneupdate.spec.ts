@@ -477,3 +477,47 @@ describe("自动更新开关", () => {
     await vi.waitFor(() => expect(mocks.setAutoUpdate).toHaveBeenCalledWith(true));
   });
 });
+describe("日志解析出来的进度（含非交易日跳过）", () => {
+  it("**非交易日跳过行情组时要明确告诉用户**，并指向「补指定交易日」", async () => {
+    mocks.updateStatus.mockResolvedValue({
+      running: true,
+      kind: "full",
+      elapsedSec: 900,
+      logPath: "D:\\CNEquity\\logs\\freestock-update-1.log",
+      outcome: "进行中",
+      // 取自真实日志：周六跑普通日更，6 个调度组因非交易日被跳过
+      steps: [
+        { name: "core", state: "skipped", rows: "skipped_non_trading_day" },
+        { name: "capital", state: "skipped", rows: "skipped_non_trading_day" },
+        { name: "research", state: "skipped", rows: "skipped_non_trading_day" },
+        { name: "announcement_index", state: "running", elapsed: "15m06s" },
+      ],
+      logTail: ["调度组 core：skipped_non_trading_day"],
+    });
+    const wrapper = await mountCard();
+    const text = wrapper.text();
+    // 跳过汇总 + 原因
+    expect(text).toContain("本次跳过了 3 个调度组");
+    expect(text).toContain("core");
+    expect(text).toContain("今天不是交易日");
+    // 必须指向正确的入口 —— 否则用户不知道该怎么办
+    expect(text).toContain("补指定交易日");
+    // 正在跑的步骤与已用时
+    expect(text).toContain("正在跑");
+    expect(text).toContain("announcement_index");
+    expect(text).toContain("15m06s");
+    // 别让用户以为卡死了
+    expect(text).toContain("不等于卡死");
+  });
+
+  it("没有跳过时不该出现「今天不是交易日」的提示", async () => {
+    mocks.updateStatus.mockResolvedValue({
+      running: false, kind: "", elapsedSec: 0, outcome: "进程正常退出",
+      steps: [{ name: "compact", state: "success", elapsed: "12.3s" }],
+      logTail: [],
+    });
+    const wrapper = await mountCard();
+    expect(wrapper.text()).not.toContain("今天不是交易日");
+    expect(wrapper.text()).not.toContain("本次跳过了");
+  });
+});

@@ -398,42 +398,130 @@ func tailFile(path string, n int) []string {
 	return lines
 }
 
-// parseSteps 从日志尾部粗解析步骤状态，仅用于进度展示。
+// parseSteps 从日志尾部解析出步骤状态，**仅用于进度展示**。
 //
-// 方案明确：**日志只用来做进度**，成功与否要看 manifest。
+// 方案明确：成功与否要看 manifest 的 rows_written，日志只用来做进度。
+//
+// ⚠ **格式是照着真实日志写的，不是照着文档示例**。
+// 方案 §2.1 里给的示例是 `hot_rank success 1.2s 100 rows`，但真实日志
+// 完全不是那个样子 —— 第一版解析器按"fields[0] 是步骤名、fields[1] 是状态"
+// 写，结果对真实日志**一条都匹配不上**，卡片上的徽章一直是空的。
+//
+// 真实日志（取自 data/cnequity/logs/freestock-update-*.log）：
+//
+//	调度组 core：skipped_non_trading_day                       <- 无时间戳、中文
+//	调度组 derivatives：跳过（它要抓的数据集全部处于关闭状态）
+//	2026-10-10 12:39:19,788 INFO ...: Wave events:disclosures: ['a','b'] (parallel=True)
+//	2026-10-10 12:39:19,805 INFO ...: Step announcement_index starting
+//	2026-10-10 12:40:24,645 INFO cnequity.progress: still working: announcement_index 1m04s (no output for 1m04s)
+//
+// 所以改成**按出现的关键子串识别**，不依赖字段位置 —— 行首可能是时间戳，
+// 也可能直接是中文。
 func parseSteps(lines []string) []StepInfo {
 	seen := map[string]int{}
 	out := []StepInfo{}
-	for _, line := range lines {
-		fields := strings.Fields(line)
-		if len(fields) < 2 {
-			continue
+
+	upsert := func(name, state, elapsed, note string) {
+		if name == "" {
+			return
 		}
-		// 形如 `fund_flow failed after 342.6s` / `hot_rank success 1.2s 100 rows`
-		name := fields[0]
-		if strings.Contains(name, ":") || strings.HasPrefix(name, "[") {
-			continue
-		}
-		state := ""
-		switch fields[1] {
-		case "success", "failed", "running", "starting":
-			state = fields[1]
-		}
-		if state == "" {
-			continue
-		}
-		step := StepInfo{Name: name, State: state}
-		if len(fields) > 2 {
-			step.Elapsed = fields[2]
-		}
+		step := StepInfo{Name: name, State: state, Elapsed: elapsed, Rows: note}
 		if idx, ok := seen[name]; ok {
-			out[idx] = step // 同名步骤取最后一次
-		} else {
-			seen[name] = len(out)
-			out = append(out, step)
+			// 同名取最后一次；但已经 success 的不被后面的 running 覆盖
+			if out[idx].State == "success" {
+				return
+			}
+			out[idx] = step
+			return
+		}
+		seen[name] = len(out)
+		out = append(out, step)
+	}
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		// ① `still working: <步骤> <用时> (no output for ...)`
+		//    心跳 —— 用来判断"卡住没卡住"（方案 §8.1）
+		if i := strings.Index(line, "still working:"); i >= 0 {
+			rest := strings.TrimSpace(line[i+len("still working:"):])
+			fields := strings.Fields(rest)
+			if len(fields) >= 2 {
+				// 去掉 "(no output for ...)" 部分
+				elapsed := fields[1]
+				upsert(fields[0], "running", elapsed, "")
+				continue
+			}
+		}
+
+		// ② `Step <步骤> starting`
+		if i := strings.Index(line, "Step "); i >= 0 {
+			rest := strings.TrimSpace(line[i+len("Step "):])
+			fields := strings.Fields(rest)
+			if len(fields) >= 2 && (fields[1] == "starting" || fields[1] == "start") {
+				upsert(fields[0], "running", "", "")
+				continue
+			}
+			// 也认 `<步骤> success/failed ...`（某些阶段会这么打）
+			if len(fields) >= 2 && (fields[1] == "success" || fields[1] == "failed") {
+				elapsed := ""
+				if len(fields) > 2 {
+					elapsed = fields[2]
+				}
+				upsert(fields[0], fields[1], elapsed, "")
+				continue
+			}
+		}
+
+		// ③ `调度组 <组名>：skipped_non_trading_day` 或 `调度组 <组名>：跳过（原因）`
+		//    ⚠ 这条对用户最重要：它解释了"为什么这次没更新行情"
+		if i := strings.Index(line, "调度组 "); i >= 0 {
+			rest := strings.TrimSpace(line[i+len("调度组 "):])
+			name, reason := splitGroupLine(rest)
+			if name != "" {
+				upsert(name, "skipped", "", reason)
+				continue
+			}
+		}
+
+		// ④ `Wave <阶段>:<名>: [数据集...]` —— 记成一条"进行中"的信息
+		if i := strings.Index(line, "Wave "); i >= 0 {
+			rest := strings.TrimSpace(line[i+len("Wave "):])
+			if idx := strings.Index(rest, ":"); idx > 0 {
+				name := strings.TrimSpace(rest[:idx])
+				if name != "" {
+					upsert("wave:"+name, "running", "", "")
+				}
+			}
 		}
 	}
 	return out
+}
+
+// splitGroupLine 拆开 `core：skipped_non_trading_day` 这类行。
+//
+// 分隔符可能是中文全角冒号或英文冒号；原因可能是 `skipped_*` 码，
+// 也可能是 `跳过（...）`。
+func splitGroupLine(rest string) (name, reason string) {
+	idx := strings.IndexAny(rest, "：:")
+	if idx <= 0 {
+		return "", ""
+	}
+	name = strings.TrimSpace(rest[:idx])
+	reason = strings.TrimSpace(rest[idx+1:])
+	// 去掉 `跳过（...）` 的外层
+	if strings.HasPrefix(reason, "跳过") {
+		if a := strings.IndexAny(reason, "（("); a >= 0 {
+			inner := strings.Trim(reason[a:], "（）()")
+			reason = "skipped: " + strings.TrimSpace(inner)
+		} else {
+			reason = "skipped"
+		}
+	}
+	return name, reason
 }
 
 // 保留 context 的引用，避免未使用告警（后续如需超时控制会用到）
