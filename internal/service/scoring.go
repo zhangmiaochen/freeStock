@@ -47,6 +47,14 @@ type ScoringResult struct {
 	Skipped int `json:"skipped"`
 	// Unavailable 列出本次没能计算的字段分组（数据源不支持）
 	Unavailable []string `json:"unavailable"`
+
+	// IndustryByCode 是本次评分算出来的"代码 -> 行业名"（已按分类优先级取第一个）。
+	//
+	// **不返回给前端**（`json:"-"`），存下来只是为了**别算第二遍**：
+	// `saveScoringResult` 原本会拿同一批代码再调一次 `boardsForCodes`，
+	// 而那个函数每次都要遍历全部板块成分（本机 1337 个板块）——
+	// 回填逐日调用时就是每天多扫一遍，实测量级 20ms/天。
+	IndustryByCode map[string]string `json:"-"`
 }
 
 // scoreWindowStart 把交易日回看窗口折算成起始日历日（YYYYMMDD）。
@@ -335,6 +343,8 @@ func (s *ScoringService) ScoreStocks(codes []string, tradeDate int, limit int, s
 	state := s.marketState(provider, date)
 	result.MarketState = state
 	result.Rows = rows
+	// 行业归属已经在上面算过了，带上给落库用（见 ScoringResult.IndustryByCode）
+	result.IndustryByCode = industryByCode
 	result.Scored = len(rows)
 	result.Skipped = len(targets) - len(rows)
 

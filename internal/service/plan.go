@@ -143,30 +143,58 @@ func (s *PortfolioService) saveScoringResult(
 	store *portfolio.Store, result *ScoringResult, strategyID string,
 ) error {
 	rows := make([]portfolio.StrengthRow, 0, len(result.Rows))
-	industryByCode := map[string]string{}
-	scoredCodes := make([]string, 0, len(result.Rows))
-	for _, row := range result.Rows {
-		scoredCodes = append(scoredCodes, row.Code)
-	}
-	if membership, err := s.stock.boardsForCodes(scoredCodes); err == nil {
-		for code, boards := range membership {
-			if len(boards) > 0 {
-				industryByCode[code] = boards[0]
+
+	// **行业归属优先用评分时已经算好的那一份**（`ScoringResult.IndustryByCode`）。
+	//
+	// 原来这里无条件再调一次 `boardsForCodes` —— 同一批代码、同一份板块数据，
+	// 一天扫两遍全部板块成分（本机 1337 个板块）。回填是逐日调用，
+	// 这一遍就是白花的（实测量级 20ms/天 × 天数）。
+	// 只有在调用方没带（比如别处直接调这个函数）时才回退到现场查。
+	industryByCode := result.IndustryByCode
+	if industryByCode == nil {
+		scoredCodes := make([]string, 0, len(result.Rows))
+		for _, row := range result.Rows {
+			scoredCodes = append(scoredCodes, row.Code)
+		}
+		industryByCode = map[string]string{}
+		if membership, err := s.stock.boardsForCodes(scoredCodes); err == nil {
+			for code, boards := range membership {
+				if len(boards) > 0 {
+					industryByCode[code] = boards[0]
+				}
 			}
 		}
 	}
-	marketByCode := map[string]string{}
-	if universe, err := s.stock.GetStockUniverse(false); err == nil {
-		for _, item := range universe.Stocks {
-			marketByCode[item.Code] = item.Market
+
+	// 市场：评分行里已经带了（`ScoreStocks` 从同一个股票列表填的 Market），
+	// 只有空值才回退去查股票列表 —— 同样是"别每天重建一张 7600 项的 map"。
+	needsMarketFallback := false
+	for _, row := range result.Rows {
+		if row.Market == "" {
+			needsMarketFallback = true
+			break
 		}
+	}
+	marketByCode := map[string]string{}
+	if needsMarketFallback {
+		if universe, err := s.stock.GetStockUniverse(false); err == nil {
+			for _, item := range universe.Stocks {
+				marketByCode[item.Code] = item.Market
+			}
+		}
+	}
+	marketOf := func(row score.Row) string {
+		if row.Market != "" {
+			return row.Market
+		}
+		return marketByCode[row.Code]
 	}
 
 	for _, row := range result.Rows {
 		rows = append(rows, portfolio.StrengthRow{
 			Code: row.Code, Name: row.Name,
 			Industry: industryByCode[row.Code],
-			Market:   marketByCode[row.Code],
+			Market:   marketOf(row),
 
 			TotalScore: row.TotalScore, TrendScore: row.TrendScore,
 			StructureScore: row.StructureScore, RSScore: row.RSScore,

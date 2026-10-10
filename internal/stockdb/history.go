@@ -86,17 +86,13 @@ func (c *Client) DailyHistory(ctx context.Context, code string, start, end int) 
 		start = 19900101
 	}
 
-	raw, err := c.Vals(ctx, TableDailyK, "key:"+code, fmt.Sprintf("fwd:%d,%d", start, end))
+	body, err := c.callRaw(ctx, "vals", TableDailyK, "key:"+code, fmt.Sprintf("fwd:%d,%d", start, end))
 	if err != nil {
 		return nil, err
 	}
-
-	items, _ := ToSlice(raw)
-	quotes := make([]*Quote, 0, len(items))
-	for _, item := range items {
-		if m, ok := ToMap(item); ok {
-			quotes = append(quotes, QuoteFromMap(m))
-		}
+	quotes, err := DecodeQuotes(body)
+	if err != nil {
+		return nil, err
 	}
 
 	// 倒序 -> 升序

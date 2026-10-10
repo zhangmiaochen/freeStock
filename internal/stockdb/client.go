@@ -52,6 +52,18 @@ func (c *Client) BaseURL() string { return c.baseURL }
 
 // 调用底层 http://host/?cmd=...&t=...&k1=...&k2=...
 func (c *Client) call(ctx context.Context, cmd, table, k1, k2 string) (any, error) {
+	body, err := c.callRaw(ctx, cmd, table, k1, k2)
+	if err != nil {
+		return nil, err
+	}
+	return Decode(body)
+}
+
+// callRaw 取回**未解码**的响应体。
+//
+// 日k 那几张"一条记录 21 个字段、一次要几百万条"的表不适合走 map[string]any
+// 的通用解码（见 quotes.go），它们需要自己在原始字节上落位。
+func (c *Client) callRaw(ctx context.Context, cmd, table, k1, k2 string) ([]byte, error) {
 	endpoint := c.baseURL + "/?cmd=" + url.QueryEscape(cmd) + "&t=" + url.QueryEscape(table)
 	if k1 != "" {
 		endpoint += "&k1=" + url.QueryEscape(k1)
@@ -79,7 +91,7 @@ func (c *Client) call(ctx context.Context, cmd, table, k1, k2 string) (any, erro
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("stockdb 返回 HTTP %d", resp.StatusCode)
 	}
-	return Decode(body)
+	return body, nil
 }
 
 // Get 对应 cmd=get。
@@ -177,30 +189,27 @@ func (c *Client) LatestTradeDate(ctx context.Context, candidates ...string) (int
 
 // QuotePoint 读取某只股票在指定交易日的日 K 记录，缺失时返回 nil。
 func (c *Client) QuotePoint(ctx context.Context, code string, date int) (*Quote, error) {
-	raw, err := c.Get(ctx, fmt.Sprintf("%s:%s:%d", TableDailyK, code, date), "", "")
+	body, err := c.callRaw(ctx, "get", fmt.Sprintf("%s:%s:%d", TableDailyK, code, date), "", "")
 	if err != nil {
 		return nil, err
 	}
-	if m, ok := ToMap(raw); ok && len(m) > 0 {
-		return QuoteFromMap(m), nil
+	quotes, err := DecodeQuotes(body)
+	if err != nil {
+		return nil, err
 	}
-	return nil, nil
+	if len(quotes) == 0 {
+		return nil, nil
+	}
+	return quotes[0], nil
 }
 
 // QuoteRangeDesc 读取区间日 K，返回顺序为最新在前。
 func (c *Client) QuoteRangeDesc(ctx context.Context, code string, start, end int) ([]*Quote, error) {
-	raw, err := c.Vals(ctx, TableDailyK, "key:"+code, fmt.Sprintf("fwd:%d,%d", start, end))
+	body, err := c.callRaw(ctx, "vals", TableDailyK, "key:"+code, fmt.Sprintf("fwd:%d,%d", start, end))
 	if err != nil {
 		return nil, err
 	}
-	items, _ := ToSlice(raw)
-	out := make([]*Quote, 0, len(items))
-	for _, item := range items {
-		if m, ok := ToMap(item); ok {
-			out = append(out, QuoteFromMap(m))
-		}
-	}
-	return out, nil
+	return DecodeQuotes(body)
 }
 
 // Boards 读取「板块」表，返回概念/申万各级行业板块。

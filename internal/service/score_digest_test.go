@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"freestock/internal/portfolio"
 	"freestock/internal/score"
 )
 
@@ -83,15 +84,64 @@ func TestScoreDigestRealData(t *testing.T) {
 				rowCount++
 			}
 			fmt.Fprintf(hash, "%s|%d|%s\n", strategyID, date, digestMarketState(result))
+
+			// **落库再读回来**：这样指纹覆盖的就不只是计算结果，还有
+			// 行业/市场归属（saveScoringResult）与写入本身（SaveStrength 分批）。
+			if err := svc.saveScoringResult(store, result, strategyID); err != nil {
+				t.Fatalf("%s %d 落库失败：%v", strategyID, date, err)
+			}
+			stored, err := store.LoadStrength(int64(date), strategyID, 0)
+			if err != nil {
+				t.Fatalf("%s %d 读回失败：%v", strategyID, date, err)
+			}
+			sort.Slice(stored, func(i, j int) bool {
+				if stored[i].TotalScore != stored[j].TotalScore {
+					return stored[i].TotalScore > stored[j].TotalScore
+				}
+				return stored[i].Code < stored[j].Code
+			})
+			for _, row := range stored {
+				fmt.Fprintf(hash, "%s|%d|stored|%s\n", strategyID, date, digestStoredRow(row))
+			}
+			state, err := store.LoadMarketState(int64(date))
+			if err != nil {
+				t.Fatalf("%s %d 读市场状态失败：%v", strategyID, date, err)
+			}
+			fmt.Fprintf(hash, "%s|%d|state|%s|%s|%.17g|%.17g|%.17g|%d\n",
+				strategyID, date, state.State, state.Label,
+				state.BullScore, state.BearScore, state.ProxyRet20, state.Days)
 		}
 	}
 
 	got := hex.EncodeToString(hash.Sum(nil))
-	t.Logf("规模 %d 只 × %d 天 × 4 策略，%d 行；指纹 %s", len(codes), len(dates), rowCount, got)
+	t.Logf("规模 %d 只 × %d 天 × 4 策略，%d 行（含落库回读）；指纹 %s",
+		len(codes), len(dates), rowCount, got)
 
 	if want := os.Getenv("FREESTOCK_DIGEST_EXPECT"); want != "" && !strings.EqualFold(want, got) {
 		t.Fatalf("评分指纹变了！\n  改动前 %s\n  改动后 %s", want, got)
 	}
+}
+
+// digestStoredRow 把落库回读的一行全部字段展开（含行业/市场这两列，
+// 它们由 saveScoringResult 填，不在 ScoreStocks 的结果里）。
+func digestStoredRow(row portfolio.StrengthRow) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s|%s|%s|%s|%d|%s",
+		row.Code, row.Name, row.Industry, row.Market, row.TradeDate, row.StrategyID)
+	for _, v := range []float64{
+		row.TotalScore, row.TrendScore, row.StructureScore, row.RSScore,
+		row.CapitalScore, row.RepairScore,
+		row.Close, row.High, row.Low, row.Open, row.PctChg, row.Amount,
+		row.Ma5, row.Ma20, row.Ma30, row.Ma60, row.Ma120, row.Ma250,
+		row.RelativeStrength20D, row.DrawdownFromHigh20, row.DrawdownFromHigh120,
+		row.ReboundFromLow60, row.StockReturn3D, row.StockReturn5D,
+		row.StockReturn10D, row.StockReturn20D,
+		row.VolumeRatio20, row.VolumeRatio520, row.Ma5Prev, row.Ma250Prev,
+		row.IndustryReturn20D, row.BenchmarkReturn20D,
+	} {
+		fmt.Fprintf(&b, "|%.17g", v)
+	}
+	return b.String()
 }
 
 // digestRow 把一行的全部字段按高精度展开（%.17g 保证浮点逐位可比）。
