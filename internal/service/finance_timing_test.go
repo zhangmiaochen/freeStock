@@ -112,6 +112,24 @@ func TestFinanceReadTiming(t *testing.T) {
 		t.Logf("⑤ %-28s %d 行，耗时 %s", pr.name, n, elapsed.Round(time.Millisecond))
 	}
 
+	// ⑥ **条件选股的"数据湖条件"**：这两个是批量调用，但每次筛选都要付一次全量读
+	began = time.Now()
+	holders, err := lake.LatestTopHolders(int64(20261008))
+	if err != nil {
+		t.Logf("⑥ LatestTopHolders 失败：%v", err)
+	} else {
+		t.Logf("⑥ LatestTopHolders(全市场最新一期)  %d 行，耗时 %s",
+			len(holders), time.Since(began).Round(time.Millisecond))
+	}
+	began = time.Now()
+	profits, err := lake.NetProfitsByPeriod()
+	if err != nil {
+		t.Logf("⑦ NetProfitsByPeriod 失败：%v", err)
+	} else {
+		t.Logf("⑦ NetProfitsByPeriod(全市场归母净利润)  %d 只，耗时 %s",
+			len(profits), time.Since(began).Round(time.Millisecond))
+	}
+
 	// 参考：这个数据集有多大
 	if files := lake.DatasetFiles("financial_statement_items"); len(files) > 0 {
 		t.Logf("参考：financial_statement_items 共 %d 个分区文件", len(files))

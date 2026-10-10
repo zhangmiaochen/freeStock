@@ -210,10 +210,11 @@ type lakeProvider struct {
 	//
 	// 所以第一次有人要某段区间时，就把这段区间的**全市场**一次读进来，
 	// 后续所有代码直接从内存取 —— **对调用方完全透明**。
-	bulkMu   sync.Mutex
-	bulkFrom int
-	bulkTo   int
-	bulkBars map[string][]cnlake.BarRow
+	bulkMu     sync.Mutex
+	bulkFrom   int
+	bulkTo     int
+	bulkFilled bool
+	bulkBars   map[string][]cnlake.BarRow
 
 	// valuations 是 `code -> 日期 -> 估值行` 的索引。
 	//
@@ -509,17 +510,42 @@ func (p *lakeProvider) bulkFillAllowed(start, end int) bool {
 func (p *lakeProvider) fillBulk(start, end int) error {
 	p.bulkMu.Lock()
 	defer p.bulkMu.Unlock()
+
+	// 已完全覆盖 → 不用动
 	if p.bulkBars != nil && start >= p.bulkFrom && end <= p.bulkTo {
 		return nil
 	}
 
+	// ⚠ **与已有缓存重叠时，只读新增的那一段，然后合并**。
+	//
+	// 历史回填是按交易日**逐天往前推**的：第 1 天要 [D0-320, D0]，
+	// 第 2 天要 [D0-319, D1]，第 3 天 [D0-318, D2] ……
+	// 如果每次"不覆盖就整段重灌 + 替换缓存"，就会变成**每天都重灌一遍**
+	// 整个 320 天窗口 —— 这正是组合回测页回填慢的根源。
+	//
+	// 合并之后，每往后推一天只需读那**一个**新的日分区。
+	readFrom, readTo := start, end
+	if p.bulkBars != nil && end >= p.bulkFrom && start <= p.bulkTo {
+		switch {
+		case start < p.bulkFrom:
+			readFrom, readTo = start, p.bulkFrom-1 // 只补左边
+		case end > p.bulkTo:
+			readFrom, readTo = p.bulkTo+1, end // 只补右边
+		default:
+			return nil
+		}
+	}
+
 	began := time.Now()
-	rows, err := p.lake.DailyBarsInRange(nil, int64(start), int64(end))
+	rows, err := p.lake.DailyBarsInRange(nil, int64(readFrom), int64(readTo))
 	if err != nil {
 		return fmt.Errorf("批量读取数据湖 daily_bars 失败：%w", err)
 	}
 
-	byCode := make(map[string][]cnlake.BarRow, 8192)
+	if p.bulkBars == nil {
+		p.bulkBars = make(map[string][]cnlake.BarRow, 8192)
+	}
+	byCode := p.bulkBars
 	for _, row := range rows {
 		bare := cnlake.BareSymbol(row.Symbol)
 		if bare == "" {
@@ -527,14 +553,26 @@ func (p *lakeProvider) fillBulk(start, end int) error {
 		}
 		byCode[bare] = append(byCode[bare], row)
 	}
+	// 各代码的行按日期升序（quoteRange 依赖这个顺序推导前收盘）
+	for bare, bars := range byCode {
+		sort.Slice(bars, func(i, j int) bool { return bars[i].TradeDate < bars[j].TradeDate })
+		byCode[bare] = bars
+	}
 
-	// 这里**替换**而不是合并：换了区间就重建，
-	// 否则缓存会随区间扩张无限增长
-	p.bulkBars = byCode
-	p.bulkFrom = start
-	p.bulkTo = end
+	if p.bulkBars == nil || !p.bulkFilled {
+		p.bulkFrom, p.bulkTo = readFrom, readTo
+		p.bulkFilled = true
+	} else {
+		if readFrom < p.bulkFrom {
+			p.bulkFrom = readFrom
+		}
+		if readTo > p.bulkTo {
+			p.bulkTo = readTo
+		}
+	}
 	slog.Info("数据湖批量读完成",
-		"from", start, "to", end,
+		"read", fmt.Sprintf("%d~%d", readFrom, readTo),
+		"covered", fmt.Sprintf("%d~%d", p.bulkFrom, p.bulkTo),
 		"codes", len(byCode), "rows", len(rows),
 		"elapsed", time.Since(began).Round(time.Millisecond))
 	return nil
