@@ -19,6 +19,7 @@ import {
   type CneUpdateStatus,
   type CatchUpState,
   type FreshnessReport,
+  type ScheduleState,
   type UpdatePrefs,
   type UpdatePrefsInfo,
 } from "@/lib/backend";
@@ -27,6 +28,7 @@ const status = ref<CneUpdateStatus | null>(null);
 const prefs = ref<UpdatePrefsInfo | null>(null);
 const freshness = ref<FreshnessReport | null>(null);
 const catchUp = ref<CatchUpState | null>(null);
+const schedule = ref<ScheduleState | null>(null);
 const projectDir = ref("");
 const cnePath = ref("");
 const tradeDate = ref("");
@@ -51,6 +53,15 @@ async function loadStatus() {
  * ⚠ 它不是"锦上添花" —— 方案 §2.2 实测 `--stale-only` 的落后清单里
  * **没有 daily_bars**，只看它会以为数据没落后，而行情可能缺了一天。
  */
+/** 读回两个计划任务的状态（只读）—— 让用户看到"确实排上了"。 */
+async function loadSchedule() {
+  try {
+    schedule.value = await api.scheduleState();
+  } catch {
+    schedule.value = null;
+  }
+}
+
 async function loadFreshness() {
   try {
     freshness.value = await api.checkFreshness();
@@ -220,6 +231,7 @@ onMounted(async () => {
   await loadPrefs();
   await loadStatus();
   await loadFreshness();
+  await loadSchedule();
   // 打开页面时如果任务在跑，直接开始轮询
   if (status.value?.running) startPolling();
 });
@@ -383,14 +395,31 @@ onUnmounted(stopPolling);
           </label>
         </div>
 
-        <div class="flex flex-wrap items-center gap-4 rounded border border-dashed p-3">
-          <div class="text-muted-foreground flex items-center gap-2 text-xs">
-            <CircleAlert class="size-4" />
+        <div class="space-y-2 rounded border border-dashed p-3">
+          <div class="text-muted-foreground flex items-start gap-2 text-xs">
+            <CircleAlert class="mt-0.5 size-4 shrink-0" />
             <span>
-              <strong>自动更新（计划任务）尚未实现</strong> —— 属于方案第 3 阶段。
-              在那之前，到点更新仍由 CNEquity 侧已注册的两个计划任务负责：
-              <code>cne-daily-update</code>（17:30）与 <code>cne-daily-stale</code>（21:00）。
+              <strong>自动更新的开关尚未开放</strong>（方案第 3 阶段）—— 创建/修改计划任务
+              会改动你机器上的任务，需要连同「确认 CNEquity 侧调度器已关闭、避免双跑」
+              一起设计。下面是**当前实际生效的**两个任务（只读）：
             </span>
+          </div>
+          <div v-if="schedule" class="space-y-1 text-xs">
+            <div class="grid grid-cols-2 gap-2">
+              <div v-for="ti in [schedule.daily, schedule.stale]" :key="ti.name">
+                <Badge :variant="ti.registered ? 'secondary' : 'destructive'" class="text-[10px]">
+                  {{ ti.name }}
+                </Badge>
+                <span v-if="ti.registered" class="text-muted-foreground ml-1">
+                  下次 {{ ti.nextRun || '—' }} · {{ ti.status || '—' }}
+                </span>
+                <span v-else class="text-muted-foreground ml-1">未注册</span>
+              </div>
+            </div>
+            <p v-if="schedule.summary" class="text-muted-foreground">{{ schedule.summary }}</p>
+            <p v-if="schedule.wrapperPath" class="text-muted-foreground">
+              包装脚本：<code>{{ schedule.wrapperPath }}</code>
+            </p>
           </div>
         </div>
 

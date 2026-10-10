@@ -230,6 +230,69 @@ export class FreshnessReport {
 }
 
 /**
+ * ScheduleState 是界面上要显示的整体状态。
+ */
+export class ScheduleState {
+    "daily": TaskInfo;
+    "stale": TaskInfo;
+
+    /**
+     * WrapperPath 是任务实际调用的包装脚本（从命令行里解析出来）
+     */
+    "wrapperPath": string;
+
+    /**
+     * Summary 是人类可读的一句话
+     */
+    "summary": string;
+
+    /**
+     * OwnedByFreeStock 表示这两个任务是否由本项目的设置管理。
+     * 
+     * ⚠ 无法从 schtasks 直接判断"谁创建的"，所以这里只报告**观察到的形态**
+     * （任务名与包装脚本），由用户确认 —— 不假装知道所有权。
+     */
+    "note": string;
+
+    /** Creates a new ScheduleState instance. */
+    constructor($$source: Partial<ScheduleState> = {}) {
+        if (!("daily" in $$source)) {
+            this["daily"] = (new TaskInfo());
+        }
+        if (!("stale" in $$source)) {
+            this["stale"] = (new TaskInfo());
+        }
+        if (!("wrapperPath" in $$source)) {
+            this["wrapperPath"] = "";
+        }
+        if (!("summary" in $$source)) {
+            this["summary"] = "";
+        }
+        if (!("note" in $$source)) {
+            this["note"] = "";
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new ScheduleState instance from a string or object.
+     */
+    static createFrom($$source: any = {}): ScheduleState {
+        const $$createField0_0 = $$createType3;
+        const $$createField1_0 = $$createType3;
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        if ("daily" in $$parsedSource) {
+            $$parsedSource["daily"] = $$createField0_0($$parsedSource["daily"]);
+        }
+        if ("stale" in $$parsedSource) {
+            $$parsedSource["stale"] = $$createField1_0($$parsedSource["stale"]);
+        }
+        return new ScheduleState($$parsedSource as Partial<ScheduleState>);
+    }
+}
+
+/**
  * Status 是给前端的进度快照。
  */
 export class Status {
@@ -284,8 +347,8 @@ export class Status {
      * Creates a new Status instance from a string or object.
      */
     static createFrom($$source: any = {}): Status {
-        const $$createField7_0 = $$createType3;
-        const $$createField8_0 = $$createType5;
+        const $$createField7_0 = $$createType4;
+        const $$createField8_0 = $$createType6;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("logTail" in $$parsedSource) {
             $$parsedSource["logTail"] = $$createField7_0($$parsedSource["logTail"]);
@@ -334,10 +397,83 @@ export class StepInfo {
     }
 }
 
+/**
+ * TaskInfo 是一个计划任务的状态。
+ */
+export class TaskInfo {
+    "name": string;
+
+    /**
+     * Registered 表示任务是否存在
+     */
+    "registered": boolean;
+
+    /**
+     * NextRun 是下次运行时间（原样字符串，来自 schtasks）
+     */
+    "nextRun": string;
+
+    /**
+     * Status 是 Ready / Running / Disabled 之类
+     */
+    "status": string;
+
+    /**
+     * LastResult 是上次运行结果码
+     */
+    "lastResult": string;
+
+    /**
+     * LastRun 是上次运行时间
+     */
+    "lastRun": string;
+
+    /**
+     * Command 是任务实际执行的命令行
+     */
+    "command": string;
+
+    /** Creates a new TaskInfo instance. */
+    constructor($$source: Partial<TaskInfo> = {}) {
+        if (!("name" in $$source)) {
+            this["name"] = "";
+        }
+        if (!("registered" in $$source)) {
+            this["registered"] = false;
+        }
+        if (!("nextRun" in $$source)) {
+            this["nextRun"] = "";
+        }
+        if (!("status" in $$source)) {
+            this["status"] = "";
+        }
+        if (!("lastResult" in $$source)) {
+            this["lastResult"] = "";
+        }
+        if (!("lastRun" in $$source)) {
+            this["lastRun"] = "";
+        }
+        if (!("command" in $$source)) {
+            this["command"] = "";
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new TaskInfo instance from a string or object.
+     */
+    static createFrom($$source: any = {}): TaskInfo {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new TaskInfo($$parsedSource as Partial<TaskInfo>);
+    }
+}
+
 // Private type creation functions
 const $$createType0 = $Create.Array($Create.Any);
 const $$createType1 = DatasetFreshness.createFrom;
 const $$createType2 = $Create.Array($$createType1);
-const $$createType3 = $Create.Array($Create.Any);
-const $$createType4 = StepInfo.createFrom;
-const $$createType5 = $Create.Array($$createType4);
+const $$createType3 = TaskInfo.createFrom;
+const $$createType4 = $Create.Array($Create.Any);
+const $$createType5 = StepInfo.createFrom;
+const $$createType6 = $Create.Array($$createType5);

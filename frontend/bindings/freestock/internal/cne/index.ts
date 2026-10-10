@@ -5,6 +5,8 @@ export {
     CatchUpState,
     DatasetFreshness,
     FreshnessReport,
+    ScheduleState,
     Status,
-    StepInfo
+    StepInfo,
+    TaskInfo
 } from "./models.js";

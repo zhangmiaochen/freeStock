@@ -90,6 +90,26 @@ export function ManualUpdate(kind: string, tradeDate: string): $CancellablePromi
 }
 
 /**
+ * ScheduleState 读回两个计划任务的状态（**只读**）。
+ * 
+ * 界面靠它显示"确实排上了"，而不是只给用户一个开关（方案 §8.1 第 4 点）。
+ * 
+ * ⚠ **没有提供 ApplySchedule**（创建/修改/删除计划任务）。
+ * 
+ * 方案 §5.1 要求 freeStock 接管那两个任务，但那会**改动用户机器上的计划任务**，
+ * 且有明确的踩坑风险（§2.5：cne 自带调度器在这台机器上会自我暂停，
+ * 若与它双跑会重复取数 + 抢写入锁）。
+ * 这类操作应当连同"如何确认 CNEquity 侧的调度器已关闭、如何避免双跑"
+ * 一起设计，不该和"把读写能力做好"混在一起。现在先把**观测**做扎实，
+ * 用户在 `schtasks` 里能看到的，这里也能看到。
+ */
+export function ScheduleState(): $CancellablePromise<cne$0.ScheduleState | null> {
+    return $Call.ByID(4153802545).then(($result: any) => {
+        return $$createType7($result);
+    });
+}
+
+/**
  * SetUpdatePrefs 保存设置（写入前自动 Sanitize）。
  * 
  * ⚠ **不只写配置**：同时校验 cne 可执行文件与工程目录能不能用，
@@ -117,7 +137,7 @@ export function SetUpdatePrefs(prefs: config$0.UpdatePrefs): $CancellablePromise
  */
 export function StartCatchUp(): $CancellablePromise<$models.CatchUpInfo | null> {
     return $Call.ByID(1149046919).then(($result: any) => {
-        return $$createType7($result);
+        return $$createType9($result);
     });
 }
 
@@ -126,7 +146,7 @@ export function StartCatchUp(): $CancellablePromise<$models.CatchUpInfo | null> 
  */
 export function UpdateStatus(): $CancellablePromise<cne$0.Status | null> {
     return $Call.ByID(1563115678).then(($result: any) => {
-        return $$createType9($result);
+        return $$createType11($result);
     });
 }
 
@@ -137,7 +157,9 @@ const $$createType2 = $Create.Nullable($$createType1);
 const $$createType3 = $models.UpdatePrefsInfo.createFrom;
 const $$createType4 = $models.JobInfo.createFrom;
 const $$createType5 = $Create.Nullable($$createType4);
-const $$createType6 = $models.CatchUpInfo.createFrom;
+const $$createType6 = cne$0.ScheduleState.createFrom;
 const $$createType7 = $Create.Nullable($$createType6);
-const $$createType8 = cne$0.Status.createFrom;
+const $$createType8 = $models.CatchUpInfo.createFrom;
 const $$createType9 = $Create.Nullable($$createType8);
+const $$createType10 = cne$0.Status.createFrom;
+const $$createType11 = $Create.Nullable($$createType10);

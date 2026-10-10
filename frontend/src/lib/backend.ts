@@ -90,8 +90,9 @@ export type { BollPrefs, KlinePrefs, MaPrefs, MacdPrefs };
 import type { JobInfo, UpdatePrefsInfo } from "../../bindings/freestock/internal/service/models";
 import type { Status as CneUpdateStatus, FreshnessReport, CatchUpState } from "../../bindings/freestock/internal/cne/models";
 import type { CatchUpInfo } from "../../bindings/freestock/internal/service/models";
+import type { ScheduleState } from "../../bindings/freestock/internal/cne/models";
 import type { UpdatePrefs } from "../../bindings/freestock/internal/config/models";
-export type { JobInfo, UpdatePrefsInfo, CneUpdateStatus, UpdatePrefs, FreshnessReport, CatchUpState, CatchUpInfo };
+export type { JobInfo, UpdatePrefsInfo, CneUpdateStatus, UpdatePrefs, FreshnessReport, CatchUpState, CatchUpInfo, ScheduleState };
 export type {
   AppliedChange,
   ApplyResult,
@@ -258,6 +259,14 @@ export const api = {
   catchUpState: () => CneUpdateService.CatchUpState() as Promise<CatchUpState>,
   /** 请求停止补跑：当前这一天跑完后不再继续（不中途掐断） */
   cancelCatchUp: () => CneUpdateService.CancelCatchUp() as Promise<void>,
+  /**
+   * 读回两个计划任务的状态（**只读**）。
+   *
+   * 界面靠它显示"确实排上了"，而不是只给用户一个开关。
+   * 目前只提供观测，不提供创建/修改/删除 —— 那会改动用户机器上的计划任务，
+   * 需要连同"确认 CNEquity 侧调度器已关闭、避免双跑"一起设计。
+   */
+  scheduleState: () => CneUpdateService.ScheduleState() as Promise<ScheduleState | null>,
   /** 条件选股 */
   getScreenOptions: () => StockService.GetScreenOptions() as Promise<ScreenOptions | null>,
   screenStocks: (cond: ScreenCondition) =>

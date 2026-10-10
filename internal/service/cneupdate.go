@@ -141,6 +141,22 @@ func (s *CneUpdateService) CheckFreshness() (*cne.FreshnessReport, error) {
 	return report, nil
 }
 
+// ScheduleState 读回两个计划任务的状态（**只读**）。
+//
+// 界面靠它显示"确实排上了"，而不是只给用户一个开关（方案 §8.1 第 4 点）。
+//
+// ⚠ **没有提供 ApplySchedule**（创建/修改/删除计划任务）。
+//
+// 方案 §5.1 要求 freeStock 接管那两个任务，但那会**改动用户机器上的计划任务**，
+// 且有明确的踩坑风险（§2.5：cne 自带调度器在这台机器上会自我暂停，
+// 若与它双跑会重复取数 + 抢写入锁）。
+// 这类操作应当连同"如何确认 CNEquity 侧的调度器已关闭、如何避免双跑"
+// 一起设计，不该和"把读写能力做好"混在一起。现在先把**观测**做扎实，
+// 用户在 `schtasks` 里能看到的，这里也能看到。
+func (s *CneUpdateService) ScheduleState() (*cne.ScheduleState, error) {
+	return cne.QuerySchedule()
+}
+
 // CatchUpInfo 是补跑的发起结果。
 type CatchUpInfo struct {
 	Started bool             `json:"started"`

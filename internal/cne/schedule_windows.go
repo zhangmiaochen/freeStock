@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 )
 
 // 计划任务名。
@@ -50,8 +51,7 @@ type TaskInfo struct {
 // XML 元素，自己拼的 XML 回读时校验不过。
 func Query(name string) (*TaskInfo, error) {
 	info := &TaskInfo{Name: name}
-	out, err := exec.Command("schtasks", "/query", "/tn", name,
-		"/fo", "LIST", "/v").CombinedOutput()
+	out, err := runSchtasks("/query", "/tn", name, "/fo", "LIST", "/v")
 	text := decodeConsole(out)
 	if err != nil {
 		// 找不到任务不是错误 —— 就是"未注册"
@@ -150,8 +150,8 @@ func CreateTask(name, scriptPath, at string) error {
 	}
 	// /tr 里的路径含空格时必须整体加引号
 	tr := fmt.Sprintf(`cmd /c "%s"`, scriptPath)
-	out, err := exec.Command("schtasks", "/create", "/tn", name,
-		"/tr", tr, "/sc", "DAILY", "/st", at, "/f").CombinedOutput()
+	out, err := runSchtasks("/create", "/tn", name,
+		"/tr", tr, "/sc", "DAILY", "/st", at, "/f")
 	if err != nil {
 		return fmt.Errorf("注册计划任务 %s 失败：%v（%s）", name, err, strings.TrimSpace(decodeConsole(out)))
 	}
@@ -163,7 +163,7 @@ func ChangeTaskTime(name, at string) error {
 	if !validClock(at) {
 		return fmt.Errorf("时间格式应为 HH:MM，实际 %q", at)
 	}
-	out, err := exec.Command("schtasks", "/change", "/tn", name, "/st", at).CombinedOutput()
+	out, err := runSchtasks("/change", "/tn", name, "/st", at)
 	if err != nil {
 		return fmt.Errorf("修改计划任务 %s 失败：%v（%s）", name, err, strings.TrimSpace(decodeConsole(out)))
 	}
@@ -172,7 +172,7 @@ func ChangeTaskTime(name, at string) error {
 
 // DeleteTask 删除一个计划任务。任务本来不存在时不算失败。
 func DeleteTask(name string) error {
-	out, err := exec.Command("schtasks", "/delete", "/tn", name, "/f").CombinedOutput()
+	out, err := runSchtasks("/delete", "/tn", name, "/f")
 	if err != nil {
 		if isNotFound(decodeConsole(out)) {
 			return nil
@@ -186,17 +186,35 @@ func DeleteTask(name string) error {
 // 辅助
 // ---------------------------------------------------------------------------
 
-// decodeConsole 把 schtasks 的输出转成 UTF-8。
+// runSchtasks 调用 schtasks，并**强制它输出 UTF-8**。
 //
 // ⚠ 中文 Windows 上 schtasks 按 **OEM 代码页（GBK）** 输出字段名与值，
-// 直接当 UTF-8 读会变乱码（实测 `鍛ㄥ叚` 那种）。
-// 这里做一次简单的 GBK→UTF-8 纠正；判断不出来就原样返回。
+// 直接当 UTF-8 读会变乱码（实测出现 `鍛ㄥ叚` 那种）。
+// 纯 Go 标准库没有 GBK 解码器，而为此引一个依赖不值得 ——
+// 直接用 `chcp 65001` 让它输出 UTF-8 即可（方案 §6 的包装脚本也是这么做的）。
+//
+// 注意：`chcp` 的输出本身也要一起丢掉，只取 schtasks 的部分。
+func runSchtasks(args ...string) ([]byte, error) {
+	quoted := make([]string, 0, len(args))
+	for _, a := range args {
+		quoted = append(quoted, a)
+	}
+	// cmd /c "chcp 65001 >nul && schtasks <args...>"
+	full := "chcp 65001 >nul && schtasks " + strings.Join(quoted, " ")
+	return exec.Command("cmd", "/c", full).CombinedOutput()
+}
+
+// decodeConsole 把输出规整成字符串。
+//
+// 已经用 chcp 65001 强制 UTF-8，所以这里基本是恒等；仍保留一层兜底 ——
+// 万一某台机器上 chcp 没生效，至少不会 panic，只是字段可能取不到。
 func decodeConsole(raw []byte) string {
-	s := string(raw)
-	if utf8Valid(s) {
+	s := strings.TrimPrefix(string(raw), "\ufeff")
+	if utf8.ValidString(s) {
 		return s
 	}
-	return decodeGBK(raw)
+	// 非 UTF-8：丢掉无法解码的字节，保住 ASCII 字段名（Next Run Time 等）
+	return strings.ToValidUTF8(s, "")
 }
 
 func isNotFound(text string) bool {

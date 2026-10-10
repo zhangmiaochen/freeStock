@@ -24,6 +24,7 @@ const mocks = vi.hoisted(() => ({
   startCatchUp: vi.fn(),
   cancelCatchUp: vi.fn(),
   cancelUpdate: vi.fn(),
+  scheduleState: vi.fn(),
 }));
 
 vi.mock("@/lib/backend", () => ({
@@ -37,6 +38,7 @@ vi.mock("@/lib/backend", () => ({
     startCatchUp: mocks.startCatchUp,
     cancelCatchUp: mocks.cancelCatchUp,
     cancelUpdate: mocks.cancelUpdate,
+    scheduleState: mocks.scheduleState,
   },
   errorMessage: (e: unknown) => String(e),
 }));
@@ -79,6 +81,14 @@ beforeEach(() => {
     configPath: "D:\\FreeStock\\bin\\config.json",
   });
   mocks.checkFreshness.mockResolvedValue(freshnessOk());
+  // 任务名现在是从后端读的（不再硬编码在模板里），所以 mock 必须给
+  mocks.scheduleState.mockResolvedValue({
+    daily: { name: "cne-daily-update", registered: true, nextRun: "2026/10/10 17:30:00", status: "Ready", lastResult: "0", lastRun: "", command: "" },
+    stale: { name: "cne-daily-stale", registered: true, nextRun: "2026/10/10 21:00:00", status: "Ready", lastResult: "0", lastRun: "", command: "" },
+    wrapperPath: "D:\\CNEquity\\cne-daily.cmd",
+    summary: "两个任务都已注册",
+    note: "",
+  });
 });
 
 async function mountCard() {
@@ -160,13 +170,32 @@ describe("cne 数据更新卡片", () => {
     expect(wrapper.text()).toContain("工程目录不存在");
   });
 
-  it("自动更新开关未实现时要写明，不能放一个点了没反应的控件", async () => {
+  it("自动更新的开关未开放时要写明原因，并显示当前实际生效的任务", async () => {
     const wrapper = await mountCard();
     const text = wrapper.text();
-    expect(text).toContain("自动更新（计划任务）尚未实现");
-    // 并指出当前实际由哪两个任务负责
+    // 说明为什么没有开关 —— 而不是放一个点了没反应的控件
+    expect(text).toContain("自动更新的开关尚未开放");
+    expect(text).toContain("双跑");
+    // 当前实际生效的两个任务要从后端读出来显示（不再硬编码在模板里）
     expect(text).toContain("cne-daily-update");
     expect(text).toContain("cne-daily-stale");
+    expect(text).toContain("下次");
+    expect(text).toContain("cne-daily.cmd");
+  });
+
+  it("计划任务未注册时显示「未注册」而不是错误的下次运行时间", async () => {
+    mocks.scheduleState.mockResolvedValue({
+      daily: { name: "cne-daily-update", registered: false, nextRun: "", status: "", lastResult: "", lastRun: "", command: "" },
+      stale: { name: "cne-daily-stale", registered: false, nextRun: "", status: "", lastResult: "", lastRun: "", command: "" },
+      wrapperPath: "",
+      summary: "两个计划任务都未注册",
+      note: "",
+    });
+    const wrapper = await mountCard();
+    const text = wrapper.text();
+    expect(text).toContain("未注册");
+    expect(text).toContain("两个计划任务都未注册");
+    expect(text).not.toContain("下次 2026");
   });
 
   it("kind 传参正确：full / stale / date（含日期）", async () => {
