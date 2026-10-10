@@ -1649,6 +1649,46 @@ export class FinancialStatements {
 }
 
 /**
+ * JobInfo 是手动更新发起后立刻返回的信息。
+ */
+export class JobInfo {
+    "jobId": string;
+    "kind": string;
+    "args": string;
+    "logPath": string;
+    "message": string;
+
+    /** Creates a new JobInfo instance. */
+    constructor($$source: Partial<JobInfo> = {}) {
+        if (!("jobId" in $$source)) {
+            this["jobId"] = "";
+        }
+        if (!("kind" in $$source)) {
+            this["kind"] = "";
+        }
+        if (!("args" in $$source)) {
+            this["args"] = "";
+        }
+        if (!("logPath" in $$source)) {
+            this["logPath"] = "";
+        }
+        if (!("message" in $$source)) {
+            this["message"] = "";
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new JobInfo instance from a string or object.
+     */
+    static createFrom($$source: any = {}): JobInfo {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new JobInfo($$parsedSource as Partial<JobInfo>);
+    }
+}
+
+/**
  * KlineBundle 是 K 线页面一次加载所需的全部数据。
  */
 export class KlineBundle {
@@ -3836,6 +3876,53 @@ export class TopHolderItem {
     }
 }
 
+/**
+ * GetUpdatePrefs 读设置；第二个返回值表示是否保存过。
+ */
+export class UpdatePrefsInfo {
+    "prefs": config$0.UpdatePrefs;
+    "saved": boolean;
+    "configPath": string;
+
+    /**
+     * Warnings 是设置的可用性问题（目录不存在、配置缺失等）。
+     * **不阻断保存**，但必须让界面显示出来 —— 否则用户保存成功、
+     * 点更新时才失败，不知道问题在哪。
+     */
+    "warnings"?: string[];
+
+    /** Creates a new UpdatePrefsInfo instance. */
+    constructor($$source: Partial<UpdatePrefsInfo> = {}) {
+        if (!("prefs" in $$source)) {
+            this["prefs"] = (new config$0.UpdatePrefs());
+        }
+        if (!("saved" in $$source)) {
+            this["saved"] = false;
+        }
+        if (!("configPath" in $$source)) {
+            this["configPath"] = "";
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new UpdatePrefsInfo instance from a string or object.
+     */
+    static createFrom($$source: any = {}): UpdatePrefsInfo {
+        const $$createField0_0 = $$createType76;
+        const $$createField3_0 = $$createType13;
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        if ("prefs" in $$parsedSource) {
+            $$parsedSource["prefs"] = $$createField0_0($$parsedSource["prefs"]);
+        }
+        if ("warnings" in $$parsedSource) {
+            $$parsedSource["warnings"] = $$createField3_0($$parsedSource["warnings"]);
+        }
+        return new UpdatePrefsInfo($$parsedSource as Partial<UpdatePrefsInfo>);
+    }
+}
+
 // Private type creation functions
 const $$createType0 = portfolio$0.ApplyResult.createFrom;
 const $$createType1 = AppliedChange.createFrom;
@@ -3913,3 +4000,4 @@ const $$createType72 = $Create.Array($$createType71);
 const $$createType73 = StockItem.createFrom;
 const $$createType74 = $Create.Array($$createType73);
 const $$createType75 = $Create.Array($Create.Any);
+const $$createType76 = config$0.UpdatePrefs.createFrom;

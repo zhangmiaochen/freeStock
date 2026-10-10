@@ -172,8 +172,90 @@ export class MacdPrefs {
     }
 }
 
+/**
+ * UpdatePrefs 是 cne 数据更新的设置。
+ * 
+ * 对应方案 docs/cne数据更新方案.md §3。**默认全部关闭自动行为** ——
+ * 注册计划任务会改动用户机器，必须是用户显式开启。
+ */
+export class UpdatePrefs {
+    /**
+     * 是否启用每日自动更新（计划任务）
+     */
+    "autoDaily": boolean;
+
+    /**
+     * "17:30"，盘后主日更
+     */
+    "dailyTime": string;
+
+    /**
+     * 是否启用"补抓落后"（计划任务）
+     */
+    "autoStale": boolean;
+
+    /**
+     * "21:00"
+     */
+    "staleTime": string;
+
+    /**
+     * 启动时发现落后就补（§5.2 第 2 层）
+     */
+    "catchUpOnStart": boolean;
+
+    /**
+     * 限定调度组；空=全部
+     */
+    "groups"?: string[];
+
+    /**
+     * cne 可执行文件；空=按 PATH 找
+     */
+    "cnePath"?: string;
+
+    /**
+     * cne 工作目录（须含 configs/cnequity.toml）
+     */
+    "projectDir"?: string;
+
+    /** Creates a new UpdatePrefs instance. */
+    constructor($$source: Partial<UpdatePrefs> = {}) {
+        if (!("autoDaily" in $$source)) {
+            this["autoDaily"] = false;
+        }
+        if (!("dailyTime" in $$source)) {
+            this["dailyTime"] = "";
+        }
+        if (!("autoStale" in $$source)) {
+            this["autoStale"] = false;
+        }
+        if (!("staleTime" in $$source)) {
+            this["staleTime"] = "";
+        }
+        if (!("catchUpOnStart" in $$source)) {
+            this["catchUpOnStart"] = false;
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new UpdatePrefs instance from a string or object.
+     */
+    static createFrom($$source: any = {}): UpdatePrefs {
+        const $$createField5_0 = $$createType4;
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        if ("groups" in $$parsedSource) {
+            $$parsedSource["groups"] = $$createField5_0($$parsedSource["groups"]);
+        }
+        return new UpdatePrefs($$parsedSource as Partial<UpdatePrefs>);
+    }
+}
+
 // Private type creation functions
 const $$createType0 = BollPrefs.createFrom;
 const $$createType1 = MacdPrefs.createFrom;
 const $$createType2 = MaPrefs.createFrom;
 const $$createType3 = $Create.Array($$createType2);
+const $$createType4 = $Create.Array($Create.Any);

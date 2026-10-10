@@ -5,5 +5,6 @@ export {
     BollPrefs,
     KlinePrefs,
     MaPrefs,
-    MacdPrefs
+    MacdPrefs,
+    UpdatePrefs
 } from "./models.js";
