@@ -577,12 +577,39 @@ func Open(path string) (*Store, error) {
 		slog.Warn("设置 journal_size_limit 失败", "err", err)
 	}
 
+	// **临时表放内存**。
+	//
+	// `temp_store` 默认是 0（=FILE）：SQLite 遇到无法用索引完成的排序/分组时，
+	// 会建临时 B 树并**溢出到磁盘临时文件**。而"临时文件创建不出来"时报的
+	// **正是 `unable to open database file (14)`** —— 与用户的现象吻合
+	//（回测区间一年、要读十几万行评分；诊断显示 openHandles=673 完全正常，
+	//  所以不是句柄耗尽，指向的只能是临时文件这一条）。
+	//
+	// 设成 MEMORY 后临时表只在内存里，不再碰临时文件。
+	if _, err := db.Exec("PRAGMA temp_store = MEMORY"); err != nil {
+		slog.Warn("设置 temp_store 失败", "err", err)
+	}
+	// 顺带把页缓存调大些，减少回测读十几万行时的反复换入换出
+	if _, err := db.Exec("PRAGMA cache_size = -16384"); err != nil {
+		slog.Warn("设置 cache_size 失败", "err", err)
+	}
+
 	store := &Store{db: db, path: path}
 	if err := store.migrate(); err != nil {
 		db.Close()
 		return nil, err
 	}
 	return store, nil
+}
+
+// DB 暴露底层连接，**仅供诊断与维护**（行数统计、quick_check、VACUUM、
+// 复现问题时手动读写）。业务代码请用 Store 上的具体方法，
+// 不要绕过它们直接写 SQL。
+func (s *Store) DB() *sql.DB {
+	if s == nil {
+		return nil
+	}
+	return s.db
 }
 
 // Close 关闭组合库。

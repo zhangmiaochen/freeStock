@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -66,7 +67,33 @@ type BacktestPayload struct {
 }
 
 // CreateBacktest 跑一次回测并落库。
-func (s *PortfolioService) CreateBacktest(req BacktestRequest) (*BacktestRunResult, error) {
+func (s *PortfolioService) CreateBacktest(req BacktestRequest) (runResult *BacktestRunResult, err error) {
+	// ⚠ **失败时把当时的事实记下来**。
+	//
+	// 之前我把诊断挂在 `portfolio.Open` 上 —— 但 `s.db()` 会**缓存** store，
+	// 开库全程只调一次。所以只要失败发生在之后某次查询/写入上，
+	// 那个诊断就永远不会触发（用户白报了几次错，日志里什么都没有）。
+	//
+	// 这里用 defer 兜住整个回测过程：无论哪一步失败，
+	// 都会带上当时的**进程句柄数**与 goroutine 数 —— 用来判断
+	// `SQLITE_CANTOPEN` 是不是 `open()` 返回 EMFILE 造成的。
+	// 失败时把事实**直接拼进错误信息**，而不是只写日志。
+	//
+	// 之前失败信息只进日志，但界面上看到的是错误消息本体，用户未必找得到日志文件 ——
+	// 结果连着报了几次错，诊断数据一次也没拿到。拼进错误里就没这个问题。
+	defer func() {
+		if err != nil {
+			handles := openHandleCount()
+			goroutines := runtime.NumGoroutine()
+			logged := fmt.Errorf("%w｜诊断：openHandles=%d goroutines=%d 区间=%d~%d",
+				err, handles, goroutines, req.StartDate, req.EndDate)
+			slog.Error("回测失败", "err", err,
+				"openHandles", handles, "goroutines", goroutines,
+				"startDate", req.StartDate, "endDate", req.EndDate,
+				"portfolioId", req.PortfolioID)
+			err = logged
+		}
+	}()
 	store, err := s.db()
 	if err != nil {
 		return nil, err
@@ -188,7 +215,16 @@ func (s *PortfolioService) CreateBacktest(req BacktestRequest) (*BacktestRunResu
 }
 
 // GetBacktestPayload 读一次回测的完整结果。
-func (s *PortfolioService) GetBacktestPayload(runID string) (*BacktestPayload, error) {
+func (s *PortfolioService) GetBacktestPayload(runID string) (payload *BacktestPayload, err error) {
+	// 失败时带上诊断事实（同 CreateBacktest）—— 回测页会调多个后端方法，
+	// 任何一个失败在界面上都是同一句 unable to open database file，
+	// 必须让错误自己说清是哪一步、当时句柄多少。
+	defer func() {
+		if err != nil {
+			err = fmt.Errorf("%w｜诊断：%s openHandles=%d goroutines=%d",
+				err, "GetBacktestPayload", openHandleCount(), runtime.NumGoroutine())
+		}
+	}()
 	store, err := s.db()
 	if err != nil {
 		return nil, err
@@ -223,7 +259,16 @@ func (s *PortfolioService) GetBacktestPayload(runID string) (*BacktestPayload, e
 }
 
 // ListBacktests 列出回测记录。
-func (s *PortfolioService) ListBacktests(portfolioID string) ([]portfolio.BacktestRun, error) {
+func (s *PortfolioService) ListBacktests(portfolioID string) (runs []portfolio.BacktestRun, err error) {
+	// 失败时带上诊断事实（同 CreateBacktest）—— 回测页会调多个后端方法，
+	// 任何一个失败在界面上都是同一句 unable to open database file，
+	// 必须让错误自己说清是哪一步、当时句柄多少。
+	defer func() {
+		if err != nil {
+			err = fmt.Errorf("%w｜诊断：%s openHandles=%d goroutines=%d",
+				err, "ListBacktests", openHandleCount(), runtime.NumGoroutine())
+		}
+	}()
 	store, err := s.db()
 	if err != nil {
 		return nil, err

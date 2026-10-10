@@ -116,6 +116,26 @@ func TestPortfolioDBDiagnostics(t *testing.T) {
 			t.Logf("  %s：%d 列", name, n)
 		}
 	}
+	// **索引**：回测要按 (strategy_id, trade_date) 区间读十几万行评分。
+	// 没有可用索引时 SQLite 会建临时 B 树 → **溢出到临时文件**；
+	// 临时文件创建失败报的就是 `unable to open database file (14)`。
+	for _, table := range []string{"stock_strength", "portfolio_backtest_daily", "market_state"} {
+		var idxSQL string
+		rows3, err := store.db.Query(
+			"SELECT COALESCE(group_concat(name), '(无)') FROM sqlite_master WHERE type='index' AND tbl_name=?", table)
+		if err != nil {
+			continue
+		}
+		if rows3.Next() {
+			_ = rows3.Scan(&idxSQL)
+		}
+		rows3.Close()
+		t.Logf("索引 %-26s %s", table, idxSQL)
+	}
+	var tempStore int64
+	_ = store.db.QueryRow("PRAGMA temp_store").Scan(&tempStore)
+	t.Logf("temp_store = %d（0=默认/FILE，1=FILE，2=MEMORY）", tempStore)
+
 	var autoVacuum int64
 	_ = store.db.QueryRow("PRAGMA auto_vacuum").Scan(&autoVacuum)
 	t.Logf("auto_vacuum = %d（0=关闭，空闲页不会被回收）", autoVacuum)
