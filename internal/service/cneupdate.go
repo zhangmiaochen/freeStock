@@ -228,6 +228,16 @@ func (s *CneUpdateService) CancelCatchUp() error {
 	return s.runner().CancelCatchUp()
 }
 
+// DiagnoseSchedule 从**应用进程自身**实测一组事实，用于定位
+// "系统找不到指定的路径"（ERROR_PATH_NOT_FOUND）。
+//
+// ⚠ 这个方法的存在理由：同一个调用在 `go test`（有控制台）里永远成功，
+// 说明差异在应用进程的环境 —— 只有从应用里实测才看得到。
+// 返回纯文本，用户可以直接贴出来。
+func (s *CneUpdateService) DiagnoseSchedule() string {
+	return cne.Diagnose()
+}
+
 // AutoUpdateStatus 是"自动更新"的整体状态。
 type AutoUpdateStatus struct {
 	// Enabled 表示两个任务是否都启用了

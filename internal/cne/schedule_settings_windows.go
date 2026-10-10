@@ -4,6 +4,8 @@ package cne
 
 import (
 	"fmt"
+	"os"
+	"os/exec"
 	"strings"
 )
 
@@ -48,11 +50,25 @@ func ApplyRecommendedSettings(taskName string) error {
 		"-Command", taskSettingsScript)
 	cmd.Env = append(buildTaskEnv(), "FREESTOCK_TASK_NAME="+taskName)
 	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("调整 %s 的设置失败：%v（%s）",
-			taskName, err, strings.TrimSpace(decodeConsole(out)))
+	if err == nil {
+		return nil
 	}
-	return nil
+
+	// 与 runSchtasks 同样加一次**裸调用**兜底（不设 Dir、不设标志、不碰 Env）。
+	// PowerShell 的 Get-ScheduledTask 之前也报 ERROR_PATH_NOT_FOUND(0x80070003)，
+	// 所以它和 schtasks 很可能是同一个原因。
+	plain := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", taskSettingsScript)
+	plain.Env = append(os.Environ(), "FREESTOCK_TASK_NAME="+taskName)
+	if out2, err2 := plain.CombinedOutput(); err2 == nil {
+		return nil
+	} else if strings.TrimSpace(decodeConsole(out2)) != "" {
+		return fmt.Errorf("调整 %s 的设置失败：\n  ① hiddenCommand: %v（%s）\n  ② 裸调用: %v（%s）",
+			taskName, err, strings.TrimSpace(decodeConsole(out)),
+			err2, strings.TrimSpace(decodeConsole(out2)))
+	}
+
+	return fmt.Errorf("调整 %s 的设置失败：%v（%s）",
+		taskName, err, strings.TrimSpace(decodeConsole(out)))
 }
 
 // SetTaskEnabled 启用/禁用一个任务。

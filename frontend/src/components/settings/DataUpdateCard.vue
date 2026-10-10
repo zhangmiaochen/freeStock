@@ -61,6 +61,8 @@ const plan = ref<SchedulePlan | null>(null);
 const autoUpdate = ref<AutoUpdateStatus | null>(null);
 /** 读自动更新状态失败的原因（非空时界面要显示出来，而不是什么都不显示） */
 const autoUpdateError = ref("");
+/** 诊断报告（排查"系统找不到指定的路径"用） */
+const diagnoseReport = ref("");
 const busy = ref("");
 const message = ref("");
 const error = ref("");
@@ -149,6 +151,18 @@ async function fixScheduleSettings() {
   } catch (e) {
     error.value = errorMessage(e);
     await loadAutoUpdate();
+  } finally {
+    busy.value = "";
+  }
+}
+
+/** 跑一次进程内诊断，把结果摊开显示（可直接复制粘贴）。 */
+async function runDiagnose() {
+  busy.value = "diagnose";
+  try {
+    diagnoseReport.value = await api.diagnoseSchedule();
+  } catch (e) {
+    diagnoseReport.value = "诊断失败：" + errorMessage(e);
   } finally {
     busy.value = "";
   }
@@ -692,8 +706,16 @@ onUnmounted(stopPolling);
           <p v-else-if="autoUpdate?.summary" class="text-muted-foreground text-[11px]">
             {{ autoUpdate.summary }}
           </p>
-          <div class="text-muted-foreground text-xs">
-            当前生效的任务：
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="text-muted-foreground text-xs">当前生效的任务：</span>
+            <Button size="xs" variant="ghost" :disabled="!!busy" class="ml-auto" @click="runDiagnose">
+              {{ busy === 'diagnose' ? '诊断中…' : '诊断' }}
+            </Button>
+          </div>
+          <!-- 诊断报告：定位"系统找不到指定的路径"用 -->
+          <div v-if="diagnoseReport" class="space-y-1">
+            <div class="text-[11px] font-medium">进程内诊断报告（可复制）：</div>
+            <pre class="bg-muted max-h-64 overflow-auto rounded p-2 text-[10px] leading-relaxed">{{ diagnoseReport }}</pre>
           </div>
           <div v-if="schedule" class="space-y-1 text-xs">
             <div class="grid grid-cols-2 gap-2">

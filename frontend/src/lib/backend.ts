@@ -281,6 +281,14 @@ export const api = {
    * 后者没打开时，17:30/21:00 机器关着就会永远跳过那天，
    * 而任务列表看上去一切正常。
    */
+  /**
+   * 从**应用进程自身**实测一组事实，用于定位"系统找不到指定的路径"。
+   *
+   * ⚠ 存在理由：同一个调用在 `go test`（有控制台的进程）里永远成功，
+   * 说明差异在应用进程的环境 —— 只有从应用里跑才看得到。
+   * 返回纯文本，可直接复制。
+   */
+  diagnoseSchedule: () => CneUpdateService.DiagnoseSchedule() as Promise<string>,
   autoUpdateStatus: () => CneUpdateService.AutoUpdateStatus() as Promise<AutoUpdateStatus | null>,
   /** 开启/关闭自动更新（启用或禁用两个计划任务）。只改启用状态，不改时间。 */
   setAutoUpdate: (enabled: boolean) =>

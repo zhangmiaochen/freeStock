@@ -5,6 +5,8 @@ package cne
 import (
 	"errors"
 	"fmt"
+	"os"
+	"os/exec"
 	"regexp"
 	"strings"
 	"unicode/utf8"
@@ -224,7 +226,41 @@ func DeleteTask(name string) error {
 // 现在的做法：**直连 schtasks，把 GBK 正确解码**（见 decodeConsole）。
 // 这样既不需要 cmd，也不需要 chcp，那条失败路径就不存在了。
 func runSchtasks(args ...string) ([]byte, error) {
-	return hiddenCommand("schtasks", args...).CombinedOutput()
+	out, err := hiddenCommand("schtasks", args...).CombinedOutput()
+	if err == nil {
+		return out, nil
+	}
+
+	// ⚠ **自愈兜底 + 一次决定性的实验。**
+	//
+	// 实测：任务确实存在、`schtasks` 与 `Get-ScheduledTask` 在命令行里都正常，
+	// 但从应用进程里调用就报 "系统找不到指定的路径"（ERROR_PATH_NOT_FOUND）。
+	// 差异只能在应用进程自身 —— 而我给子进程加了两样东西：Dir 和 CREATE_NO_WINDOW。
+	//
+	// 所以这里用**完全裸的 exec.Command**（不设 Dir、不设任何标志、
+	// 不碰 Env）再试一次：
+	//   - 能成功 → 功能立刻可用，同时说明问题就出在那两样设置上
+	//   - 仍失败 → 说明是进程环境本身（PATH/权限/令牌），此时报错里
+	//     带上够定位的事实
+	//
+	// 这不是"再猜一次"，而是把可能性收敛到一个二选一上。
+	plain := exec.Command("schtasks", args...)
+	out2, err2 := plain.CombinedOutput()
+	if err2 == nil {
+		return out2, nil
+	}
+
+	dir := neutralDir()
+	_, statErr := os.Stat(dir)
+	lookPath, lookErr := exec.LookPath("schtasks")
+	return out, fmt.Errorf(
+		"schtasks 两种调用方式都失败：\n"+
+			"  ① hiddenCommand（Dir + CREATE_NO_WINDOW）: %v（%s）\n"+
+			"  ② 裸 exec.Command（不设 Dir/标志）: %v（%s）\n"+
+			"  诊断：Dir=%q（存在性检查 err=%v），LookPath(schtasks)=%q（err=%v），USERNAME=%q",
+		err, strings.TrimSpace(decodeConsole(out)),
+		err2, strings.TrimSpace(decodeConsole(out2)),
+		dir, statErr, lookPath, lookErr, os.Getenv("USERNAME"))
 }
 
 // decodeConsole 把子进程输出转成 UTF-8 字符串。

@@ -30,6 +30,7 @@ const mocks = vi.hoisted(() => ({
   applySchedule: vi.fn(),
   autoUpdateStatus: vi.fn(),
   setAutoUpdate: vi.fn(),
+  diagnoseSchedule: vi.fn(),
   fixScheduleSettings: vi.fn(),
 }));
 
@@ -50,6 +51,7 @@ vi.mock("@/lib/backend", () => ({
     applySchedule: mocks.applySchedule,
     autoUpdateStatus: mocks.autoUpdateStatus,
     setAutoUpdate: mocks.setAutoUpdate,
+    diagnoseSchedule: mocks.diagnoseSchedule,
     fixScheduleSettings: mocks.fixScheduleSettings,
   },
   errorMessage: (e: unknown) => String(e),
@@ -519,5 +521,31 @@ describe("日志解析出来的进度（含非交易日跳过）", () => {
     const wrapper = await mountCard();
     expect(wrapper.text()).not.toContain("今天不是交易日");
     expect(wrapper.text()).not.toContain("本次跳过了");
+  });
+});
+describe("计划任务诊断", () => {
+  it("点「诊断」显示进程内实测报告（可复制）", async () => {
+    mocks.diagnoseSchedule.mockResolvedValue(
+      "=== cne 计划任务诊断 ===\n[环境] neutralDir() 实际返回: \"C:\\\\Temp\"\n  ① hiddenCommand: 失败\n  ② 裸 exec.Command: 成功",
+    );
+    const wrapper = await mountCard();
+    const btn = wrapper.findAll("button").find((b) => b.text().trim() === "诊断");
+    expect(btn).toBeTruthy();
+    await btn!.trigger("click");
+    await vi.waitFor(() => expect(mocks.diagnoseSchedule).toHaveBeenCalled());
+    await new Promise((r) => setTimeout(r, 0));
+    const text = wrapper.text();
+    expect(text).toContain("进程内诊断报告");
+    expect(text).toContain("neutralDir()");
+    expect(text).toContain("裸 exec.Command");
+  });
+
+  it("诊断失败也要显示出来，不能静默", async () => {
+    mocks.diagnoseSchedule.mockRejectedValue(new Error("诊断本身崩了"));
+    const wrapper = await mountCard();
+    await wrapper.findAll("button").find((b) => b.text().trim() === "诊断")!.trigger("click");
+    await vi.waitFor(() => expect(mocks.diagnoseSchedule).toHaveBeenCalled());
+    await new Promise((r) => setTimeout(r, 0));
+    expect(wrapper.text()).toContain("诊断失败");
   });
 });

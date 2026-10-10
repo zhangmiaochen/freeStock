@@ -99,6 +99,18 @@ export function CheckFreshness(): $CancellablePromise<cne$0.FreshnessReport | nu
 }
 
 /**
+ * DiagnoseSchedule 从**应用进程自身**实测一组事实，用于定位
+ * "系统找不到指定的路径"（ERROR_PATH_NOT_FOUND）。
+ * 
+ * ⚠ 这个方法的存在理由：同一个调用在 `go test`（有控制台）里永远成功，
+ * 说明差异在应用进程的环境 —— 只有从应用里实测才看得到。
+ * 返回纯文本，用户可以直接贴出来。
+ */
+export function DiagnoseSchedule(): $CancellablePromise<string> {
+    return $Call.ByID(490368420);
+}
+
+/**
  * FixScheduleSettings 把两个任务改成"错过时间后也能补跑"。
  * 
  * ⚠ 只改四项设置（StartWhenAvailable / 电池两项 / 多实例策略），
