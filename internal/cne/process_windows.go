@@ -4,6 +4,7 @@ package cne
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -34,13 +35,47 @@ func setupHiddenProcess(cmd *exec.Cmd) {
 	cmd.SysProcAttr.CreationFlags |= createNoWindow | syscall.CREATE_NEW_PROCESS_GROUP
 }
 
+// neutralDir 返回一个**必定存在、且语言中立**的目录，用作子进程的工作目录。
+//
+// ⚠ 这是修一个实际报错：用户点「开启自动更新」时得到
+//
+//	/enable cne-daily-update 失败：exit status 1（ERROR: The system cannot find the path specified.）
+//
+// 而**同一条命令在 PowerShell 里跑是 exit 0** —— 问题不在命令，在进程环境。
+// `cmd.exe` 对**当前工作目录**很敏感：目录无效或不存在时，它报的正是
+// "The system cannot find the path specified."。GUI 应用的 CWD 不可控
+// （可能是快捷方式的"起始位置"、被删掉的目录、或构建期间的 bin/），
+// 所以不能依赖继承来的 CWD。
+// ⚠ **不要用 System32**。实测（debug 输出）：
+//
+//	Dir = C:\Windows\System32  -> schtasks 输出**中文**（GBK）
+//	                               "任务名: \cne-daily-update"（字节是 GBK）
+//	Dir = 其它有效目录           -> schtasks 输出**英文**
+//	                               "TaskName: \cne-daily-update"
+//
+// 而 decodeConsole 对非 UTF-8 的处理是"剥掉非法字节"，
+// GBK 的中文被剥光后字段全空 —— 于是解析失败、界面显示空白。
+// 所以这里刻意避开 System32，用临时目录（必定存在、语言中立）。
+func neutralDir() string {
+	dir := os.TempDir()
+	if info, err := os.Stat(dir); err == nil && info.IsDir() {
+		return dir
+	}
+	return "."
+}
+
 // hiddenCommand 构造一个**不会弹窗**的外部命令。
 //
-// 本项目所有对外部程序的调用都必须走这里 —— 包括 taskkill / powershell /
-// schtasks(经 cmd /c) —— 否则每调一次就闪一个黑框（实测 powershell 那个
-// 尤其明显，因为它启动慢，窗口会停留可见的一段时间）。
+// 做两件事：
+//   - CREATE_NO_WINDOW：不弹黑框（用户实测反馈过 cne 与 powershell 的黑框）
+//   - **显式设置 Dir**：不继承 GUI 进程那个不可控的当前目录
+//     （见 systemDir 的说明）
+//
+// ⚠ 需要特定工作目录的调用（例如 cne 必须在工程目录里跑）要在返回后
+// 自己覆盖 cmd.Dir —— runner 就是这么做的。
 func hiddenCommand(name string, args ...string) *exec.Cmd {
 	cmd := exec.Command(name, args...)
+	cmd.Dir = neutralDir()
 	setupHiddenProcess(cmd)
 	return cmd
 }

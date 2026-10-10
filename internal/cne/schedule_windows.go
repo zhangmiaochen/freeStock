@@ -200,21 +200,31 @@ func DeleteTask(name string) error {
 // 辅助
 // ---------------------------------------------------------------------------
 
-// runSchtasks 调用 schtasks，并**强制它输出 UTF-8**。
+// runSchtasks 调用 schtasks，并让它输出 UTF-8。
 //
-// ⚠ 中文 Windows 上 schtasks 按 **OEM 代码页（GBK）** 输出字段名与值，
-// 直接当 UTF-8 读会变乱码（实测出现 `鍛ㄥ叚` 那种）。
-// 纯 Go 标准库没有 GBK 解码器，而为此引一个依赖不值得 ——
-// 直接用 `chcp 65001` 让它输出 UTF-8 即可（方案 §6 的包装脚本也是这么做的）。
+// ⚠ 这里有两个坑，都是实测出来的：
 //
-// 注意：`chcp` 的输出本身也要一起丢掉，只取 schtasks 的部分。
+// **坑一：必须设一个有效的工作目录。**
+// 用户点「开启自动更新」时报过：
+//
+//	/enable cne-daily-update 失败：exit status 1
+//	（ERROR: The system cannot find the path specified.）
+//
+// 同一条命令在 PowerShell 里是 exit 0 —— 问题不在命令，在环境：
+// `cmd.exe` 对**当前工作目录**敏感，GUI 进程继承来的 CWD 可能是无效的
+// （快捷方式的"起始位置"、被删的目录、构建期间的 bin/），
+// 于是 cmd 直接报"找不到路径"，schtasks 根本没被执行。
+// 修法：hiddenCommand 统一把 Dir 设成 neutralDir()。
+//
+// **坑二：不能把 Dir 设成 System32。**
+// 实测 Dir=System32 时 schtasks 会输出**中文 GBK**，
+// 而 `decodeConsole` 对非 UTF-8 是"剥掉非法字节"，中文被剥光后字段全空。
+// 所以 neutralDir 刻意避开 System32。
+//
+// 至于 `chcp 65001`：它确实有用（强制 UTF-8 输出），保留。
+// 输出被 `|` 到管道时 Windows 仍可能按 OEM 代码页编码，chcp 能把它掰过来。
 func runSchtasks(args ...string) ([]byte, error) {
-	quoted := make([]string, 0, len(args))
-	for _, a := range args {
-		quoted = append(quoted, a)
-	}
-	// cmd /c "chcp 65001 >nul && schtasks <args...>"
-	full := "chcp 65001 >nul && schtasks " + strings.Join(quoted, " ")
+	full := "chcp 65001 >nul && schtasks " + strings.Join(args, " ")
 	return hiddenCommand("cmd", "/c", full).CombinedOutput()
 }
 
