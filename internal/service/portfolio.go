@@ -3,6 +3,7 @@ package service
 import (
 	"fmt"
 	"log/slog"
+	"runtime"
 	"sync"
 
 	"freestock/internal/portfolio"
@@ -104,7 +105,16 @@ func (s *PortfolioService) db() (*portfolio.Store, error) {
 	store, err := portfolio.Open(path)
 	if err != nil {
 		s.openErr = fmt.Errorf("打开组合库失败（%s）：%w", path, err)
-		slog.Error("打开组合库失败", "path", path, "err", err)
+		// ⚠ **把句柄数一并记下来**。
+		//
+		// SQLite 的 CANTOPEN（错误 14）对应 `open()` 返回 EMFILE/ENFILE，
+		// 而用户的现象是"跑一段时间后失败、重启就好" —— 典型的资源累积。
+		// 但按代码审查找不到明显泄漏，所以在失败这一刻把事实记进日志，
+		// 下次直接判断，不再靠推理。
+		slog.Error("打开组合库失败",
+			"path", path, "err", err,
+			"openHandles", openHandleCount(),
+			"goroutines", runtime.NumGoroutine())
 		return nil, s.openErr
 	}
 	s.store = store

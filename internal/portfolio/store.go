@@ -31,6 +31,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -555,6 +556,26 @@ func Open(path string) (*Store, error) {
 	}
 	// SQLite 单文件，并发写会互相阻塞；限制成单连接最省心
 	db.SetMaxOpenConns(1)
+
+	// ⚠ **`sql.Open` 是惰性的** —— 它不碰文件，所以永远不会失败。
+	// 真正的 `SQLITE_CANTOPEN` 是**之后第一次真正用这个连接**时才冒出来的。
+	// 这里主动做一次探测，让失败**在开库时就暴露**、并带上诊断信息；
+	// 否则错误会飘到很远的地方（表现为"回填好好的、跑回测突然报错"）。
+	if err := db.Ping(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("连接组合库失败（%s）：%w", path, err)
+	}
+
+	// **限制 journal 大小**。
+	//
+	// SQLite 默认用 rollback journal，大小与"本次事务改动过的页数"相当。
+	// 回填对每个交易日都做 `DELETE + INSERT`（一次删/写约 7500 行），
+	// 在 400MB 级的库上 journal 会涨到几百 MB —— 这正是
+	// `unable to open database file (14)` 最可能的来源。
+	// 设上限后，提交时会把 journal 截断到这个尺寸。
+	if _, err := db.Exec("PRAGMA journal_size_limit = 67108864"); err != nil {
+		slog.Warn("设置 journal_size_limit 失败", "err", err)
+	}
 
 	store := &Store{db: db, path: path}
 	if err := store.migrate(); err != nil {
