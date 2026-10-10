@@ -253,14 +253,21 @@ func runSchtasks(args ...string) ([]byte, error) {
 	dir := neutralDir()
 	_, statErr := os.Stat(dir)
 	lookPath, lookErr := exec.LookPath("schtasks")
+	// ⚠ **失败时自动附上完整诊断**。
+	//
+	// 这个错修了四版都没修对，每一版都在"命令行里能跑、应用里不能跑"之间打转。
+	// 根因只能从**应用进程内部**看 —— 所以不再让用户额外点一次「诊断」，
+	// 直接把报告塞进错误信息里。
 	return out, fmt.Errorf(
 		"schtasks 两种调用方式都失败：\n"+
 			"  ① hiddenCommand（Dir + CREATE_NO_WINDOW）: %v（%s）\n"+
 			"  ② 裸 exec.Command（不设 Dir/标志）: %v（%s）\n"+
-			"  诊断：Dir=%q（存在性检查 err=%v），LookPath(schtasks)=%q（err=%v），USERNAME=%q",
+			"  Dir=%q（存在性 err=%v），LookPath(schtasks)=%q（err=%v）\n"+
+			"\n%s",
 		err, strings.TrimSpace(decodeConsole(out)),
 		err2, strings.TrimSpace(decodeConsole(out2)),
-		dir, statErr, lookPath, lookErr, os.Getenv("USERNAME"))
+		dir, statErr, lookPath, lookErr,
+		Diagnose())
 }
 
 // decodeConsole 把子进程输出转成 UTF-8 字符串。

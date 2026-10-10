@@ -67,8 +67,8 @@ func ApplyRecommendedSettings(taskName string) error {
 			err2, strings.TrimSpace(decodeConsole(out2)))
 	}
 
-	return fmt.Errorf("调整 %s 的设置失败：%v（%s）",
-		taskName, err, strings.TrimSpace(decodeConsole(out)))
+	return fmt.Errorf("调整 %s 的设置失败：%v（%s）\n\n%s",
+		taskName, err, strings.TrimSpace(decodeConsole(out)), Diagnose())
 }
 
 // SetTaskEnabled 启用/禁用一个任务。

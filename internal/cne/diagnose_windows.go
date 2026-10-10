@@ -113,6 +113,24 @@ func Diagnose() string {
 		"/query", "/tn", TaskDaily, "/fo", "LIST")
 
 	p("")
+	// ⑤ 会话与令牌 —— 这两项决定"能不能访问任务计划程序服务"
+	p("")
+	p("=== 进程上下文 ===")
+	p("  会话 ID: %d", processSessionID())
+	p("  是否管理员: %v", isElevated())
+	p("  父进程 PID: %d", os.Getppid())
+	if pp, err := parentName(); err == nil {
+		p("  父进程: %s", pp)
+	}
+	// 直接问一句：能不能打开任务计划程序服务
+	if err := probeTaskService(); err != nil {
+		p("  ⚠ **连不上任务计划程序服务**：%v", err)
+		p("     这会让 schtasks / Get-ScheduledTask 全部失败，且错误常是「找不到路径」")
+	} else {
+		p("  任务计划程序服务: 可访问")
+	}
+
+	p("")
 	p("=== 说明 ===")
 	p("如果上面只有「Dir+标志」那一行失败，问题就在 hiddenCommand 的设置；")
 	p("如果全部都失败，那是进程环境本身（PATH/权限/令牌）；")
