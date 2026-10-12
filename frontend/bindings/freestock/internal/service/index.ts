@@ -28,6 +28,8 @@ export {
     BoardFilter,
     BoardInfo,
     BoardMemberQuote,
+    BoardPeriodStat,
+    BoardPeriodWindow,
     BoardQuote,
     BoardQuoteResult,
     CatchUpInfo,

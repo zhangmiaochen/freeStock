@@ -14,7 +14,6 @@
  * 两者一起显示：表格里当日一列 + 各区间一列，热力图颜色跟着选中的周期走。
  */
 import { computed, onMounted, ref, watch } from "vue";
-import { useRouter } from "vue-router";
 import { CalendarRange, Info, LayoutGrid, LoaderCircle, RefreshCw } from "@lucide/vue";
 
 import BoardHeatmap from "@/components/boards/BoardHeatmap.vue";
@@ -43,10 +42,7 @@ import {
   periodWindow,
   periodWindowText,
 } from "@/lib/boardPeriod";
-import { formatAmount, formatDate, formatPercent } from "@/lib/format";
-import { cn } from "@/lib/utils";
-
-const router = useRouter();
+import { formatAmount, formatDate } from "@/lib/format";
 
 const categories = ref<BoardCategoryInfo[]>([]);
 const categoryKey = ref("");
@@ -175,10 +171,6 @@ function selectBoard(board: BoardQuote) {
     // 面板在表格下方，选中后滚过去，否则用户以为没反应
     void Promise.resolve().then(() => panel.value?.scrollIntoView({ behavior: "smooth", block: "start" }));
   }
-}
-
-function openKline(code: string) {
-  void router.push({ path: "/kline", query: { code } });
 }
 
 onMounted(async () => {
