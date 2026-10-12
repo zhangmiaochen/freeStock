@@ -105,7 +105,7 @@ func (s *CneUpdateService) ManualUpdate(kind string, tradeDate string) (*JobInfo
 	}, nil
 }
 
-// ManualBackfill 发起一次**历史区间回补**：`cne backfill daily_bars --start X --end Y`。
+// ManualBackfill 发起一次**历史区间回补**：`cne backfill <dataset> --start X --end Y`。
 //
 // ⚠ 为什么单独一个方法，而不是给 `ManualUpdate` 加参数：
 //
@@ -117,33 +117,43 @@ func (s *CneUpdateService) ManualUpdate(kind string, tradeDate string) (*JobInfo
 //     全市场"。**窗口宽窄几乎不影响成本**，所以文案里不该暗示"补一年更贵"，
 //     也不该让用户按天循环去补一整年。
 //
+// ⚠ **dataset 必须可选**：个股日线（`daily_bars`）与指数日线（`index_bars`）
+// 是**两个数据集**。只补个股会留下"交易日历里没有那一年"的空档 —— 因为
+// `PortfolioService.tradingDates` 取的是基准指数（`000300.SH`）的行情，
+// 而它在 `index_bars` 里。实机踩过：补完 `daily_bars` 之后回填仍然只有
+// **728** 个交易日（= index_bars 的行数），那一年根本不在日历里。
+//
 // 互斥（同进程 / 跨进程）由 Runner 统一处理，与日更共用同一把闸 —— backfill
 // 和计划任务里的日更必须串行，否则会撞上 cne 自己的 ingest 锁。
-func (s *CneUpdateService) ManualBackfill(start, end string) (*JobInfo, error) {
+func (s *CneUpdateService) ManualBackfill(dataset, start, end string) (*JobInfo, error) {
 	if s.store == nil {
 		return nil, errors.New("缺少配置存储，无法启动更新")
 	}
+	dataset = strings.TrimSpace(dataset)
 	start, end = strings.TrimSpace(start), strings.TrimSpace(end)
 	if start == "" || end == "" {
 		return nil, errors.New("补历史区间需要填写起止日期（YYYY-MM-DD）")
 	}
 
-	job, err := s.runner().StartBackfill(start, end)
+	job, err := s.runner().StartBackfill(dataset, start, end)
 	if err != nil {
 		return nil, err
 	}
 
 	slog.Info("手动历史回补已发起",
-		"start", start, "end", end, "job", job.ID, "log", job.LogPath)
+		"dataset", dataset, "start", start, "end", end, "job", job.ID, "log", job.LogPath)
 	return &JobInfo{
 		JobID:   job.ID,
 		Kind:    job.Kind,
 		Args:    strings.Join(job.Args, " "),
 		LogPath: job.LogPath,
-		Message: fmt.Sprintf("已开始回补 %s ~ %s 的日线。"+
+		Message: fmt.Sprintf("已开始回补 %s 的 %s ~ %s。"+
 			"⚠ 成本按**标的**算、与窗口宽窄几乎无关，所以不要按天循环补 —— "+
-			"一次给足区间即可。全市场回补通常要几十分钟以上，"+
-			"进度看 cne status，完成后数据湖会先校验再发布。", start, end),
+			"一次给足区间即可。全市场回补通常要几十分钟以上，进度看 cne status，"+
+			"完成后数据湖会先校验再发布。"+
+			"提醒：个股日线（daily_bars）与指数日线（index_bars）是**两个数据集**，"+
+			"做长区间回测时两个都要补 —— 交易日历取自 index_bars。",
+			dataset, start, end),
 	}, nil
 }
 

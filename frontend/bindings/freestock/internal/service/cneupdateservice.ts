@@ -142,7 +142,7 @@ export function LatestRunResult(): $CancellablePromise<cne$0.RunDetail | null> {
 }
 
 /**
- * ManualBackfill 发起一次**历史区间回补**：`cne backfill daily_bars --start X --end Y`。
+ * ManualBackfill 发起一次**历史区间回补**：`cne backfill <dataset> --start X --end Y`。
  * 
  * ⚠ 为什么单独一个方法，而不是给 `ManualUpdate` 加参数：
  * 
@@ -154,11 +154,17 @@ export function LatestRunResult(): $CancellablePromise<cne$0.RunDetail | null> {
  *     全市场"。**窗口宽窄几乎不影响成本**，所以文案里不该暗示"补一年更贵"，
  *     也不该让用户按天循环去补一整年。
  * 
+ * ⚠ **dataset 必须可选**：个股日线（`daily_bars`）与指数日线（`index_bars`）
+ * 是**两个数据集**。只补个股会留下"交易日历里没有那一年"的空档 —— 因为
+ * `PortfolioService.tradingDates` 取的是基准指数（`000300.SH`）的行情，
+ * 而它在 `index_bars` 里。实机踩过：补完 `daily_bars` 之后回填仍然只有
+ * **728** 个交易日（= index_bars 的行数），那一年根本不在日历里。
+ * 
  * 互斥（同进程 / 跨进程）由 Runner 统一处理，与日更共用同一把闸 —— backfill
  * 和计划任务里的日更必须串行，否则会撞上 cne 自己的 ingest 锁。
  */
-export function ManualBackfill(start: string, end: string): $CancellablePromise<$models.JobInfo | null> {
-    return $Call.ByID(2316202773, start, end).then(($result: any) => {
+export function ManualBackfill(dataset: string, start: string, end: string): $CancellablePromise<$models.JobInfo | null> {
+    return $Call.ByID(2316202773, dataset, start, end).then(($result: any) => {
         return $$createType11($result);
     });
 }

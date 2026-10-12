@@ -33,6 +33,51 @@ const (
 	KindBackfill = "backfill"
 )
 
+// BackfillDataset 是"补历史区间"能选的数据集。**不要写死单个数据集。**
+//
+// 教训（实机踩过）：先只支持 `daily_bars`，用户补完个股日线后仍然只有 728 个交易日 ——
+// 因为**指数在另一个数据集** `index_bars` 里，而交易日历取自它：
+//
+//	`PortfolioService.tradingDates` → `loadBenchmark(000300.SH)` → `index_bars`
+//
+// 指数只覆盖 2023-10-09 起时，`tradingDates(20221012, 20261012)` 只返回 728 天，
+// 之前的日子**根本不在日历里**，于是"补了数据却还是算不出那一年"。
+//
+// 两个数据集的**分区粒度也不同**：`daily_bars` 按日（trade_date=2023-10-09），
+// `index_bars` 按年（trade_date=2023）—— 读取侧 `internal/cnlake/rows.go` 已处理。
+type BackfillDataset struct {
+	Name  string // cne 的数据集名
+	Label string // 界面上给人看的名字
+}
+
+// BackfillDatasets 是允许回补的数据集白名单。
+//
+// 校验它的意义：数据集名拼错时 cne 的报错很难懂，而且**不会**在起进程前发现；
+// 白名单能让错误立刻、明确地暴露在 UI 上。
+var BackfillDatasets = []BackfillDataset{
+	{Name: "daily_bars", Label: "个股日线 daily_bars"},
+	{Name: "index_bars", Label: "指数日线 index_bars（交易日历/基准/低吸指数闸门都依赖它）"},
+}
+
+// BackfillDatasetNames 返回白名单里的数据集名（给前端/校验用）。
+func BackfillDatasetNames() []string {
+	out := make([]string, 0, len(BackfillDatasets))
+	for _, d := range BackfillDatasets {
+		out = append(out, d.Name)
+	}
+	return out
+}
+
+// IsBackfillDataset 判断数据集名是否在白名单内。
+func IsBackfillDataset(name string) bool {
+	for _, d := range BackfillDatasets {
+		if d.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
 // ErrBusy 表示已有更新在进行。
 //
 // 方案 §5.4 要求"再点更新要被拒，并说明原因"，而不是静默排队。
@@ -130,7 +175,7 @@ func (r *Runner) defaultArgs(kind string, extra []string) ([]string, error) {
 	case KindDate:
 		// extra[0] 是交易日（YYYY-MM-DD）
 	case KindBackfill:
-		// extra 是 ["daily_bars", "--start", X, "--end", Y]
+		// extra 是 ["<dataset>", "--start", X, "--end", Y]
 	default:
 		// full：不加额外参数
 	}
@@ -213,13 +258,24 @@ func (r *Runner) Start(kind string, tradeDate string) (*Job, error) {
 	return r.start(kind, extra)
 }
 
-// StartBackfill 补**历史区间**：`cne backfill daily_bars --start X --end Y`。
+// StartBackfill 补**历史区间**：`cne backfill <dataset> --start X --end Y`。
 //
 // 与 `Start` 走的是不同子命令（`backfill` 而不是 `run daily`），所以单独一个入口。
 // 互斥保护（同进程 ErrBusy / 跨进程 foreignRunning）由 `start` 统一处理 ——
 // backfill 与计划任务里的日更**必须**互斥，否则会撞上 cne 自己的 ingest 锁。
-func (r *Runner) StartBackfill(start, end string) (*Job, error) {
+//
+// dataset 必须在 `BackfillDatasets` 白名单内：**个股日线（daily_bars）与指数日线
+// （index_bars）是两个数据集**，只补前者会留下"交易日历没有那一年"的空档。
+func (r *Runner) StartBackfill(dataset, start, end string) (*Job, error) {
+	dataset = strings.TrimSpace(dataset)
 	start, end = strings.TrimSpace(start), strings.TrimSpace(end)
+	if dataset == "" {
+		dataset = "daily_bars"
+	}
+	if !IsBackfillDataset(dataset) {
+		return nil, fmt.Errorf("不支持回补数据集 %q（可选：%s）",
+			dataset, strings.Join(BackfillDatasetNames(), " / "))
+	}
 	if start == "" || end == "" {
 		return nil, errors.New("补历史区间需要提供起止日期（YYYY-MM-DD）")
 	}
@@ -228,7 +284,7 @@ func (r *Runner) StartBackfill(start, end string) (*Job, error) {
 	if start > end {
 		return nil, fmt.Errorf("区间起点 %s 晚于终点 %s", start, end)
 	}
-	return r.start(KindBackfill, []string{"daily_bars", "--start", start, "--end", end})
+	return r.start(KindBackfill, []string{dataset, "--start", start, "--end", end})
 }
 
 // start 是 Start / StartBackfill 的公共实现（互斥 → 校验 → 跨进程检测 → 起进程）。

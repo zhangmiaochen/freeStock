@@ -52,9 +52,11 @@ async function loadRunResult() {
 const projectDir = ref("");
 const cnePath = ref("");
 const tradeDate = ref("");
-/** 历史区间回补的起止日期（YYYY-MM-DD） */
+/** 历史区间回补的起止日期（YYYY-MM-DD）与数据集 */
 const backfillStart = ref("");
 const backfillEnd = ref("");
+/** ⚠ 个股日线（daily_bars）与指数日线（index_bars）是两个数据集，做长区间回测时两个都要补 */
+const backfillDataset = ref("daily_bars");
 /** 计划任务时间设置 */
 const dailyAt = ref("17:30");
 const staleAt = ref("21:00");
@@ -259,7 +261,7 @@ async function startBackfill() {
   }
   busy.value = "backfill";
   try {
-    const job = await api.manualBackfill(start, end);
+    const job = await api.manualBackfill(backfillDataset.value, start, end);
     message.value = job?.message ?? "已发起历史回补";
     await loadStatus();
     startPolling();
@@ -636,6 +638,14 @@ onUnmounted(stopPolling);
              这里走 `cne backfill daily_bars --start X --end Y`。 -->
         <div class="flex flex-wrap items-center gap-2">
           <span class="text-muted-foreground text-xs">补历史区间</span>
+          <select
+            v-model="backfillDataset"
+            class="border-input bg-background h-8 rounded-md border px-2 text-xs"
+            :disabled="running || !!busy"
+          >
+            <option value="daily_bars">个股日线 daily_bars</option>
+            <option value="index_bars">指数日线 index_bars</option>
+          </select>
           <Input v-model="backfillStart" placeholder="起 YYYY-MM-DD" class="h-8 w-36" />
           <span class="text-muted-foreground text-xs">~</span>
           <Input v-model="backfillEnd" placeholder="止 YYYY-MM-DD" class="h-8 w-36" />
@@ -653,6 +663,12 @@ onUnmounted(stopPolling);
           ⚠ 它的成本按<strong>标的</strong>算、与窗口宽窄几乎无关 ——
           <strong>一次给足区间即可，不要按天循环补</strong>。数据湖是"先抓取、再校验、再发布"，
           所以跑完之前 <code>curated</code> 里的分区不会变化，用 <code>cne status</code> 看进度。
+        </p>
+        <p class="text-muted-foreground text-[11px]">
+          ⚠ <strong>个股日线（<code>daily_bars</code>）与指数日线（<code>index_bars</code>）是两个数据集，
+          做长区间回测时两个都要补。</strong>交易日历取自基准指数（<code>000300.SH</code>），
+          它在 <code>index_bars</code> 里 —— 只补个股的话，回填会停在指数开始的那一天
+          （实测：指数只有 728 天时，回填也只有 728 天，前面那一年根本不在日历里）。
         </p>
         <p class="text-muted-foreground text-[11px]">
           「补抓落后」<strong>不覆盖日行情</strong>；非交易日要补某一天的行情，请用「补指定交易日」。
