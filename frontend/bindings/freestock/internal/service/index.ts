@@ -46,7 +46,9 @@ export {
     LakeScreenCondition,
     MACondition,
     MAValue,
+    MarketIndexStat,
     MarketInfo,
+    MarketTemperatureResult,
     MoneyFlowPoint,
     MoneyFlowSummary,
     PlanResult,
@@ -71,6 +73,7 @@ export {
     StockUniverse,
     StrategyRefresh,
     StrengthSummary,
+    TemperatureFactor,
     TopHolderItem,
     UpdatePrefsInfo
 } from "./models.js";

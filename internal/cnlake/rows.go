@@ -636,6 +636,28 @@ func (l *Lake) IndexBars(symbol string, startYear, endYear int) ([]IndexBarRow, 
 // HasIndexBars 报告指数日线是否可用（相对强度条件依赖它）。
 func (l *Lake) HasIndexBars() bool { return l.HasDataset("index_bars") }
 
+// AllIndexBars 读取 index_bars 里的**全部**指数日线（按 代码、日期 升序）。
+//
+// 市场温度页要一次拿到湖里所有指数的全部历史。逐个 `IndexBars(symbol, 0, 0)`
+// 会把同一批年分区重复打开 N 遍（本机 8 个指数 × 4 个分区 = 32 次），
+// 指数一多就线性膨胀；而 index_bars 整表只有 154 KB，一次全读反而更便宜。
+func (l *Lake) AllIndexBars() ([]IndexBarRow, error) {
+	if !l.HasDataset("index_bars") {
+		return nil, fmt.Errorf("cnlake: index_bars 尚未入库")
+	}
+	rows, err := readTyped[IndexBarRow](l.FilesForYears("index_bars", 0, 0), nil)
+	if err != nil {
+		return nil, fmt.Errorf("cnlake: 读取 index_bars 失败：%w", err)
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Symbol != rows[j].Symbol {
+			return rows[i].Symbol < rows[j].Symbol
+		}
+		return rows[i].TradeDate < rows[j].TradeDate
+	})
+	return rows, nil
+}
+
 // ---------------------------------------------------------------------------
 // 批量读取
 //

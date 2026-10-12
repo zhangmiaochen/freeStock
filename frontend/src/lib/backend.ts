@@ -20,6 +20,8 @@ import type {
   KlinePrefsInfo,
   LakeScreenCondition,
   MACondition,
+  MarketIndexStat,
+  MarketTemperatureResult,
   MoneyFlowSummary,
   ScreenCondition,
   ScreenConditionInfo,
@@ -33,6 +35,7 @@ import type {
   StockProfile,
   StockSearchItem,
   StockUniverse,
+  TemperatureFactor,
   TopHolderItem,
 } from "../../bindings/freestock/internal/service/models";
 // 数据湖相关的类型定义在 cnlake 包里，Wails 按包生成模型
@@ -139,6 +142,8 @@ export type {
   KlineCandle,
   LakeScreenCondition,
   MACondition,
+  MarketIndexStat,
+  MarketTemperatureResult,
   MoneyFlowSummary,
   Partition,
   ScreenCondition,
@@ -153,6 +158,7 @@ export type {
   StockProfile,
   StockSearchItem,
   StockUniverse,
+  TemperatureFactor,
   TopHolderItem,
 };
 
@@ -208,6 +214,15 @@ export const api = {
     StockService.GetBoardQuotes(category, periodDays, limit) as Promise<BoardQuoteResult | null>,
   getBoardMembers: (code: string) =>
     StockService.GetBoardMembers(code) as Promise<BoardMemberQuote[]>,
+  /**
+   * 市场温度：由 8 大指数的多周期走势与量能算出（口径见 internal/service/market_temperature.go）。
+   *
+   * periodDays = 1 表示当日（默认），其余为 2~250 个交易日。
+   * 指数行情只在本地数据湖的 index_bars 里；数据不可用时返回 Available=false + Message，
+   * 而不是抛错 —— 界面据此显示可解释的空状态。
+   */
+  getMarketTemperature: (periodDays = 1) =>
+    StockService.GetMarketTemperature(periodDays) as Promise<MarketTemperatureResult | null>,
   getDataSources: () => StockService.GetDataSources() as Promise<DataSourceInfo[]>,
   getCurrentDataSource: () =>
     StockService.GetCurrentDataSource() as Promise<DataSourceInfo>,

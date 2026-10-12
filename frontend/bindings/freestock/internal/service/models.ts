@@ -2259,6 +2259,210 @@ export class MAValue {
 }
 
 /**
+ * MarketIndexStat 是一个大盘指数在市场温度页上的一行。
+ */
+export class MarketIndexStat {
+    "code": string;
+    "name": string;
+    "group": string;
+    "date": number;
+    "close": number;
+
+    /**
+     * 当日涨跌幅 %
+     */
+    "pctChg": number;
+
+    /**
+     * 所选周期涨跌幅 %
+     */
+    "periodPctChg": number;
+
+    /**
+     * 当日成交额
+     */
+    "amount": number;
+
+    /**
+     * 所选周期的最高/最低（区间区间内）
+     */
+    "periodHigh": number;
+    "periodLow": number;
+
+    /**
+     * VolumeRatio 是"所选周期日均量 ÷ 近一年日均量"，>1 放量。
+     */
+    "volumeRatio": number;
+    "ma20": number;
+    "ma60": number;
+    "ma250": number;
+
+    /**
+     * ---- 位置：全部历史算出来的相对水平（不是点数高低）----
+     * 
+     * MaDeviation 是点位相对 250 日均线的偏离 %；
+     * LevelScore 是这个偏离在其**全部历史**中的分位（0~100）。
+     */
+    "maDeviation": number;
+    "levelScore": number;
+    "levelText": string;
+
+    /**
+     * DrawdownFromHigh 是距历史（样本内）最高点的回撤 %（负数）。
+     */
+    "drawdownFromHigh": number;
+    "highDate": number;
+    "highClose": number;
+
+    /**
+     * NewHighDays / NewLowDays 是当日创下的新高/新低天数（0 表示没有）。
+     */
+    "newHighDays": number;
+    "newLowDays": number;
+
+    /**
+     * 分项与综合动向（都先在自身历史里取分位，再按权重合成）
+     */
+    "momentumScore": number;
+    "volumeScore": number;
+    "trendScore": number;
+    "trendLabel": string;
+    "trendNote": string;
+
+    /**
+     * 走势数据：最近 Window 个交易日（与结果里的 Dates 对齐）
+     * 原始收盘点数
+     */
+    "recent": number[];
+
+    /**
+     * 归一化（窗口首日 = 100）
+     */
+    "norm": number[];
+
+    /**
+     * HistoryDays 是该指数用于分位的历史交易日数，HistoryStart 是起点。
+     */
+    "historyDays": number;
+    "historyStart": number;
+
+    /** Creates a new MarketIndexStat instance. */
+    constructor($$source: Partial<MarketIndexStat> = {}) {
+        if (!("code" in $$source)) {
+            this["code"] = "";
+        }
+        if (!("name" in $$source)) {
+            this["name"] = "";
+        }
+        if (!("group" in $$source)) {
+            this["group"] = "";
+        }
+        if (!("date" in $$source)) {
+            this["date"] = 0;
+        }
+        if (!("close" in $$source)) {
+            this["close"] = 0;
+        }
+        if (!("pctChg" in $$source)) {
+            this["pctChg"] = 0;
+        }
+        if (!("periodPctChg" in $$source)) {
+            this["periodPctChg"] = 0;
+        }
+        if (!("amount" in $$source)) {
+            this["amount"] = 0;
+        }
+        if (!("periodHigh" in $$source)) {
+            this["periodHigh"] = 0;
+        }
+        if (!("periodLow" in $$source)) {
+            this["periodLow"] = 0;
+        }
+        if (!("volumeRatio" in $$source)) {
+            this["volumeRatio"] = 0;
+        }
+        if (!("ma20" in $$source)) {
+            this["ma20"] = 0;
+        }
+        if (!("ma60" in $$source)) {
+            this["ma60"] = 0;
+        }
+        if (!("ma250" in $$source)) {
+            this["ma250"] = 0;
+        }
+        if (!("maDeviation" in $$source)) {
+            this["maDeviation"] = 0;
+        }
+        if (!("levelScore" in $$source)) {
+            this["levelScore"] = 0;
+        }
+        if (!("levelText" in $$source)) {
+            this["levelText"] = "";
+        }
+        if (!("drawdownFromHigh" in $$source)) {
+            this["drawdownFromHigh"] = 0;
+        }
+        if (!("highDate" in $$source)) {
+            this["highDate"] = 0;
+        }
+        if (!("highClose" in $$source)) {
+            this["highClose"] = 0;
+        }
+        if (!("newHighDays" in $$source)) {
+            this["newHighDays"] = 0;
+        }
+        if (!("newLowDays" in $$source)) {
+            this["newLowDays"] = 0;
+        }
+        if (!("momentumScore" in $$source)) {
+            this["momentumScore"] = 0;
+        }
+        if (!("volumeScore" in $$source)) {
+            this["volumeScore"] = 0;
+        }
+        if (!("trendScore" in $$source)) {
+            this["trendScore"] = 0;
+        }
+        if (!("trendLabel" in $$source)) {
+            this["trendLabel"] = "";
+        }
+        if (!("trendNote" in $$source)) {
+            this["trendNote"] = "";
+        }
+        if (!("recent" in $$source)) {
+            this["recent"] = [];
+        }
+        if (!("norm" in $$source)) {
+            this["norm"] = [];
+        }
+        if (!("historyDays" in $$source)) {
+            this["historyDays"] = 0;
+        }
+        if (!("historyStart" in $$source)) {
+            this["historyStart"] = 0;
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new MarketIndexStat instance from a string or object.
+     */
+    static createFrom($$source: any = {}): MarketIndexStat {
+        const $$createField27_0 = $$createType57;
+        const $$createField28_0 = $$createType57;
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        if ("recent" in $$parsedSource) {
+            $$parsedSource["recent"] = $$createField27_0($$parsedSource["recent"]);
+        }
+        if ("norm" in $$parsedSource) {
+            $$parsedSource["norm"] = $$createField28_0($$parsedSource["norm"]);
+        }
+        return new MarketIndexStat($$parsedSource as Partial<MarketIndexStat>);
+    }
+}
+
+/**
  * MarketInfo 市场分类信息。
  */
 export class MarketInfo {
@@ -2291,6 +2495,148 @@ export class MarketInfo {
     static createFrom($$source: any = {}): MarketInfo {
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         return new MarketInfo($$parsedSource as Partial<MarketInfo>);
+    }
+}
+
+/**
+ * MarketTemperatureResult 是市场温度页一次加载所需的全部数据。
+ */
+export class MarketTemperatureResult {
+    /**
+     * Available 为 false 时 Message 说明原因（例如数据湖不可用 / index_bars 未入库），
+     * 此时其余字段为空 —— 界面据此显示空状态而不是一屏 0。
+     */
+    "available": boolean;
+    "message"?: string;
+    "tradeDate": number;
+    "periodDays": number;
+    "periodLabel": string;
+
+    /**
+     * Temperature 是 0~100 的市场温度：综合分在**全部历史**中的分位。
+     */
+    "temperature": number;
+
+    /**
+     * 冰点 / 偏冷 / 中性 / 偏热 / 过热
+     */
+    "level": string;
+
+    /**
+     * 结论性的一句话
+     */
+    "levelText": string;
+
+    /**
+     * 加权后的综合分（0~100）
+     */
+    "composite": number;
+
+    /**
+     * 分位样本区间（"有史以来"在数据源里实际是多少）
+     */
+    "historyDays": number;
+    "historyStart": number;
+    "historyEnd": number;
+    "factors": TemperatureFactor[];
+    "indices": MarketIndexStat[];
+    "indexCount": number;
+
+    /**
+     * Window 是走势图/迷你图显示的交易日数，Dates 是所有指数共用的日期轴，
+     * 每个指数的 Recent/Norm 与它一一对应。
+     */
+    "window": number;
+    "dates": number[];
+    "notes": string[];
+    "source": string;
+    "elapsed": string;
+
+    /** Creates a new MarketTemperatureResult instance. */
+    constructor($$source: Partial<MarketTemperatureResult> = {}) {
+        if (!("available" in $$source)) {
+            this["available"] = false;
+        }
+        if (!("tradeDate" in $$source)) {
+            this["tradeDate"] = 0;
+        }
+        if (!("periodDays" in $$source)) {
+            this["periodDays"] = 0;
+        }
+        if (!("periodLabel" in $$source)) {
+            this["periodLabel"] = "";
+        }
+        if (!("temperature" in $$source)) {
+            this["temperature"] = 0;
+        }
+        if (!("level" in $$source)) {
+            this["level"] = "";
+        }
+        if (!("levelText" in $$source)) {
+            this["levelText"] = "";
+        }
+        if (!("composite" in $$source)) {
+            this["composite"] = 0;
+        }
+        if (!("historyDays" in $$source)) {
+            this["historyDays"] = 0;
+        }
+        if (!("historyStart" in $$source)) {
+            this["historyStart"] = 0;
+        }
+        if (!("historyEnd" in $$source)) {
+            this["historyEnd"] = 0;
+        }
+        if (!("factors" in $$source)) {
+            this["factors"] = [];
+        }
+        if (!("indices" in $$source)) {
+            this["indices"] = [];
+        }
+        if (!("indexCount" in $$source)) {
+            this["indexCount"] = 0;
+        }
+        if (!("window" in $$source)) {
+            this["window"] = 0;
+        }
+        if (!("dates" in $$source)) {
+            this["dates"] = [];
+        }
+        if (!("notes" in $$source)) {
+            this["notes"] = [];
+        }
+        if (!("source" in $$source)) {
+            this["source"] = "";
+        }
+        if (!("elapsed" in $$source)) {
+            this["elapsed"] = "";
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new MarketTemperatureResult instance from a string or object.
+     */
+    static createFrom($$source: any = {}): MarketTemperatureResult {
+        const $$createField12_0 = $$createType59;
+        const $$createField13_0 = $$createType61;
+        const $$createField16_0 = $$createType30;
+        const $$createField17_0 = $$createType13;
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        if ("factors" in $$parsedSource) {
+            $$parsedSource["factors"] = $$createField12_0($$parsedSource["factors"]);
+        }
+        if ("indices" in $$parsedSource) {
+            $$parsedSource["indices"] = $$createField13_0($$parsedSource["indices"]);
+        }
+        if ("dates" in $$parsedSource) {
+            $$parsedSource["dates"] = $$createField16_0($$parsedSource["dates"]);
+        }
+        if ("notes" in $$parsedSource) {
+            $$parsedSource["notes"] = $$createField17_0($$parsedSource["notes"]);
+        }
+        return new MarketTemperatureResult($$parsedSource as Partial<MarketTemperatureResult>);
     }
 }
 
@@ -2545,9 +2891,9 @@ export class PlanResult {
      * Creates a new PlanResult instance from a string or object.
      */
     static createFrom($$source: any = {}): PlanResult {
-        const $$createField4_0 = $$createType57;
-        const $$createField5_0 = $$createType58;
-        const $$createField10_0 = $$createType59;
+        const $$createField4_0 = $$createType62;
+        const $$createField5_0 = $$createType63;
+        const $$createField10_0 = $$createType64;
         const $$createField11_0 = $$createType7;
         const $$createField12_0 = $$createType7;
         const $$createField13_0 = $$createType13;
@@ -2654,12 +3000,12 @@ export class PortfolioOptions {
      * Creates a new PortfolioOptions instance from a string or object.
      */
     static createFrom($$source: any = {}): PortfolioOptions {
-        const $$createField0_0 = $$createType61;
-        const $$createField1_0 = $$createType61;
-        const $$createField2_0 = $$createType61;
-        const $$createField3_0 = $$createType61;
-        const $$createField4_0 = $$createType61;
-        const $$createField5_0 = $$createType61;
+        const $$createField0_0 = $$createType66;
+        const $$createField1_0 = $$createType66;
+        const $$createField2_0 = $$createType66;
+        const $$createField3_0 = $$createType66;
+        const $$createField4_0 = $$createType66;
+        const $$createField5_0 = $$createType66;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("types" in $$parsedSource) {
             $$parsedSource["types"] = $$createField0_0($$parsedSource["types"]);
@@ -2734,7 +3080,7 @@ export class RefreshAllResult {
      * Creates a new RefreshAllResult instance from a string or object.
      */
     static createFrom($$source: any = {}): RefreshAllResult {
-        const $$createField4_0 = $$createType63;
+        const $$createField4_0 = $$createType68;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("strategies" in $$parsedSource) {
             $$parsedSource["strategies"] = $$createField4_0($$parsedSource["strategies"]);
@@ -2810,7 +3156,7 @@ export class RefreshResult {
      * Creates a new RefreshResult instance from a string or object.
      */
     static createFrom($$source: any = {}): RefreshResult {
-        const $$createField4_0 = $$createType58;
+        const $$createField4_0 = $$createType63;
         const $$createField5_0 = $$createType13;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("marketState" in $$parsedSource) {
@@ -3058,8 +3404,8 @@ export class ScreenCondition {
      */
     static createFrom($$source: any = {}): ScreenCondition {
         const $$createField19_0 = $$createType13;
-        const $$createField26_0 = $$createType65;
-        const $$createField27_0 = $$createType67;
+        const $$createField26_0 = $$createType70;
+        const $$createField27_0 = $$createType72;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("markets" in $$parsedSource) {
             $$parsedSource["markets"] = $$createField19_0($$parsedSource["markets"]);
@@ -3102,7 +3448,7 @@ export class ScreenConditionInfo {
      * Creates a new ScreenConditionInfo instance from a string or object.
      */
     static createFrom($$source: any = {}): ScreenConditionInfo {
-        const $$createField0_0 = $$createType68;
+        const $$createField0_0 = $$createType73;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("condition" in $$parsedSource) {
             $$parsedSource["condition"] = $$createField0_0($$parsedSource["condition"]);
@@ -3244,7 +3590,7 @@ export class ScreenItem {
      */
     static createFrom($$source: any = {}): ScreenItem {
         const $$createField20_0 = $$createType13;
-        const $$createField22_0 = $$createType70;
+        const $$createField22_0 = $$createType75;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("boards" in $$parsedSource) {
             $$parsedSource["boards"] = $$createField20_0($$parsedSource["boards"]);
@@ -3319,11 +3665,11 @@ export class ScreenOptions {
      * Creates a new ScreenOptions instance from a string or object.
      */
     static createFrom($$source: any = {}): ScreenOptions {
-        const $$createField0_0 = $$createType72;
-        const $$createField1_0 = $$createType74;
+        const $$createField0_0 = $$createType77;
+        const $$createField1_0 = $$createType79;
         const $$createField2_0 = $$createType13;
-        const $$createField3_0 = $$createType76;
-        const $$createField6_0 = $$createType68;
+        const $$createField3_0 = $$createType81;
+        const $$createField6_0 = $$createType73;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("categories" in $$parsedSource) {
             $$parsedSource["categories"] = $$createField0_0($$parsedSource["categories"]);
@@ -3447,7 +3793,7 @@ export class ScreenResult {
      * Creates a new ScreenResult instance from a string or object.
      */
     static createFrom($$source: any = {}): ScreenResult {
-        const $$createField0_0 = $$createType78;
+        const $$createField0_0 = $$createType83;
         const $$createField10_0 = $$createType13;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("items" in $$parsedSource) {
@@ -4211,8 +4557,8 @@ export class StockUniverse {
      * Creates a new StockUniverse instance from a string or object.
      */
     static createFrom($$source: any = {}): StockUniverse {
-        const $$createField7_0 = $$createType74;
-        const $$createField8_0 = $$createType80;
+        const $$createField7_0 = $$createType79;
+        const $$createField8_0 = $$createType85;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("markets" in $$parsedSource) {
             $$parsedSource["markets"] = $$createField7_0($$parsedSource["markets"]);
@@ -4313,6 +4659,73 @@ export class StrengthSummary {
     }
 }
 
+/**
+ * TemperatureFactor 是市场温度的一个分项。
+ */
+export class TemperatureFactor {
+    /**
+     * trend / volume / position / breadth
+     */
+    "key": string;
+
+    /**
+     * 趋势 / 量能 / 位置 / 共识
+     */
+    "name": string;
+
+    /**
+     * 0~100：该分项在全部历史中的分位
+     */
+    "score": number;
+    "weight": number;
+
+    /**
+     * 原始值（%/倍/%/%）
+     */
+    "value": number;
+
+    /**
+     * 原始值的可读形式
+     */
+    "valueText": string;
+    "detail": string;
+
+    /** Creates a new TemperatureFactor instance. */
+    constructor($$source: Partial<TemperatureFactor> = {}) {
+        if (!("key" in $$source)) {
+            this["key"] = "";
+        }
+        if (!("name" in $$source)) {
+            this["name"] = "";
+        }
+        if (!("score" in $$source)) {
+            this["score"] = 0;
+        }
+        if (!("weight" in $$source)) {
+            this["weight"] = 0;
+        }
+        if (!("value" in $$source)) {
+            this["value"] = 0;
+        }
+        if (!("valueText" in $$source)) {
+            this["valueText"] = "";
+        }
+        if (!("detail" in $$source)) {
+            this["detail"] = "";
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new TemperatureFactor instance from a string or object.
+     */
+    static createFrom($$source: any = {}): TemperatureFactor {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new TemperatureFactor($$parsedSource as Partial<TemperatureFactor>);
+    }
+}
+
 export class TopHolderItem {
     "recordDate": number;
     "scope": string;
@@ -4396,7 +4809,7 @@ export class UpdatePrefsInfo {
      * Creates a new UpdatePrefsInfo instance from a string or object.
      */
     static createFrom($$source: any = {}): UpdatePrefsInfo {
-        const $$createField0_0 = $$createType81;
+        const $$createField0_0 = $$createType86;
         const $$createField3_0 = $$createType13;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("prefs" in $$parsedSource) {
@@ -4467,28 +4880,33 @@ const $$createType53 = $Create.Array($$createType52);
 const $$createType54 = MoneyFlowPoint.createFrom;
 const $$createType55 = $Create.Array($$createType54);
 const $$createType56 = config$0.KlinePrefs.createFrom;
-const $$createType57 = score$0.StrategyConfig.createFrom;
-const $$createType58 = score$0.MarketState.createFrom;
-const $$createType59 = score$0.RotationPlan.createFrom;
-const $$createType60 = PortfolioOption.createFrom;
+const $$createType57 = $Create.Array($Create.Any);
+const $$createType58 = TemperatureFactor.createFrom;
+const $$createType59 = $Create.Array($$createType58);
+const $$createType60 = MarketIndexStat.createFrom;
 const $$createType61 = $Create.Array($$createType60);
-const $$createType62 = StrategyRefresh.createFrom;
-const $$createType63 = $Create.Array($$createType62);
-const $$createType64 = BoardFilter.createFrom;
-const $$createType65 = $Create.Array($$createType64);
-const $$createType66 = MACondition.createFrom;
-const $$createType67 = $Create.Array($$createType66);
-const $$createType68 = ScreenCondition.createFrom;
-const $$createType69 = MAValue.createFrom;
+const $$createType62 = score$0.StrategyConfig.createFrom;
+const $$createType63 = score$0.MarketState.createFrom;
+const $$createType64 = score$0.RotationPlan.createFrom;
+const $$createType65 = PortfolioOption.createFrom;
+const $$createType66 = $Create.Array($$createType65);
+const $$createType67 = StrategyRefresh.createFrom;
+const $$createType68 = $Create.Array($$createType67);
+const $$createType69 = BoardFilter.createFrom;
 const $$createType70 = $Create.Array($$createType69);
-const $$createType71 = BoardCategoryInfo.createFrom;
+const $$createType71 = MACondition.createFrom;
 const $$createType72 = $Create.Array($$createType71);
-const $$createType73 = MarketInfo.createFrom;
-const $$createType74 = $Create.Array($$createType73);
-const $$createType75 = LakeScreenCondition.createFrom;
-const $$createType76 = $Create.Array($$createType75);
-const $$createType77 = ScreenItem.createFrom;
-const $$createType78 = $Create.Array($$createType77);
-const $$createType79 = StockItem.createFrom;
-const $$createType80 = $Create.Array($$createType79);
-const $$createType81 = config$0.UpdatePrefs.createFrom;
+const $$createType73 = ScreenCondition.createFrom;
+const $$createType74 = MAValue.createFrom;
+const $$createType75 = $Create.Array($$createType74);
+const $$createType76 = BoardCategoryInfo.createFrom;
+const $$createType77 = $Create.Array($$createType76);
+const $$createType78 = MarketInfo.createFrom;
+const $$createType79 = $Create.Array($$createType78);
+const $$createType80 = LakeScreenCondition.createFrom;
+const $$createType81 = $Create.Array($$createType80);
+const $$createType82 = ScreenItem.createFrom;
+const $$createType83 = $Create.Array($$createType82);
+const $$createType84 = StockItem.createFrom;
+const $$createType85 = $Create.Array($$createType84);
+const $$createType86 = config$0.UpdatePrefs.createFrom;

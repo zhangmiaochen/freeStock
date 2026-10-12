@@ -18,6 +18,12 @@ export const routes = [
     meta: { title: "板块行情", subtitle: "申万行业与概念板块的涨跌、热度与成分股" },
   },
   {
+    path: "/temperature",
+    name: "temperature",
+    component: () => import("@/views/MarketTemperatureView.vue"),
+    meta: { title: "市场温度", subtitle: "8 大指数多周期走势与量能合成的市场热度读数" },
+  },
+  {
     path: "/kline",
     name: "kline",
     component: () => import("@/views/KlineView.vue"),

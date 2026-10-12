@@ -106,7 +106,7 @@ type BoardQuoteResult struct {
 // periodDays 是要额外计算的**区间周期**（交易日数，如 5/10/15/30/60 或自定义），
 // 由 NormalizeBoardPeriods 去重、升序、限幅（2 ~ 250）；传空则用 DefaultBoardPeriods。
 // 注意 1 日不是区间周期 —— 它就是「当日」，走成分股当日行情那条路
-//（BoardQuote 上的 PctChg / Amount / Turnover / UpCount…），不重复计算。
+// （BoardQuote 上的 PctChg / Amount / Turnover / UpCount…），不重复计算。
 //
 // limit > 0 时只返回涨跌幅绝对值最大的前 limit 个（概念板块有近千个，
 // 全量返回对界面没意义），但统计数字仍按全量计算。

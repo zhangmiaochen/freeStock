@@ -159,11 +159,24 @@ export function GetKlinePrefs(): $CancellablePromise<$models.KlinePrefsInfo> {
 }
 
 /**
+ * GetMarketTemperature 计算市场温度。
+ * 
+ * periodDays 是"看多长周期的走势"：1 = 当日（默认），其余 2~250 个交易日。
+ * 与板块页的区间周期不同，这里 1 是合法值 —— 当日的走势本身就是市场温度
+ * 最直接的输入。
+ */
+export function GetMarketTemperature(periodDays: number): $CancellablePromise<$models.MarketTemperatureResult | null> {
+    return $Call.ByID(2090856712, periodDays).then(($result: any) => {
+        return $$createType20($result);
+    });
+}
+
+/**
  * GetScreenCondition 读取上次使用的筛选条件；从未保存过时返回默认值。
  */
 export function GetScreenCondition(): $CancellablePromise<$models.ScreenConditionInfo> {
     return $Call.ByID(3333010147).then(($result: any) => {
-        return $$createType19($result);
+        return $$createType21($result);
     });
 }
 
@@ -172,7 +185,7 @@ export function GetScreenCondition(): $CancellablePromise<$models.ScreenConditio
  */
 export function GetScreenOptions(): $CancellablePromise<$models.ScreenOptions | null> {
     return $Call.ByID(2659327240).then(($result: any) => {
-        return $$createType21($result);
+        return $$createType23($result);
     });
 }
 
@@ -181,7 +194,7 @@ export function GetScreenOptions(): $CancellablePromise<$models.ScreenOptions | 
  */
 export function GetStockUniverse(refresh: boolean): $CancellablePromise<$models.StockUniverse | null> {
     return $Call.ByID(2542377399, refresh).then(($result: any) => {
-        return $$createType23($result);
+        return $$createType25($result);
     });
 }
 
@@ -215,7 +228,7 @@ export function ScreenCategories(): $CancellablePromise<$models.BoardCategoryInf
  */
 export function ScreenStocks(cond: $models.ScreenCondition): $CancellablePromise<$models.ScreenResult | null> {
     return $Call.ByID(2366312837, cond).then(($result: any) => {
-        return $$createType25($result);
+        return $$createType27($result);
     });
 }
 
@@ -224,7 +237,7 @@ export function ScreenStocks(cond: $models.ScreenCondition): $CancellablePromise
  */
 export function SearchStocks(keyword: string, limit: number): $CancellablePromise<$models.StockSearchItem[]> {
     return $Call.ByID(264754049, keyword, limit).then(($result: any) => {
-        return $$createType27($result);
+        return $$createType29($result);
     });
 }
 
@@ -242,7 +255,7 @@ export function SetDataLakeRoot(root: string): $CancellablePromise<$models.DataL
  */
 export function SetDataSource(kind: string, rawURL: string): $CancellablePromise<$models.SourceStatus> {
     return $Call.ByID(1745476251, kind, rawURL).then(($result: any) => {
-        return $$createType28($result);
+        return $$createType30($result);
     });
 }
 
@@ -252,7 +265,7 @@ export function SetDataSource(kind: string, rawURL: string): $CancellablePromise
  */
 export function TestDataSource(kind: string, rawURL: string): $CancellablePromise<$models.SourceStatus> {
     return $Call.ByID(2806700859, kind, rawURL).then(($result: any) => {
-        return $$createType28($result);
+        return $$createType30($result);
     });
 }
 
@@ -276,13 +289,15 @@ const $$createType15 = $Create.Nullable($$createType14);
 const $$createType16 = $models.KlineBundle.createFrom;
 const $$createType17 = $Create.Nullable($$createType16);
 const $$createType18 = $models.KlinePrefsInfo.createFrom;
-const $$createType19 = $models.ScreenConditionInfo.createFrom;
-const $$createType20 = $models.ScreenOptions.createFrom;
-const $$createType21 = $Create.Nullable($$createType20);
-const $$createType22 = $models.StockUniverse.createFrom;
+const $$createType19 = $models.MarketTemperatureResult.createFrom;
+const $$createType20 = $Create.Nullable($$createType19);
+const $$createType21 = $models.ScreenConditionInfo.createFrom;
+const $$createType22 = $models.ScreenOptions.createFrom;
 const $$createType23 = $Create.Nullable($$createType22);
-const $$createType24 = $models.ScreenResult.createFrom;
+const $$createType24 = $models.StockUniverse.createFrom;
 const $$createType25 = $Create.Nullable($$createType24);
-const $$createType26 = $models.StockSearchItem.createFrom;
-const $$createType27 = $Create.Array($$createType26);
-const $$createType28 = $models.SourceStatus.createFrom;
+const $$createType26 = $models.ScreenResult.createFrom;
+const $$createType27 = $Create.Nullable($$createType26);
+const $$createType28 = $models.StockSearchItem.createFrom;
+const $$createType29 = $Create.Array($$createType28);
+const $$createType30 = $models.SourceStatus.createFrom;

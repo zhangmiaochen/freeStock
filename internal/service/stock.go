@@ -164,6 +164,11 @@ type StockService struct {
 	periodMu    sync.Mutex
 	periodCache *boardPeriodCache
 
+	// 市场温度用的指数历史（见 market_temperature.go）。
+	// 同样不在 ClearCache 里死等锁 —— 用 `gen` 判断是否过期。
+	tempMu    sync.Mutex
+	tempCache *marketIndexCache
+
 	// 搜索索引（代码/名称/拼音/首字母），随股票列表一起失效
 	indexMu       sync.Mutex
 	searchIdx     []searchEntry
@@ -535,6 +540,12 @@ func (s *StockService) ClearCache() {
 	if s.periodMu.TryLock() {
 		s.periodCache = nil
 		s.periodMu.Unlock()
+	}
+
+	// 指数历史（市场温度页）：同样是"拿不到锁就算了"，gen 已经过期。
+	if s.tempMu.TryLock() {
+		s.tempCache = nil
+		s.tempMu.Unlock()
 	}
 
 	s.boardsMu.Lock()

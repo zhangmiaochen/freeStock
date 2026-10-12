@@ -251,7 +251,7 @@ const closesLookbackDays = 120
 //
 // 为什么不是区间查询：free-stockdb 的区间查询会把每条记录的 21 个字段全返回，
 // 实测 106 个交易日 = 34KB/只（全市场 190MB、16 秒），而点查询只有 320 字节
-//（7500 只 1 秒）。周期只需要几个日期上的收盘价，点查询正好。
+// （7500 只 1 秒）。周期只需要几个日期上的收盘价，点查询正好。
 func (p *stockdbProvider) ClosesBefore(ctx context.Context, codes []string, dates []int) (map[int]map[string]float64, error) {
 	out := make(map[int]map[string]float64, len(dates))
 	if len(codes) == 0 || len(dates) == 0 {
@@ -570,8 +570,8 @@ func (p *lakeProvider) DailyHistory(ctx context.Context, code string, start, end
 // TradingDates 直接读数据湖的日分区目录名（`trade_date=2026-10-09`）。
 //
 // ⚠ 数据湖的 `trading_calendar` 是**预生成**的，可能跑在 K 线前面
-//（见 provider.go 顶部关于数据缺口的说明），所以这里用"实际有日线的日期"
-//（`DatesInRange` 读的就是 daily_bars 的分区），而不是日历表 ——
+// （见 provider.go 顶部关于数据缺口的说明），所以这里用"实际有日线的日期"
+// （`DatesInRange` 读的就是 daily_bars 的分区），而不是日历表 ——
 // 否则周期基准日会落到一个还没有行情的日期上。
 func (p *lakeProvider) TradingDates(ctx context.Context, start, end int) ([]int, error) {
 	if start <= 0 {
