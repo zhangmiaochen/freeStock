@@ -28,7 +28,13 @@ import {
   trendClass,
 } from "@/lib/format";
 
-const props = defineProps<{ profile: StockProfile }>();
+const props = defineProps<{ profile: StockProfile; isIndex?: boolean }>();
+
+/**
+ * 指数没有估值 / 股本 / 财务 / 资金流数据（那是指标级的"个股 + 估值表"数据），
+ * 所以这些行整块不显示，只留当日行情 —— 一排「—」比不显示更难看，也更容易被误读成 0。
+ */
+const showValuation = computed(() => !props.isIndex);
 
 /** 板块默认只显示前几个，避免概念多的股票把信息栏撑得很长 */
 const BOARD_PREVIEW = 6;
@@ -176,6 +182,9 @@ const flowStats = computed<StatItem[]>(() => {
       <h2 class="truncate text-base font-semibold">{{ profile.name || profile.code }}</h2>
       <Badge variant="outline" class="tabular font-mono text-[11px]">{{ profile.code }}</Badge>
       <Badge variant="secondary" class="text-[11px]">{{ profile.marketCN }}</Badge>
+      <Badge v-if="isIndex" variant="outline" class="text-[11px]" title="数据来自数据湖 index_bars，没有复权">
+        指数行情
+      </Badge>
       <Badge v-if="profile.isST" variant="destructive" class="text-[11px]">ST</Badge>
 
       <span class="tabular text-xl font-semibold" :class="trendClass(profile.pctChg)">
@@ -223,8 +232,11 @@ const flowStats = computed<StatItem[]>(() => {
       </div>
     </div>
 
-    <!-- 第三行：估值与分红 -->
-    <div class="mt-1 grid grid-cols-3 gap-x-4 gap-y-1 sm:grid-cols-5 lg:grid-cols-10">
+    <!-- 第三行：估值与分红（指数没有，整块隐藏） -->
+    <div
+      v-if="showValuation"
+      class="mt-1 grid grid-cols-3 gap-x-4 gap-y-1 sm:grid-cols-5 lg:grid-cols-10"
+    >
       <div
         v-for="item in valuationStats"
         :key="item.label"
@@ -237,7 +249,7 @@ const flowStats = computed<StatItem[]>(() => {
     </div>
 
     <!-- 第四行：财务（由 PE/PB 推导，非财报） -->
-    <div class="mt-1 grid grid-cols-3 gap-x-4 gap-y-1 sm:grid-cols-5">
+    <div v-if="showValuation" class="mt-1 grid grid-cols-3 gap-x-4 gap-y-1 sm:grid-cols-5">
       <div
         v-for="item in derivedStats"
         :key="item.label"
@@ -250,7 +262,7 @@ const flowStats = computed<StatItem[]>(() => {
     </div>
 
     <!-- 第五行：资金流 -->
-    <div class="mt-1 grid grid-cols-2 gap-x-4 gap-y-1 sm:grid-cols-4">
+    <div v-if="showValuation" class="mt-1 grid grid-cols-2 gap-x-4 gap-y-1 sm:grid-cols-4">
       <div
         v-for="item in flowStats"
         :key="item.label"
@@ -266,5 +278,11 @@ const flowStats = computed<StatItem[]>(() => {
         </span>
       </div>
     </div>
+
+    <!-- 指数：说清楚为什么没有上面那些行 -->
+    <p v-if="isIndex" class="text-muted-foreground mt-1.5 text-[11px]">
+      指数只有价格与成交量：没有 PE / PB / 市值 / 股本 / 换手率 / 资金流 / 板块归属，
+      也不存在分红送转（因此没有复权）。行情来自本地数据湖的 index_bars。
+    </p>
   </section>
 </template>

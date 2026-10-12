@@ -351,4 +351,60 @@ describe("股票列表页面", () => {
     expect(store.keyword).toBe("600519");
     expect(store.grouped).toBe(false);
   });
+
+  // 列表页的搜索是用来**筛股票列表**的，指数不在列表里、筛不出来，
+  // 所以要在联想里过滤掉（指数请去 K 线页搜）。
+  it("列表页的联想里不出现指数", async () => {
+    mocks.searchStocks.mockResolvedValue([
+      {
+        code: "000001",
+        name: "平安银行",
+        market: "sz-main",
+        marketCN: "深市主板",
+        pinyin: "pinganyinhang",
+        initials: "payh",
+        close: 11.2,
+        pctChg: 0.5,
+        matchOn: "code",
+        isIndex: false,
+      },
+      {
+        code: "000001.SH",
+        name: "上证指数",
+        market: "index",
+        marketCN: "指数",
+        pinyin: "shangzhengzhishu",
+        initials: "szzs",
+        close: 3813.79,
+        pctChg: 0.05,
+        matchOn: "code",
+        isIndex: true,
+      },
+    ]);
+
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: "/", component: { template: "<div />" } },
+        { path: "/stocks", component: { template: "<div />" } },
+      ],
+    });
+    await router.push("/stocks");
+    await router.isReady();
+
+    const wrapper = mount(StockListView, { global: { plugins: [pinia, router] } });
+    await vi.waitFor(() => expect(wrapper.text()).toContain("沪市主板"));
+
+    const input = wrapper.find('input[placeholder*="拼音首字母"]');
+    await input.setValue("000001");
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await nextTick();
+
+    const text = wrapper.text();
+    expect(text).toContain("平安银行");
+    expect(text).not.toContain("上证指数");
+    expect(text).not.toContain("000001.SH");
+  });
 });

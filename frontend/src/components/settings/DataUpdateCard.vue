@@ -52,6 +52,9 @@ async function loadRunResult() {
 const projectDir = ref("");
 const cnePath = ref("");
 const tradeDate = ref("");
+/** 历史区间回补的起止日期（YYYY-MM-DD） */
+const backfillStart = ref("");
+const backfillEnd = ref("");
 /** 计划任务时间设置 */
 const dailyAt = ref("17:30");
 const staleAt = ref("21:00");
@@ -227,6 +230,40 @@ async function start(kind: string) {
   } catch (e) {
     // ⚠ 后端的拒绝理由要原样显示 —— 方案 §5.4 要求"被拒时提示明确，
     // 不是静默排队"，§9 还要求区分"上游熔断（明天自动重试）"这类情况。
+    error.value = errorMessage(e);
+  } finally {
+    busy.value = "";
+  }
+}
+
+/**
+ * 发起**历史区间回补**（`cne backfill daily_bars --start X --end Y`）。
+ *
+ * 与 `start()` 分开是因为它走的是**另一个 cne 子命令**：上面三种都走
+ * `cne run daily`（日更 pipeline，只认单日 `--trade-date`）。
+ */
+async function startBackfill() {
+  if (busy.value) return;
+  const start = backfillStart.value.trim();
+  const end = backfillEnd.value.trim();
+  error.value = "";
+  message.value = "";
+  if (!start || !end) {
+    error.value = "请先填写起止日期（YYYY-MM-DD）";
+    return;
+  }
+  // 定长 YYYY-MM-DD 的字典序就是日期序，所以这里能直接比字符串。
+  if (start > end) {
+    error.value = `区间起点 ${start} 晚于终点 ${end}`;
+    return;
+  }
+  busy.value = "backfill";
+  try {
+    const job = await api.manualBackfill(start, end);
+    message.value = job?.message ?? "已发起历史回补";
+    await loadStatus();
+    startPolling();
+  } catch (e) {
     error.value = errorMessage(e);
   } finally {
     busy.value = "";
@@ -593,6 +630,30 @@ onUnmounted(stopPolling);
             取消
           </Button>
         </div>
+
+        <!-- 历史区间回补：**与上面三个按钮不是同一条命令**。
+             上面走 `cne run daily`（日更 pipeline，只认单日 --trade-date），
+             这里走 `cne backfill daily_bars --start X --end Y`。 -->
+        <div class="flex flex-wrap items-center gap-2">
+          <span class="text-muted-foreground text-xs">补历史区间</span>
+          <Input v-model="backfillStart" placeholder="起 YYYY-MM-DD" class="h-8 w-36" />
+          <span class="text-muted-foreground text-xs">~</span>
+          <Input v-model="backfillEnd" placeholder="止 YYYY-MM-DD" class="h-8 w-36" />
+          <Button
+            size="sm"
+            variant="outline"
+            :disabled="running || !!busy || !backfillStart || !backfillEnd"
+            @click="startBackfill"
+          >
+            {{ busy === 'backfill' ? '发起中…' : '补历史区间' }}
+          </Button>
+        </div>
+        <p class="text-muted-foreground text-[11px]">
+          「补历史区间」用于把数据湖**过去缺失的日子**补齐（例如做长区间回测前的预热窗口）。
+          ⚠ 它的成本按<strong>标的</strong>算、与窗口宽窄几乎无关 ——
+          <strong>一次给足区间即可，不要按天循环补</strong>。数据湖是"先抓取、再校验、再发布"，
+          所以跑完之前 <code>curated</code> 里的分区不会变化，用 <code>cne status</code> 看进度。
+        </p>
         <p class="text-muted-foreground text-[11px]">
           「补抓落后」<strong>不覆盖日行情</strong>；非交易日要补某一天的行情，请用「补指定交易日」。
           单次通常 8~60 分钟，发起后可以关掉这个页面。

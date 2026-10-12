@@ -142,6 +142,28 @@ export function LatestRunResult(): $CancellablePromise<cne$0.RunDetail | null> {
 }
 
 /**
+ * ManualBackfill 发起一次**历史区间回补**：`cne backfill daily_bars --start X --end Y`。
+ * 
+ * ⚠ 为什么单独一个方法，而不是给 `ManualUpdate` 加参数：
+ * 
+ *   - 前三种 kind 都走 `cne run daily`（日更 pipeline），**只认单日 `--trade-date`**；
+ *     补历史走的是另一个子命令 `cne backfill`。这是"手动更新只能补交易日、
+ *     不能补区间"的根本原因 —— 不是缺输入框，是缺一条命令路径。
+ *   - 成本模型不同：`cne backfill --help` 说"成本按源的计费单位算，不按窗口算。
+ *     daily_bars 是逐标的抓取，所以 --start D --end D 和多年窗口一样要扫一遍
+ *     全市场"。**窗口宽窄几乎不影响成本**，所以文案里不该暗示"补一年更贵"，
+ *     也不该让用户按天循环去补一整年。
+ * 
+ * 互斥（同进程 / 跨进程）由 Runner 统一处理，与日更共用同一把闸 —— backfill
+ * 和计划任务里的日更必须串行，否则会撞上 cne 自己的 ingest 锁。
+ */
+export function ManualBackfill(start: string, end: string): $CancellablePromise<$models.JobInfo | null> {
+    return $Call.ByID(2316202773, start, end).then(($result: any) => {
+        return $$createType11($result);
+    });
+}
+
+/**
  * ManualUpdate 发起一次手动更新，**立即返回**（不等任务跑完）。
  * 
  * kind：`full` 更新到今天 / `stale` 补抓落后 / `date` 补指定交易日。

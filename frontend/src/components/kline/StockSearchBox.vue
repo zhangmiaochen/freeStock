@@ -1,18 +1,23 @@
 <script setup lang="ts">
 /**
- * 股票搜索框：支持代码、名称、拼音全拼、拼音首字母，带联想下拉与键盘导航。
+ * 股票 / 指数搜索框：支持代码、名称、拼音全拼、拼音首字母，带联想下拉与键盘导航。
  *
  * 两种选中行为（mode）：
- *   - navigate：选中后清空输入框（K 线页用来切换股票）
- *   - filter  ：选中后把股票代码留在输入框（列表页用来筛出这一只）
+ *   - navigate：选中后清空输入框（K 线页用来切换标的）
+ *   - filter  ：选中后把代码留在输入框（列表页用来筛出这一只）
  *
  * 无论哪种模式，输入内容变化都会通过 keyword-change 抛给父组件，
  * 方便父组件做本地筛选。
+ *
+ * **指数**也在这份联想里（`isIndex`），但指数必须带交易所后缀
+ * （`000001.SH` 上证指数 vs `000001` 平安银行），所以界面直接把带后缀的代码
+ * 显示出来，并打一个「指数」标记。
  */
 import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { LoaderCircle, Search, X } from "@lucide/vue";
 
 import { Input } from "@/components/ui/input";
+import { Badge } from "@/components/ui/badge";
 import { api, errorMessage, type StockSearchItem } from "@/lib/backend";
 import { cn } from "@/lib/utils";
 
@@ -24,12 +29,20 @@ const props = withDefaults(
     autofocus?: boolean;
     /** 选中联想项后的行为 */
     mode?: "navigate" | "filter";
+    /**
+     * 是否把**指数**放进联想结果。
+     *
+     * 列表页要关掉：那个页面是"筛出股票"，给一个筛不出来的指数只会让人困惑
+     * （指数不在股票列表里）。K 线页保持开启 —— 那里指数与股票走同一个入口。
+     */
+    allowIndex?: boolean;
   }>(),
   {
-    placeholder: "搜索股票代码 / 名称 / 拼音首字母",
+    placeholder: "搜索代码 / 名称 / 拼音首字母（支持指数，如 000001.SH）",
     widthClass: "w-full max-w-xl",
     autofocus: true,
     mode: "navigate",
+    allowIndex: true,
   },
 );
 
@@ -63,9 +76,10 @@ async function runSearch(raw: string) {
   const seq = ++requestSeq;
   loading.value = true;
   try {
-    const list = await api.searchStocks(raw, 12);
+    const list = (await api.searchStocks(raw, 12)) ?? [];
     if (seq !== requestSeq) return; // 只采纳最后一次请求的结果
-    results.value = list ?? [];
+    // 列表页不显示指数：它筛的是股票列表，指数筛不出来
+    results.value = props.allowIndex ? list : list.filter((item) => !item.isIndex);
     activeIndex.value = 0;
     open.value = true;
     error.value = "";
@@ -212,7 +226,8 @@ onBeforeUnmount(() => {
         @mouseenter="activeIndex = index"
         @click="choose(item)"
       >
-        <span class="tabular w-16 shrink-0 font-mono text-xs">{{ item.code }}</span>
+        <span class="tabular w-20 shrink-0 font-mono text-xs">{{ item.code }}</span>
+        <Badge v-if="item.isIndex" variant="secondary" class="shrink-0 px-1 py-0 text-[10px]">指数</Badge>
         <span class="min-w-0 flex-1 truncate text-sm">{{ item.name }}</span>
         <span class="text-muted-foreground shrink-0 text-[11px]">
           {{ MATCH_LABEL[item.matchOn] ?? item.matchOn }}
@@ -228,7 +243,7 @@ onBeforeUnmount(() => {
         v-if="!error && results.length === 0 && !loading"
         class="text-muted-foreground px-3 py-3 text-xs"
       >
-        没有匹配的股票
+        没有匹配的{{ allowIndex ? "股票 / 指数" : "股票" }}
       </p>
     </div>
   </div>

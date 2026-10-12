@@ -1992,6 +1992,7 @@ export class KlineBundle {
     "code": string;
     "name": string;
     "adjust": string;
+    "isIndex": boolean;
     "profile": StockProfile;
     "candles": KlineCandle[];
     "dividends": stockdb$0.Factor[];
@@ -2008,6 +2009,9 @@ export class KlineBundle {
         }
         if (!("adjust" in $$source)) {
             this["adjust"] = "";
+        }
+        if (!("isIndex" in $$source)) {
+            this["isIndex"] = false;
         }
         if (!("profile" in $$source)) {
             this["profile"] = (new StockProfile());
@@ -2032,26 +2036,26 @@ export class KlineBundle {
      * Creates a new KlineBundle instance from a string or object.
      */
     static createFrom($$source: any = {}): KlineBundle {
-        const $$createField3_0 = $$createType49;
-        const $$createField4_0 = $$createType51;
-        const $$createField5_0 = $$createType53;
-        const $$createField6_0 = $$createType55;
-        const $$createField7_0 = $$createType13;
+        const $$createField4_0 = $$createType49;
+        const $$createField5_0 = $$createType51;
+        const $$createField6_0 = $$createType53;
+        const $$createField7_0 = $$createType55;
+        const $$createField8_0 = $$createType13;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("profile" in $$parsedSource) {
-            $$parsedSource["profile"] = $$createField3_0($$parsedSource["profile"]);
+            $$parsedSource["profile"] = $$createField4_0($$parsedSource["profile"]);
         }
         if ("candles" in $$parsedSource) {
-            $$parsedSource["candles"] = $$createField4_0($$parsedSource["candles"]);
+            $$parsedSource["candles"] = $$createField5_0($$parsedSource["candles"]);
         }
         if ("dividends" in $$parsedSource) {
-            $$parsedSource["dividends"] = $$createField5_0($$parsedSource["dividends"]);
+            $$parsedSource["dividends"] = $$createField6_0($$parsedSource["dividends"]);
         }
         if ("moneyFlows" in $$parsedSource) {
-            $$parsedSource["moneyFlows"] = $$createField6_0($$parsedSource["moneyFlows"]);
+            $$parsedSource["moneyFlows"] = $$createField7_0($$parsedSource["moneyFlows"]);
         }
         if ("notes" in $$parsedSource) {
-            $$parsedSource["notes"] = $$createField7_0($$parsedSource["notes"]);
+            $$parsedSource["notes"] = $$createField8_0($$parsedSource["notes"]);
         }
         return new KlineBundle($$parsedSource as Partial<KlineBundle>);
     }
@@ -4464,6 +4468,14 @@ export class StockSearchItem {
     "pctChg": number;
     "matchOn": string;
 
+    /**
+     * IsIndex 标记这条是**大盘指数**（不是股票/基金）。
+     * 
+     * 指数与股票必须能分辨，否则两个后果：界面上分不清"000001.SH 上证指数"
+     * 与"000001 平安银行"；列表页会把指数当成股票去筛（筛不出来）。
+     */
+    "isIndex": boolean;
+
     /** Creates a new StockSearchItem instance. */
     constructor($$source: Partial<StockSearchItem> = {}) {
         if (!("code" in $$source)) {
@@ -4492,6 +4504,9 @@ export class StockSearchItem {
         }
         if (!("matchOn" in $$source)) {
             this["matchOn"] = "";
+        }
+        if (!("isIndex" in $$source)) {
+            this["isIndex"] = false;
         }
 
         Object.assign(this, $$source);

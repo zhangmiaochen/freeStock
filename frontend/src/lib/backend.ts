@@ -260,6 +260,17 @@ export const api = {
   /** 发起手动更新，**立即返回**（单次 8~60 分钟，不能同步等待） */
   manualUpdate: (kind: string, tradeDate = "") =>
     CneUpdateService.ManualUpdate(kind, tradeDate) as Promise<JobInfo | null>,
+  /**
+   * 发起**历史区间回补**（`cne backfill daily_bars --start X --end Y`）。
+   *
+   * ⚠ 与 manualUpdate 不是同一条命令：上面三种都走 `cne run daily`（日更 pipeline，
+   * 只认单日 `--trade-date`），补历史走的是另一个子命令 `cne backfill` ——
+   * 这就是"手动更新只能补交易日、不能补区间"的原因。
+   *
+   * 成本按**标的**算、与窗口宽窄几乎无关，所以不要按天循环去补一整年。
+   */
+  manualBackfill: (start: string, end: string) =>
+    CneUpdateService.ManualBackfill(start, end) as Promise<JobInfo | null>,
   /** 当前/最近任务的进度快照 */
   updateStatus: () => CneUpdateService.UpdateStatus() as Promise<CneUpdateStatus | null>,
   /** 取消当前任务（杀整棵进程树，不留孤儿 python） */

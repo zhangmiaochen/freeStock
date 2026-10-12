@@ -169,6 +169,13 @@ type StockService struct {
 	tempMu    sync.Mutex
 	tempCache *marketIndexCache
 
+	// 指数/股票重名裸码的解析缓存：裸码 → 指数代码（空串 = 不是指数）。
+	//
+	// `000001` 既是平安银行也是上证指数，判断一次要点查询一次（见 resolveIndexSymbol），
+	// 缓存下来避免每次打开这几只股票的 K 线都多查一遍。
+	indexResolveMu    sync.Mutex
+	indexResolveCache map[string]string
+
 	// 搜索索引（代码/名称/拼音/首字母），随股票列表一起失效
 	indexMu       sync.Mutex
 	searchIdx     []searchEntry
@@ -547,6 +554,11 @@ func (s *StockService) ClearCache() {
 		s.tempCache = nil
 		s.tempMu.Unlock()
 	}
+
+	// 裸码 → 指数 的解析结果（切数据源后指数表可能不一样）
+	s.indexResolveMu.Lock()
+	s.indexResolveCache = nil
+	s.indexResolveMu.Unlock()
 
 	s.boardsMu.Lock()
 	s.boards = nil

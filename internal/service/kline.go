@@ -11,6 +11,7 @@ import (
 
 	"github.com/mozillazg/go-pinyin"
 
+	"freestock/internal/cnlake"
 	"freestock/internal/market"
 	"freestock/internal/stockdb"
 )
@@ -30,6 +31,11 @@ type StockSearchItem struct {
 	Close    float64 `json:"close"`
 	PctChg   float64 `json:"pctChg"`
 	MatchOn  string  `json:"matchOn"`
+	// IsIndex 标记这条是**大盘指数**（不是股票/基金）。
+	//
+	// 指数与股票必须能分辨，否则两个后果：界面上分不清"000001.SH 上证指数"
+	// 与"000001 平安银行"；列表页会把指数当成股票去筛（筛不出来）。
+	IsIndex bool `json:"isIndex"`
 }
 
 // KlineCandle 是一根 K 线（已按需复权）。
@@ -118,6 +124,7 @@ type KlineBundle struct {
 	Code       string           `json:"code"`
 	Name       string           `json:"name"`
 	Adjust     string           `json:"adjust"`
+	IsIndex    bool             `json:"isIndex"`
 	Profile    StockProfile     `json:"profile"`
 	Candles    []KlineCandle    `json:"candles"`
 	Dividends  []stockdb.Factor `json:"dividends"`
@@ -138,6 +145,7 @@ type searchEntry struct {
 	marketCN string
 	close    float64
 	pctChg   float64
+	isIndex  bool
 }
 
 // maxPinyinVariants 限制多音字组合的数量，避免长名字组合爆炸。
@@ -241,11 +249,15 @@ func (s *StockService) searchIndex(universe *StockUniverse) []searchEntry {
 // matchScore 计算匹配分与命中方式，0 表示不匹配。
 func matchScore(entry searchEntry, keyword string) (int, string) {
 	name := strings.ToLower(entry.name)
+	// ⚠ 代码也要转小写再比：关键词在 SearchStocks 里已被 lower，
+	// 而**指数代码带交易所后缀**（000001.SH），不转小写就永远匹配不上。
+	// 股票/基金代码是纯数字，转小写不影响它们。
+	code := strings.ToLower(entry.code)
 
-	if entry.code == keyword {
+	if code == keyword {
 		return 100, "code"
 	}
-	if strings.HasPrefix(entry.code, keyword) {
+	if strings.HasPrefix(code, keyword) {
 		return 92, "code"
 	}
 
@@ -283,6 +295,10 @@ func matchScore(entry searchEntry, keyword string) (int, string) {
 }
 
 // SearchStocks 按代码 / 名称 / 拼音 / 拼音首字母搜索股票。
+//
+// **指数也在结果里**（带 `IsIndex` 标记）：K 线页要能查指数，
+// 而指数不在股票列表里（数据湖的 instruments 只有 stock/etf/cdr），
+// 只靠股票列表的索引是搜不到的。
 func (s *StockService) SearchStocks(keyword string, limit int) ([]StockSearchItem, error) {
 	keyword = strings.ToLower(strings.TrimSpace(keyword))
 	if keyword == "" {
@@ -304,15 +320,26 @@ func (s *StockService) SearchStocks(keyword string, limit int) ([]StockSearchIte
 		matchOn string
 	}
 	hits := make([]hit, 0, 32)
-	for _, entry := range index {
-		if score, on := matchScore(entry, keyword); score > 0 {
-			hits = append(hits, hit{entry: entry, score: score, matchOn: on})
+	collect := func(entries []searchEntry) {
+		for _, entry := range entries {
+			if score, on := matchScore(entry, keyword); score > 0 {
+				hits = append(hits, hit{entry: entry, score: score, matchOn: on})
+			}
 		}
 	}
+	collect(index)
+	// 指数单独取（按需读一块缓存的指数历史），不能并进上面那份缓存：
+	// 那份索引跟着股票列表的有效期走，而指数数据的更新节奏不同。
+	collect(s.indexSearchEntries())
 
 	sort.Slice(hits, func(i, j int) bool {
 		if hits[i].score != hits[j].score {
 			return hits[i].score > hits[j].score
+		}
+		// 同分时股票优先：裸码 000001 既是平安银行也是上证指数的一部分，
+		// 用户输入裸码时更可能想找股票（指数请带后缀，界面也是这么展示的）
+		if hits[i].entry.isIndex != hits[j].entry.isIndex {
+			return !hits[i].entry.isIndex
 		}
 		return hits[i].entry.code < hits[j].entry.code
 	})
@@ -333,17 +360,55 @@ func (s *StockService) SearchStocks(keyword string, limit int) ([]StockSearchIte
 			Close:    item.entry.close,
 			PctChg:   item.entry.pctChg,
 			MatchOn:  item.matchOn,
+			IsIndex:  item.entry.isIndex,
 		})
 	}
 	return results, nil
+}
+
+// indexSearchEntries 把数据湖里的大盘指数做成搜索条目。
+//
+// 代码保留**交易所后缀**（`000001.SH` 而不是 `000001`）：裸码会与股票撞车
+// （上证指数与平安银行都是 000001），界面也按带后缀的写法展示与跳转。
+func (s *StockService) indexSearchEntries() []searchEntry {
+	series, _, _, err := s.loadMarketIndices()
+	if err != nil || len(series) == 0 {
+		// 指数搜不到不该让整个搜索失败（数据湖没开、index_bars 未入库都会走到这里）
+		return nil
+	}
+
+	out := make([]searchEntry, 0, len(series))
+	for _, item := range series {
+		n := len(item.dates)
+		if n == 0 {
+			continue
+		}
+		entry := searchEntry{
+			code:     item.meta.Code,
+			name:     item.meta.Name,
+			market:   "index",
+			marketCN: "指数",
+			close:    item.close[n-1],
+			isIndex:  true,
+		}
+		if n >= 2 && item.close[n-2] > 0 {
+			entry.pctChg = round((item.close[n-1]/item.close[n-2]-1)*100, 4)
+		}
+		entry.pinyin, entry.initials = pinyinVariants(item.meta.Name)
+		out = append(out, entry)
+	}
+	return out
 }
 
 // ---------------------------------------------------------------------------
 // K 线
 // ---------------------------------------------------------------------------
 
-// GetKline 返回某只股票的完整日 K（含复权）与简要信息。
+// GetKline 返回某只股票（或大盘指数）的完整日 K 与简要信息。
 // adjust 取值：none（不复权）/ qfq（前复权，默认）/ hfq（后复权）。
+//
+// **指数走另一条路**：数据湖的 `index_bars`，不是 `daily_bars`
+// （free-stockdb 没有指数表），见 getIndexKline。
 func (s *StockService) GetKline(code, adjust string, startYear int) (*KlineBundle, error) {
 	code = strings.TrimSpace(code)
 	if code == "" {
@@ -356,6 +421,11 @@ func (s *StockService) GetKline(code, adjust string, startYear int) (*KlineBundl
 	}
 	if startYear <= 0 || startYear > 2100 {
 		startYear = 1990
+	}
+
+	// 指数与股票共用这一个入口：界面上是同一个 K 线页，搜索框返回的也是同一个结构。
+	if symbol, ok := s.resolveIndexSymbol(code); ok {
+		return s.getIndexKline(symbol, adjust, startYear)
 	}
 
 	provider, source := s.snapshot()
@@ -447,6 +517,199 @@ func (s *StockService) GetKline(code, adjust string, startYear int) (*KlineBundl
 		"elapsed", time.Since(started).Round(time.Millisecond).String(),
 	)
 	return bundle, nil
+}
+
+// resolveIndexSymbol 判断这个代码是不是**大盘指数**，是就返回带交易所后缀的指数代码。
+//
+// 三种输入：
+//  1. `000001.SH`（带后缀）—— 指数与股票的重名只在这里能区分开，直接查指数表；
+//  2. 裸码且**是股票/基金** —— 按股票走（`000001` 是平安银行，不是上证指数）；
+//  3. 裸码但不是股票（`399001` 深证成指、`000300` 沪深300）—— 按指数走，
+//     这样手输/收藏夹里的裸码也能打开。
+func (s *StockService) resolveIndexSymbol(code string) (string, bool) {
+	symbols, byBare := s.indexSymbolTable()
+	if len(symbols) == 0 {
+		return "", false
+	}
+
+	upper := strings.ToUpper(strings.TrimSpace(code))
+	if strings.Contains(upper, ".") {
+		if _, ok := symbols[upper]; ok {
+			return upper, true
+		}
+		return "", false
+	}
+
+	bare := cnlake.BareSymbol(upper)
+	if bare == "" {
+		return "", false
+	}
+	full, ok := byBare[bare]
+	if !ok {
+		return "", false
+	}
+
+	// 裸码优先当股票：只有确认它不是股票/基金时才按指数处理。
+	// 用一次点查询判断（stockdb 是一次键查询，数据湖是单标的区间读），
+	// 比拉全量股票列表便宜得多。
+	//
+	// ⚠ 结果要缓存：`000001`（平安银行 / 上证指数）、`000016`（深康佳A / 上证50）、
+	// `000905`（厦门港务 / 中证500）、`000688`（国城矿业 / 科创50）这几个裸码两边都有，
+	// 不缓存的话每次打开这几只股票的 K 线都要多查一次。
+	s.indexResolveMu.Lock()
+	cached, hit := s.indexResolveCache[bare]
+	s.indexResolveMu.Unlock()
+	if hit {
+		if cached == "" {
+			return "", false
+		}
+		return cached, true
+	}
+
+	provider, _ := s.snapshot()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	tradeDate, err := s.cachedTradeDate(ctx, provider)
+	if err != nil {
+		return "", false
+	}
+
+	resolved := ""
+	if quote, err := provider.QuotePoint(ctx, bare, tradeDate); err == nil && quote != nil {
+		resolved = "" // 是股票/基金
+	} else {
+		resolved = full
+	}
+
+	s.indexResolveMu.Lock()
+	if s.indexResolveCache == nil {
+		s.indexResolveCache = map[string]string{}
+	}
+	s.indexResolveCache[bare] = resolved
+	s.indexResolveMu.Unlock()
+
+	return resolved, resolved != ""
+}
+
+// indexSymbolTable 返回指数代码表：完整代码 → 是否存在，以及裸码 → 完整代码。
+//
+// 表随指数历史一起缓存（30 分钟），所以搜索框每敲一个字都不会去读数据湖。
+func (s *StockService) indexSymbolTable() (map[string]struct{}, map[string]string) {
+	series, _, _, err := s.loadMarketIndices()
+	if err != nil || len(series) == 0 {
+		return nil, nil
+	}
+	symbols := make(map[string]struct{}, len(series))
+	byBare := make(map[string]string, len(series))
+	for _, item := range series {
+		code := strings.ToUpper(item.meta.Code)
+		symbols[code] = struct{}{}
+		if bare := cnlake.BareSymbol(code); bare != "" {
+			byBare[bare] = code
+		}
+	}
+	return symbols, byBare
+}
+
+// getIndexKline 读取大盘指数的日 K。
+//
+// 与股票那条路的差别（都是数据本身决定的，不是省事）：
+//   - 数据来自数据湖的 `index_bars`（free-stockdb 没有指数表，按年分区）；
+//   - **没有复权**：指数不存在分红送转，qfq/hfq 与不复权完全一样（界面会提示）；
+//   - **没有估值/财务/资金流/板块**：指数只有价格与成交量，PE/PB/市值/换手率
+//     这些是"个股 + 估值表"才有的东西，所以全部留 0 并在提示里说清楚，
+//     而不是编一个看起来像模像样的数字。
+func (s *StockService) getIndexKline(symbol, adjust string, startYear int) (*KlineBundle, error) {
+	lake := s.lakeHandle()
+	if lake == nil || !lake.HasIndexBars() {
+		return nil, fmt.Errorf("指数行情只在本地数据湖的 index_bars 里（free-stockdb 没有指数表），"+
+			"请确认数据源已切到数据湖且 index_bars 已同步：%s", symbol)
+	}
+
+	started := time.Now()
+	rows, err := lake.IndexBars(symbol, startYear, 0)
+	if err != nil {
+		return nil, fmt.Errorf("读取指数 %s 的日线失败：%w", symbol, err)
+	}
+
+	candles := make([]KlineCandle, 0, len(rows))
+	for _, row := range rows {
+		date := row.Date()
+		if date <= 0 || row.Close <= 0 {
+			continue
+		}
+		if date < int64(startYear*10000+101) {
+			continue
+		}
+		candles = append(candles, KlineCandle{
+			Date:   date,
+			Open:   round(row.Open, 4),
+			High:   round(row.High, 4),
+			Low:    round(row.Low, 4),
+			Close:  round(row.Close, 4),
+			Volume: row.Volume,
+			Amount: row.Amount,
+		})
+	}
+	if len(candles) == 0 {
+		return nil, fmt.Errorf("数据湖里没有指数 %s 在 %d 年之后的日线", symbol, startYear)
+	}
+	sort.Slice(candles, func(i, j int) bool { return candles[i].Date < candles[j].Date })
+
+	latest := candles[len(candles)-1]
+	profile := StockProfile{
+		Code:      symbol,
+		Name:      indexDisplayName(symbol),
+		Market:    "index",
+		MarketCN:  "指数",
+		TradeDate: latest.Date,
+		Open:      latest.Open,
+		High:      latest.High,
+		Low:       latest.Low,
+		Close:     latest.Close,
+		Volume:    latest.Volume,
+		Amount:    latest.Amount,
+	}
+	if len(candles) >= 2 {
+		prev := candles[len(candles)-2].Close
+		if prev > 0 {
+			profile.PreClose = prev
+			profile.PctChg = round((latest.Close/prev-1)*100, 4)
+			profile.Amplitude = round((latest.High-latest.Low)/prev*100, 4)
+		}
+	}
+
+	bundle := &KlineBundle{
+		Code:      symbol,
+		Name:      profile.Name,
+		Adjust:    adjust,
+		IsIndex:   true,
+		Profile:   profile,
+		Candles:   candles,
+		Dividends: []stockdb.Factor{},
+		Notes: []string{
+			"指数行情来自本地数据湖的 index_bars（free-stockdb 没有指数表）。",
+			"指数没有 PE / PB / 市值 / 股本 / 换手率 / 资金流 / 板块归属 —— 这些是「个股 + 估值表」才有的数据，这里不会编。",
+			"指数不存在分红送转，因此**没有复权概念**：前复权 / 后复权与不复权的曲线完全一样。",
+		},
+	}
+
+	slog.Info("指数K线数据就绪",
+		"symbol", symbol, "name", profile.Name, "candles", len(candles),
+		"start", candles[0].Date, "end", latest.Date,
+		"elapsed", time.Since(started).Round(time.Millisecond).String())
+	return bundle, nil
+}
+
+// indexDisplayName 返回指数的中文名（注册表里没有就用代码）。
+func indexDisplayName(symbol string) string {
+	upper := strings.ToUpper(strings.TrimSpace(symbol))
+	for _, meta := range majorIndices {
+		if strings.ToUpper(meta.Code) == upper {
+			return meta.Name
+		}
+	}
+	return upper
 }
 
 // adjustCandles 按复权因子折算价格。算法与官方 Python SDK 保持一致：

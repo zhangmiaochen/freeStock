@@ -50,6 +50,14 @@ export class KlinePrefs {
     "showMacd": boolean;
     "showVolume": boolean;
     "showFlow": boolean;
+
+    /**
+     * ShowFibonacci 是斐波那契黄金分割辅助线的开关。
+     * 
+     * 分割位由前端按**当前可见区间**的最高/最低价动态计算（缩放、平移都会重算），
+     * 所以后端只需要记住这个开关。
+     */
+    "showFibonacci": boolean;
     "boll": BollPrefs;
     "macd": MacdPrefs;
     "maConfigs": MaPrefs[];
@@ -74,6 +82,9 @@ export class KlinePrefs {
         if (!("showFlow" in $$source)) {
             this["showFlow"] = false;
         }
+        if (!("showFibonacci" in $$source)) {
+            this["showFibonacci"] = false;
+        }
         if (!("boll" in $$source)) {
             this["boll"] = (new BollPrefs());
         }
@@ -91,18 +102,18 @@ export class KlinePrefs {
      * Creates a new KlinePrefs instance from a string or object.
      */
     static createFrom($$source: any = {}): KlinePrefs {
-        const $$createField6_0 = $$createType0;
-        const $$createField7_0 = $$createType1;
-        const $$createField8_0 = $$createType3;
+        const $$createField7_0 = $$createType0;
+        const $$createField8_0 = $$createType1;
+        const $$createField9_0 = $$createType3;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("boll" in $$parsedSource) {
-            $$parsedSource["boll"] = $$createField6_0($$parsedSource["boll"]);
+            $$parsedSource["boll"] = $$createField7_0($$parsedSource["boll"]);
         }
         if ("macd" in $$parsedSource) {
-            $$parsedSource["macd"] = $$createField7_0($$parsedSource["macd"]);
+            $$parsedSource["macd"] = $$createField8_0($$parsedSource["macd"]);
         }
         if ("maConfigs" in $$parsedSource) {
-            $$parsedSource["maConfigs"] = $$createField8_0($$parsedSource["maConfigs"]);
+            $$parsedSource["maConfigs"] = $$createField9_0($$parsedSource["maConfigs"]);
         }
         return new KlinePrefs($$parsedSource as Partial<KlinePrefs>);
     }

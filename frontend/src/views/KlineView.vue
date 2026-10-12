@@ -78,6 +78,8 @@ const showBoll = ref(false);
 const showMacd = ref(true);
 const showVolume = ref(true);
 const showFlow = ref(true);
+/** 斐波那契黄金分割辅助线（区间随缩放/平移动态重算，见 lib/fibonacci） */
+const showFibonacci = ref(false);
 const bollConfig = ref<BollConfig>({ ...DEFAULT_BOLL });
 const macdConfig = ref<MacdConfig>({ ...DEFAULT_MACD });
 const showSummary = ref(true);
@@ -91,6 +93,16 @@ const prefsReady = ref(false);
 /** 该股是否有资金流数据（没有就不显示这个开关，免得点了没反应） */
 const hasMoneyFlow = computed(() => (bundle.value?.moneyFlows?.length ?? 0) > 0);
 
+/**
+ * 当前看的是不是**大盘指数**。
+ *
+ * 指数与股票共用这个 K 线页，但有两处必须区别对待：
+ *   - 复权：指数不存在分红送转，前/后复权与不复权完全一样，所以把复权按钮藏起来
+ *     （留着会让人以为"点了没变化是坏了"）；
+ *   - 股票信息栏：指数没有 PE/PB/市值/股本/资金流，那些行也藏起来。
+ */
+const isIndex = computed(() => bundle.value?.isIndex === true);
+
 /** 把当前设置快照成后端需要的结构 */
 function currentPrefs(): KlinePrefs {
   return {
@@ -100,6 +112,7 @@ function currentPrefs(): KlinePrefs {
     showMacd: showMacd.value,
     showVolume: showVolume.value,
     showFlow: showFlow.value,
+    showFibonacci: showFibonacci.value,
     boll: { period: bollConfig.value.period, mult: bollConfig.value.mult },
     macd: {
       fast: macdConfig.value.fast,
@@ -121,6 +134,7 @@ function applyPrefs(stored: KlinePrefs) {
   showMacd.value = stored.showMacd ?? true;
   showVolume.value = stored.showVolume ?? true;
   showFlow.value = stored.showFlow ?? true;
+  showFibonacci.value = stored.showFibonacci ?? false;
   bollConfig.value = normalizeBoll(stored.boll ?? DEFAULT_BOLL);
   macdConfig.value = normalizeMacd(stored.macd ?? DEFAULT_MACD);
 
@@ -177,7 +191,7 @@ function scheduleSave() {
 }
 
 watch(
-  [period, adjust, showBoll, showMacd, showVolume, showFlow, bollConfig, macdConfig, maConfigs],
+  [period, adjust, showBoll, showMacd, showVolume, showFlow, showFibonacci, bollConfig, macdConfig, maConfigs],
   () => scheduleSave(),
   { deep: true },
 );
@@ -282,7 +296,7 @@ watch(adjust, () => {
           </Button>
         </div>
 
-        <div class="flex items-center gap-1.5">
+        <div v-if="!isIndex" class="flex items-center gap-1.5">
           <span class="text-muted-foreground text-xs">复权</span>
           <Button
             v-for="item in ADJUST_OPTIONS"
@@ -295,6 +309,9 @@ watch(adjust, () => {
             {{ item.label }}
           </Button>
         </div>
+        <Badge v-else variant="secondary" class="text-[11px]" title="指数不存在分红送转，没有复权概念">
+          指数 · 无复权
+        </Badge>
 
         <Button size="xs" variant="outline" :disabled="loading || !code" @click="reload">
           <RefreshCw :class="loading ? 'animate-spin' : ''" />
@@ -330,6 +347,14 @@ watch(adjust, () => {
           @click="showMacd = !showMacd"
         >
           MACD
+        </Button>
+        <Button
+          size="xs"
+          :variant="showFibonacci ? 'default' : 'outline'"
+          title="黄金分割辅助线：区间取当前可见窗口的最高/最低价，缩放或平移时自动重算"
+          @click="showFibonacci = !showFibonacci"
+        >
+          斐波那契
         </Button>
         <Button
           size="xs"
@@ -398,10 +423,12 @@ watch(adjust, () => {
       <div class="bg-muted text-muted-foreground flex size-12 items-center justify-center rounded-xl">
         <ChartCandlestick class="size-5" />
       </div>
-      <h2 class="text-base font-semibold">搜索一只股票开始看 K 线</h2>
+      <h2 class="text-base font-semibold">搜索一只股票或指数开始看 K 线</h2>
       <p class="text-muted-foreground max-w-md text-sm">
-        支持股票代码、名称、拼音全拼与拼音首字母（例如 <code>600519</code>、<code>茅台</code>、
-        <code>gzmt</code>）。也可以从「股票列表」里直接点某一行跳转过来。
+        支持代码、名称、拼音全拼与拼音首字母（例如 <code>600519</code>、<code>茅台</code>、
+        <code>gzmt</code>）。<b class="text-foreground">指数</b>也在这里搜：
+        <code>上证指数</code>、<code>szzs</code>、<code>000001.SH</code>（带交易所后缀）。
+        也可以从「股票列表」里直接点某一行跳转过来。
       </p>
       <Badge variant="outline">默认显示日线，可切换 日 / 周 / 月 / 年</Badge>
     </div>
@@ -431,11 +458,26 @@ watch(adjust, () => {
     <!-- ============ 图表 ============ -->
     <template v-else-if="bundle">
       <div v-if="showSummary" class="shrink-0 px-5 pt-3">
-        <StockSummaryBar :profile="bundle.profile" />
+        <StockSummaryBar :profile="bundle.profile" :is-index="isIndex" />
 
         <p class="text-muted-foreground mt-2 flex items-start gap-1.5 text-[11px]">
           <Info class="mt-0.5 size-3 shrink-0" />
           <span>{{ bundle.notes.join(" ") }}</span>
+        </p>
+
+        <!-- 斐波那契口径：区间是"可见窗口"，两个方向是同一价位的两种读法 -->
+        <p
+          v-if="showFibonacci"
+          class="text-muted-foreground mt-2 flex items-start gap-1.5 text-[11px]"
+        >
+          <Info class="mt-0.5 size-3 shrink-0" />
+          <span>
+            斐波那契黄金分割：区间取<b class="text-foreground">当前可见窗口</b>的最高价与最低价，
+            <b class="text-foreground">缩放或平移时自动重算</b>。
+            每条线标两个方向 —— <b class="text-foreground">↓</b> 是从高点回落的回撤比例（涨势回撤，该价位是支撑参考），
+            <b class="text-foreground">↑</b> 是从低点反弹的比例（跌势反弹，该价位是压力参考）；
+            两者互为镜像，所以一条线标两个数就够，画两遍只会得到重叠的线。
+          </span>
         </p>
       </div>
 
@@ -451,6 +493,7 @@ watch(adjust, () => {
             :show-macd="showMacd"
             :show-volume="showVolume"
             :show-flow="showFlow"
+            :show-fibonacci="showFibonacci"
             :money-flows="bundle.moneyFlows"
             :boll-config="bollConfig"
             :macd-config="macdConfig"

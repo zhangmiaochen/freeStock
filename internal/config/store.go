@@ -80,15 +80,20 @@ type MacdPrefs struct {
 
 // KlinePrefs 是 K 线页的偏好设置，由前端整份读写。
 type KlinePrefs struct {
-	Period     string    `json:"period"` // day / week / month / year
-	Adjust     string    `json:"adjust"` // qfq / hfq / none
-	ShowBoll   bool      `json:"showBoll"`
-	ShowMacd   bool      `json:"showMacd"`
-	ShowVolume bool      `json:"showVolume"`
-	ShowFlow   bool      `json:"showFlow"`
-	Boll       BollPrefs `json:"boll"`
-	Macd       MacdPrefs `json:"macd"`
-	MaConfigs  []MaPrefs `json:"maConfigs"`
+	Period     string `json:"period"` // day / week / month / year
+	Adjust     string `json:"adjust"` // qfq / hfq / none
+	ShowBoll   bool   `json:"showBoll"`
+	ShowMacd   bool   `json:"showMacd"`
+	ShowVolume bool   `json:"showVolume"`
+	ShowFlow   bool   `json:"showFlow"`
+	// ShowFibonacci 是斐波那契黄金分割辅助线的开关。
+	//
+	// 分割位由前端按**当前可见区间**的最高/最低价动态计算（缩放、平移都会重算），
+	// 所以后端只需要记住这个开关。
+	ShowFibonacci bool      `json:"showFibonacci"`
+	Boll          BollPrefs `json:"boll"`
+	Macd          MacdPrefs `json:"macd"`
+	MaConfigs     []MaPrefs `json:"maConfigs"`
 }
 
 // DefaultKlinePrefs 返回首次使用时的默认值（与界面默认一致）。
@@ -109,9 +114,11 @@ func DefaultKlinePrefs() KlinePrefs {
 		ShowMacd:   true,
 		ShowVolume: true,
 		ShowFlow:   true,
-		Boll:       BollPrefs{Period: 20, Mult: 2},
-		Macd:       MacdPrefs{Fast: 12, Slow: 26, Signal: 9},
-		MaConfigs:  mas,
+		// 斐波那契默认关闭：它是一条"读位置"的辅助线，不是每个人都要看
+		ShowFibonacci: false,
+		Boll:          BollPrefs{Period: 20, Mult: 2},
+		Macd:          MacdPrefs{Fast: 12, Slow: 26, Signal: 9},
+		MaConfigs:     mas,
 	}
 }
 

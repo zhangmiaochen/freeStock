@@ -19,6 +19,18 @@ const (
 	KindFull  = "full"  // 更新到今天（普通日更）
 	KindStale = "stale" // 补抓落后（--stale-only）
 	KindDate  = "date"  // 补指定交易日（--trade-date YYYY-MM-DD）
+	// KindBackfill 补**历史区间**（cne backfill daily_bars --start X --end Y）。
+	//
+	// ⚠ 与前三种**不是同一条命令**：前三种都走 `cne run daily`（日更 pipeline，
+	// 只认单日 `--trade-date`），而补历史要走另一个子命令 `cne backfill`。
+	// 这就是"手动更新只能补交易日、不能补区间"的原因 —— 不是缺输入框，
+	// 是缺一整条命令路径。
+	//
+	// 成本模型也不同：`cne backfill --help` 原文说"成本按源的计费单位算，
+	// 不按窗口算。daily_bars 是逐标的抓取，所以 --start D --end D 和多年窗口
+	// 一样要扫一遍全市场" —— 窗口宽窄几乎不影响成本，所以 UI 上不该暗示
+	// "补一年 = 补一天的成本"，也不该让用户按天循环。
+	KindBackfill = "backfill"
 )
 
 // ErrBusy 表示已有更新在进行。
@@ -98,17 +110,27 @@ func NewRunner(opts Options) *Runner {
 // defaultArgs 拼出 `cne run daily <args...> --config <ProjectDir>\configs\cnequity.toml`。
 //
 // 命令形态固定（方案 §4.2）：一套执行器覆盖 full / stale / --trade-date / --group。
+//
+// ⚠ `KindBackfill` 是**唯一**不走 `run daily` 的类型：补历史区间要用另一个子命令
+// `cne backfill daily_bars --start X --end Y`（`extra` 由 `StartBackfill` 备好）。
 func (r *Runner) defaultArgs(kind string, extra []string) ([]string, error) {
 	configPath := filepath.Join(r.opts.ProjectDir, "configs", "cnequity.toml")
 	if _, err := os.Stat(configPath); err != nil {
 		return nil, fmt.Errorf("找不到 cne 配置 %s：%w", configPath, err)
 	}
-	args := []string{"run", "daily"}
+	var args []string
+	if kind == KindBackfill {
+		args = []string{"backfill"}
+	} else {
+		args = []string{"run", "daily"}
+	}
 	switch kind {
 	case KindStale:
 		args = append(args, "--stale-only")
 	case KindDate:
 		// extra[0] 是交易日（YYYY-MM-DD）
+	case KindBackfill:
+		// extra 是 ["daily_bars", "--start", X, "--end", Y]
 	default:
 		// full：不加额外参数
 	}
@@ -174,20 +196,6 @@ func (r *Runner) CurrentLogPath() string {
 //
 // tradeDate 仅在 kind == KindDate 时使用（YYYY-MM-DD）。
 func (r *Runner) Start(kind string, tradeDate string) (*Job, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if r.current != nil && !r.current.Finished() {
-		return nil, fmt.Errorf("%w（类型 %s，已运行 %s）",
-			ErrBusy, r.current.Kind, time.Since(r.current.StartedAt).Round(time.Second))
-	}
-
-	// ⚠ **先校验参数，再查环境**。
-	//
-	// 次序反了会给出误导性的错误：当机器上已有 cne 在跑（很常见 —— 计划任务
-	// 或用户自己起的），一个"补指定交易日但漏填日期"的请求会报
-	// "已有 cne 进程在运行"，用户于是去等那个进程，而真正的问题是参数没填。
-	// 参数错误是**请求本身有问题**，与机器状态无关，应当先报。
 	var extra []string
 	switch kind {
 	case KindStale:
@@ -202,7 +210,44 @@ func (r *Runner) Start(kind string, tradeDate string) (*Job, error) {
 	default:
 		return nil, fmt.Errorf("未知的更新类型 %q", kind)
 	}
+	return r.start(kind, extra)
+}
 
+// StartBackfill 补**历史区间**：`cne backfill daily_bars --start X --end Y`。
+//
+// 与 `Start` 走的是不同子命令（`backfill` 而不是 `run daily`），所以单独一个入口。
+// 互斥保护（同进程 ErrBusy / 跨进程 foreignRunning）由 `start` 统一处理 ——
+// backfill 与计划任务里的日更**必须**互斥，否则会撞上 cne 自己的 ingest 锁。
+func (r *Runner) StartBackfill(start, end string) (*Job, error) {
+	start, end = strings.TrimSpace(start), strings.TrimSpace(end)
+	if start == "" || end == "" {
+		return nil, errors.New("补历史区间需要提供起止日期（YYYY-MM-DD）")
+	}
+	// 这里只做**粗校验**：只比字符串，因为 YYYY-MM-DD 定长且字典序 == 日期序。
+	// 具体合法性交给 cne（它会给出更准确的来源/范围报错）。
+	if start > end {
+		return nil, fmt.Errorf("区间起点 %s 晚于终点 %s", start, end)
+	}
+	return r.start(KindBackfill, []string{"daily_bars", "--start", start, "--end", end})
+}
+
+// start 是 Start / StartBackfill 的公共实现（互斥 → 校验 → 跨进程检测 → 起进程）。
+func (r *Runner) start(kind string, extra []string) (*Job, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.current != nil && !r.current.Finished() {
+		return nil, fmt.Errorf("%w（类型 %s，已运行 %s）",
+			ErrBusy, r.current.Kind, time.Since(r.current.StartedAt).Round(time.Second))
+	}
+
+	// ⚠ **先校验参数，再查环境**。
+	//
+	// 次序反了会给出误导性的错误：当机器上已有 cne 在跑（很常见 —— 计划任务
+	// 或用户自己起的），一个"补指定交易日但漏填日期"的请求会报
+	// "已有 cne 进程在运行"，用户于是去等那个进程，而真正的问题是参数没填。
+	// 参数错误是**请求本身有问题**，与机器状态无关，应当先报。
+	// （参数校验在 Start / StartBackfill 里做，这里只做环境与启动。）
 	exe, err := r.executable()
 	if err != nil {
 		return nil, err

@@ -105,6 +105,48 @@ func (s *CneUpdateService) ManualUpdate(kind string, tradeDate string) (*JobInfo
 	}, nil
 }
 
+// ManualBackfill 发起一次**历史区间回补**：`cne backfill daily_bars --start X --end Y`。
+//
+// ⚠ 为什么单独一个方法，而不是给 `ManualUpdate` 加参数：
+//
+//   - 前三种 kind 都走 `cne run daily`（日更 pipeline），**只认单日 `--trade-date`**；
+//     补历史走的是另一个子命令 `cne backfill`。这是"手动更新只能补交易日、
+//     不能补区间"的根本原因 —— 不是缺输入框，是缺一条命令路径。
+//   - 成本模型不同：`cne backfill --help` 说"成本按源的计费单位算，不按窗口算。
+//     daily_bars 是逐标的抓取，所以 --start D --end D 和多年窗口一样要扫一遍
+//     全市场"。**窗口宽窄几乎不影响成本**，所以文案里不该暗示"补一年更贵"，
+//     也不该让用户按天循环去补一整年。
+//
+// 互斥（同进程 / 跨进程）由 Runner 统一处理，与日更共用同一把闸 —— backfill
+// 和计划任务里的日更必须串行，否则会撞上 cne 自己的 ingest 锁。
+func (s *CneUpdateService) ManualBackfill(start, end string) (*JobInfo, error) {
+	if s.store == nil {
+		return nil, errors.New("缺少配置存储，无法启动更新")
+	}
+	start, end = strings.TrimSpace(start), strings.TrimSpace(end)
+	if start == "" || end == "" {
+		return nil, errors.New("补历史区间需要填写起止日期（YYYY-MM-DD）")
+	}
+
+	job, err := s.runner().StartBackfill(start, end)
+	if err != nil {
+		return nil, err
+	}
+
+	slog.Info("手动历史回补已发起",
+		"start", start, "end", end, "job", job.ID, "log", job.LogPath)
+	return &JobInfo{
+		JobID:   job.ID,
+		Kind:    job.Kind,
+		Args:    strings.Join(job.Args, " "),
+		LogPath: job.LogPath,
+		Message: fmt.Sprintf("已开始回补 %s ~ %s 的日线。"+
+			"⚠ 成本按**标的**算、与窗口宽窄几乎无关，所以不要按天循环补 —— "+
+			"一次给足区间即可。全市场回补通常要几十分钟以上，"+
+			"进度看 cne status，完成后数据湖会先校验再发布。", start, end),
+	}, nil
+}
+
 func describeKind(kind, tradeDate string) string {
 	switch kind {
 	case cne.KindStale:

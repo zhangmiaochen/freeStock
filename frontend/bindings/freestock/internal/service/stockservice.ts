@@ -140,8 +140,11 @@ export function GetFinancialStatements(code: string, limit: number): $Cancellabl
 }
 
 /**
- * GetKline 返回某只股票的完整日 K（含复权）与简要信息。
+ * GetKline 返回某只股票（或大盘指数）的完整日 K 与简要信息。
  * adjust 取值：none（不复权）/ qfq（前复权，默认）/ hfq（后复权）。
+ * 
+ * **指数走另一条路**：数据湖的 `index_bars`，不是 `daily_bars`
+ * （free-stockdb 没有指数表），见 getIndexKline。
  */
 export function GetKline(code: string, adjust: string, startYear: number): $CancellablePromise<$models.KlineBundle | null> {
     return $Call.ByID(4230615817, code, adjust, startYear).then(($result: any) => {
@@ -234,6 +237,10 @@ export function ScreenStocks(cond: $models.ScreenCondition): $CancellablePromise
 
 /**
  * SearchStocks 按代码 / 名称 / 拼音 / 拼音首字母搜索股票。
+ * 
+ * **指数也在结果里**（带 `IsIndex` 标记）：K 线页要能查指数，
+ * 而指数不在股票列表里（数据湖的 instruments 只有 stock/etf/cdr），
+ * 只靠股票列表的索引是搜不到的。
  */
 export function SearchStocks(keyword: string, limit: number): $CancellablePromise<$models.StockSearchItem[]> {
     return $Call.ByID(264754049, keyword, limit).then(($result: any) => {

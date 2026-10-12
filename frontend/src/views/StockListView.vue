@@ -334,6 +334,7 @@ function chipClass(active: boolean) {
           <StockSearchBox
             :key="searchBoxKey"
             mode="filter"
+            :allow-index="false"
             width-class="w-72"
             :autofocus="false"
             placeholder="搜索代码 / 名称 / 拼音首字母"

@@ -1,8 +1,16 @@
 <script setup lang="ts">
 /**
- * K 线图表（ECharts）：主图（蜡烛 + 均线 + 布林）、成交量、MACD 三个面板联动。
+ * K 线图表（ECharts）：主图（蜡烛 + 均线 + 布林 + 斐波那契辅助线）、成交量、MACD 三个面板联动。
  *
- * 只负责画图：均线配置、指标开关都由父组件传入，指标计算走 lib/indicators。
+ * 只负责画图：均线配置、指标开关都由父组件传入，指标计算走 lib/indicators，
+ * 斐波那契分割位走 lib/fibonacci。
+ *
+ * 斐波那契辅助线的特别之处：**区间是"当前可见窗口"的高低点**，
+ * 所以缩放/平移时要重算。重算走 `setOption({series:[{markLine}]}, {notMerge:false})`
+ * 这条**局部更新**路径，而不是整图 render()：
+ *   - 不会重建 dataZoom（否则平移会被自己重置，甚至来回触发事件）；
+ *   - 不闪、不打断十字光标；
+ *   - 最多每帧一次，平移时不会掉帧。
  */
 import { BarChart, CandlestickChart, LineChart } from "echarts/charts";
 import {
@@ -10,6 +18,9 @@ import {
   DataZoomComponent,
   GridComponent,
   LegendComponent,
+  // ⚠ 少了这个：markLine（斐波那契辅助线）不会画出来，而且**不报错**，
+  // 只是图上什么都没有 —— 由 tests/fibonacci.spec.ts 的 SSR 用例盯着
+  MarkLineComponent,
   TooltipComponent,
 } from "echarts/components";
 import * as echarts from "echarts/core";
@@ -31,6 +42,7 @@ import {
   type MoneyFlowPoint,
   type Period,
 } from "@/lib/indicators";
+import { fibMarkLine } from "@/lib/fibonacci";
 import { formatAmount, formatDate } from "@/lib/format";
 
 echarts.use([
@@ -42,6 +54,7 @@ echarts.use([
   DataZoomComponent,
   AxisPointerComponent,
   LegendComponent,
+  MarkLineComponent,
   CanvasRenderer,
 ]);
 
@@ -55,6 +68,8 @@ const props = withDefaults(
     showVolume?: boolean;
     /** 是否显示资金流面板 */
     showFlow?: boolean;
+    /** 是否显示斐波那契黄金分割辅助线 */
+    showFibonacci?: boolean;
     /** 资金流序列（与后端 MoneyFlowPoint 对应） */
     moneyFlows?: MoneyFlowPoint[];
     bollConfig?: BollConfig;
@@ -69,6 +84,7 @@ const props = withDefaults(
     showMacd: true,
     showVolume: true,
     showFlow: true,
+    showFibonacci: false,
     moneyFlows: () => [],
     bollConfig: () => ({ ...DEFAULT_BOLL }),
     macdConfig: () => ({ ...DEFAULT_MACD }),
@@ -103,6 +119,16 @@ let maCache: { period: number; color: string; values: (number | null)[] }[] = []
 /** 本次渲染算好的资金流序列，同样供 tooltip 复用 */
 let flowMainNet: (number | null)[] = [];
 let flowMean: (number | null)[] = [];
+
+/**
+ * 斐波那契辅助线的 markLine 配置。
+ *
+ * 区间 = 当前可见窗口的最高/最低价（`zoom` 就是 dataZoom 的 start/end 百分比），
+ * 所以缩放、平移之后要重新调用一次 —— 见 updateFibonacciOnly。
+ */
+function fibonacciMarkLine(): Record<string, unknown> {
+  return fibMarkLine(props.candles, zoom.value.start, zoom.value.end);
+}
 
 /** 按传入的周期格式化 X 轴标签 */
 function axisLabel(date: number): string {
@@ -211,7 +237,7 @@ function buildOption(): echarts.EChartsCoreOption {
 
   const series: Record<string, unknown>[] = [];
 
-  // 主图：蜡烛
+  // 主图：蜡烛（挂斐波那契辅助线）
   series.push({
     name: "K线",
     type: "candlestick",
@@ -224,6 +250,7 @@ function buildOption(): echarts.EChartsCoreOption {
       borderColor: UP,
       borderColor0: DOWN,
     },
+    ...(props.showFibonacci ? { markLine: fibonacciMarkLine() } : {}),
   });
 
   // 均线（算一次，图例 / tooltip 共用）
@@ -485,6 +512,26 @@ function render() {
   chart.setOption(buildOption(), { notMerge: true, lazyUpdate: false });
 }
 
+/** 重入保护：局部更新时若又收到 datazoom 事件，不要递归 */
+let fibUpdating = false;
+
+/**
+ * 只更新斐波那契辅助线（缩放/平移时调用）。
+ *
+ * 用 `notMerge: false` 做**局部** setOption：只替换主图 series 的 markLine，
+ * 不动其它 series、也不动 dataZoom —— 否则平移会被自己重置，
+ * 甚至"改缩放 → 触发 datazoom → 再改缩放"来回打架。
+ */
+function updateFibonacciOnly() {
+  if (!chart || !props.showFibonacci || fibUpdating) return;
+  fibUpdating = true;
+  try {
+    chart.setOption({ series: [{ markLine: fibonacciMarkLine() }] }, { notMerge: false });
+  } finally {
+    fibUpdating = false;
+  }
+}
+
 /** 数据变化时决定是否重置缩放窗口（换股票 / 换周期才重置） */
 function applyResetIfNeeded() {
   const key = props.resetKey;
@@ -509,6 +556,8 @@ onMounted(() => {
     if (item && typeof item.start === "number" && typeof item.end === "number") {
       zoom.value = { start: item.start, end: item.end };
     }
+    // 分割位以"当前可见窗口"为区间，所以缩放/平移后必须重算
+    updateFibonacciOnly();
   });
 
   observer = new ResizeObserver(() => {
@@ -538,7 +587,7 @@ watch(
 );
 
 watch(
-  () => [props.showBoll, props.showMacd, props.showVolume, props.showFlow, props.period],
+  () => [props.showBoll, props.showMacd, props.showVolume, props.showFlow, props.showFibonacci, props.period],
   () => render(),
 );
 
