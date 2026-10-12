@@ -188,9 +188,27 @@ func maxIntVal(a, b int) int {
 }
 
 // marketStateLabelOf 取市场状态中文标签。
+//
+// 对应原版 `_market_state_label`（portfolio_rotation_logic.py:1875-1882）：
+//
+//	mapping = {"bull": "牛市", "range": "震荡市", "bear": "熊市"}
+//	state = normalize_market_state(value)
+//	return mapping.get(state, state)
+//
+// ⚠ 两处曾与原版不同，而这个标签**是用户可见的**（它拼进
+// "`%s`策略不主动开新仓，候选池先观察" 这条 no_action 原因里，
+// 见 no_action.go:108 ↔ 原版 :1957）：
+//
+//  1. Go 用的是 `StateLabels` 那套**长描述**（"牛市/趋势扩张"、"震荡/轮动"、
+//     "熊市/风险释放"）—— 那是策略说明用的文案，不是这个字段；
+//  2. 没有走 `normalizeMarketState` → 传 "BULL" 会原样吐回 "BULL"，
+//     传 "" 会吐回空串，而原版一律归到"震荡市"。
 func marketStateLabelOf(state string) string {
-	if label, ok := StateLabels[state]; ok {
-		return label
+	switch normalizeMarketState(state) {
+	case StateBull:
+		return "牛市"
+	case StateBear:
+		return "熊市"
 	}
-	return state
+	return "震荡市"
 }

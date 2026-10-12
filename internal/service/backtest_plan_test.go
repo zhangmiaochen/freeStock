@@ -42,9 +42,13 @@ func TestRowToStrengthRoundTrip(t *testing.T) {
 	row := strengthToRow(src)
 	got := rowToStrength(row, src.Industry)
 
-	// score.Row 不承载这两个字段，往返后会丢 —— 这是预期内的
+	// `score.Row` 不承载 `StrategyID`，往返后会丢 —— 这是预期内的。
+	//
+	// ⚠ `TradeDate` **不再**属于"预期会丢"的字段：它已经进了 `score.Row`，
+	// 因为贴信号要靠它算 `signal_age`（丢了就是 0 → attach 的日期区间非法
+	// → 静默不贴信号 → 熊市闸门把每只候选都拒掉）。所以这里必须保留它，
+	// 让往返比对真正覆盖这个字段。
 	want := src
-	want.TradeDate = 0
 	want.StrategyID = ""
 
 	if !reflect.DeepEqual(got, want) {

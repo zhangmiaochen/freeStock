@@ -456,7 +456,7 @@ func (s *PortfolioService) BuildPlan(portfolioID string) (*PlanResult, error) {
 		strength, ok := strengthByCode[position.Code]
 		// 持仓也要过组合范围（原实现 :2469-2470）——
 		// 范围外的持仓按"左连接落空"处理（评分/现价记 0）
-		if ok && !inPortfolioScope(strength, item, matcher) {
+		if ok && !inPortfolioScopeStrength(strength, item, matcher) {
 			ok = false
 		}
 		if !ok {
@@ -632,7 +632,13 @@ func (s *PortfolioService) buildCandidatePool(
 	if err != nil {
 		return nil, nil, err
 	}
-	rows, scores := s.buildCandidatePoolFrom(store, all, item, cfg, holdingCodes)
+	// 物化评分 → 轮动行，**只在这里转一次**：转换会带上 Industry/TradeDate，
+	// 之后整条链路都在 `score.Row` 上走，不再有丢字段的往返。
+	rowsIn := make([]score.Row, 0, len(all))
+	for _, strength := range all {
+		rowsIn = append(rowsIn, strengthToRow(strength))
+	}
+	rows, scores, _ := s.buildCandidatePoolFrom(store, rowsIn, item, cfg, holdingCodes)
 	return rows, scores, nil
 }
 
@@ -644,14 +650,20 @@ func (s *PortfolioService) buildCandidatePool(
 // `_attach_signal_candidates`（portfolio_service.py:2469），所以这里也必须
 // **先贴信号、再统计 universeScores** —— attach 可能丢弃不在交易日历里的行，
 // 顺序颠倒会让广度闸门用的集合与 Python 不同。
-// 传 nil 表示不贴信号（回测路径逐日查库代价太高，它自己的贴信号在别处）。
+// 传 nil 表示不再额外贴信号（**行上已经带了** —— 回测会按区间先贴一次）。
+//
+// ⚠ 参数类型是 `[]score.Row` 而**不是** `[]portfolio.StrengthRow`：
+// 后者会迫使调用方在 `score.Row → StrengthRow → score.Row` 之间往返，
+// 而那条往返会**静默丢字段**（`Industry` 与整套 `active_signal_*`）。
+// 丢 `Industry` → 行业范围从"单值 OR 成员表并集"退化成"只靠成员表"；
+// 丢信号 → 熊市闸门把每一只候选都判成"无新鲜信号"而拒。
 func (s *PortfolioService) buildCandidatePoolFrom(
 	stored *portfolio.Store,
-	all []portfolio.StrengthRow,
+	all []score.Row,
 	item portfolio.Portfolio,
 	cfg score.StrategyConfig,
 	holdingCodes []string,
-) ([]score.Row, []float64) {
+) ([]score.Row, []float64, int) {
 
 	held := map[string]bool{}
 	for _, code := range holdingCodes {
@@ -675,42 +687,43 @@ func (s *PortfolioService) buildCandidatePoolFrom(
 	// 此前 Go 用**全量**评分算 universeScores（未过范围）——
 	// 窄范围组合（自定义 20 只、行业范围）在原版里 `universe < 100` → 闸门**不启用**，
 	// 在 Go 里却按全市场数千只启用，行为正好相反。
-	scoped := make([]portfolio.StrengthRow, 0, len(all))
-	for _, strength := range all {
+	scoped := make([]score.Row, 0, len(all))
+	for _, row := range all {
 		// 范围过滤（行业/概念走数据湖成员表，与持仓侧同一口径）
 		switch item.ScopeType {
 		case portfolio.ScopeManualCodes:
-			if !scopeCodes[strength.Code] {
+			if !scopeCodes[row.Code] {
 				continue
 			}
 		case portfolio.ScopeIndustry:
-			if !matchScopeItem(scope.Items, strength, matcher, true) {
+			if !scopeHit(scope.Items, row.Code, row.Industry, matcher, true) {
 				continue
 			}
 		case portfolio.ScopeConcept:
-			if !matchScopeItem(scope.Items, strength, matcher, false) {
+			if !scopeHit(scope.Items, row.Code, row.Industry, matcher, false) {
 				continue
 			}
 		}
 		// 市场过滤
 		//
-		// ⚠ **必须走 `score.MarketInScope`**：`strength.Market` 存的是本项目
+		// ⚠ **必须走 `score.MarketInScope`**：`row.Market` 存的是本项目
 		// `market.KeyOf` 的 key（sh-main / sz-main / chinext / star / bse / ...），
 		// 而组合范围的 `markets` 是原实现词汇（main / gem / star）。
-		// 直接 `!markets[strength.Market]` 会把**每一行**都判成范围外
+		// 直接 `!markets[row.Market]` 会把**每一行**都判成范围外
 		// → 候选池恒为空 → 回测零成交、自动组合报"没有通过质量过滤的候选"。
-		if !score.MarketInScope(strength.Market, scope.Markets) {
+		if !score.MarketInScope(row.Market, scope.Markets) {
 			continue
 		}
-		scoped = append(scoped, strength)
+		scoped = append(scoped, row)
 	}
 
 	// ---- ①.5 信号 attach（原实现 :2469，在广度统计之前）----
-	scopedRows := make([]score.Row, 0, len(scoped))
-	scopedDates := make([]int64, 0, len(scoped))
-	for _, strength := range scoped {
-		scopedRows = append(scopedRows, strengthToRow(strength))
-		scopedDates = append(scopedDates, strength.TradeDate)
+	//
+	// `scoped` 本身就是 `[]score.Row`，不再有"转回 StrengthRow 再转回来"的往返。
+	scopedRows := scoped
+	scopedDates := make([]int64, 0, len(scopedRows))
+	for _, row := range scopedRows {
+		scopedDates = append(scopedDates, row.TradeDate)
 	}
 	scopedRows = s.attachSignalsToRows(stored, scopedRows, scopedDates)
 
@@ -737,6 +750,24 @@ func (s *PortfolioService) buildCandidatePoolFrom(
 		out = append(out, row)
 	}
 
+	// **先无条件排序、再做策略重排。**
+	//
+	// 原实现（portfolio_rotation_logic.py:1728）是
+	// `prioritize_trend_growth_entry_points(_candidate_sort_frame(work))` ——
+	// `_candidate_sort_frame` 在最里层，**对每一种策略都跑**。
+	//
+	// Go 此前整个漏掉了这一步：`score.sortCandidates` 早就实现了那八个排序键，
+	// 但**生产代码从没调用过**（只有测试引用）。后果分两档：
+	//   - 超跌/高手：`PrioritizeEntryPoints` 对它们是原样返回，于是候选池
+	//     实际按 `LoadStrength` 的 `ORDER BY total_score DESC, ts_code` 排 ——
+	//     总分相同（总分是 round(2)，同分很常见）时，谁进 `head(80)`、
+	//     配对配到哪只，都跟原版不同；
+	//   - 趋势成长/低吸：后续重排是策略相关的，但**重排本身是稳定排序**，
+	//     平局时保留的就是这一步的顺序 —— 少了它，平局的名次与原版不同。
+	//
+	// 位置必须在 `PrioritizeEntryPoints` **之前**（原版就是嵌套在最里层）。
+	out = score.SortCandidates(out)
+
 	// 入场优先级重排（原实现 :1646-1698）——
 	// 趋势成长按六项加权百分位复合分重排，**不是**简单按总分。
 	// 必须在 head 截断**之前**做，否则取到的是不同的前 80 名。
@@ -762,6 +793,18 @@ func (s *PortfolioService) buildCandidatePoolFrom(
 		out = kept
 	}
 
+	// ---- ④ head 截断 ----
+	//
+	// ⚠ **截断只影响"喂给调仓计划的候选"，不影响对外的候选数。**
+	//
+	// 原实现里这是两个东西（portfolio_rotation_logic.py:2072-2080）：
+	//
+	//	candidate_pool   = 过滤后的完整池        ← 返回给调用方、`candidate_count` 用它
+	//	candidate_ranked = candidate_pool.head() ← 内部建仓/配对只用它
+	//
+	// Go 此前只留了截断后的那个，于是 `candidateCount` 报的是 80（或 target*12），
+	// 而原版报的是完整池（全市场范围能到几千）。界面"候选池 N"因此差一个量级。
+	fullCount := len(out)
 	head := 80
 	if size := item.TargetPositionCount * 12; size > head {
 		head = size
@@ -769,7 +812,7 @@ func (s *PortfolioService) buildCandidatePoolFrom(
 	if len(out) > head {
 		out = out[:head]
 	}
-	return out, universeScores
+	return out, universeScores, fullCount
 }
 
 // inPortfolioScope 判定一只股票是否在组合的选股范围内。
@@ -786,14 +829,33 @@ func (s *PortfolioService) buildCandidatePoolFrom(
 // `strength.Industry` 那个"板块优先级第一名"的单值 —— 单值会让
 // "还属于其它行业/概念"的股票匹配不到。成员表读不到时退回单值，
 // 保证不会因为数据缺失把所有范围都匹配空。
-func inPortfolioScope(strength portfolio.StrengthRow, item portfolio.Portfolio, matcher *ScopeMatcher) bool {
+func inPortfolioScope(row score.Row, item portfolio.Portfolio, matcher *ScopeMatcher) bool {
+	return inScopeFields(row.Code, row.Industry, row.Market, item, matcher)
+}
+
+// inPortfolioScopeStrength 同上，但吃**物化评分行**。
+//
+// 给"过滤阶段"用（`buildStrengthDays` 逐日过滤持仓、自动组合的范围过滤）：
+// 那里只有 `portfolio.StrengthRow`，而转成 `score.Row` 要整行拷贝
+// （回填是每天数千行 × 上千天）。这里只需要 Code/Industry/Market 三个字段，
+// 所以两边共用 `inScopeFields` —— **判定逻辑只有一份**，不会漂移。
+func inPortfolioScopeStrength(
+	strength portfolio.StrengthRow, item portfolio.Portfolio, matcher *ScopeMatcher,
+) bool {
+	return inScopeFields(strength.Code, strength.Industry, strength.Market, item, matcher)
+}
+
+// inScopeFields 是范围判定的唯一实现（按字段，不绑行类型）。
+func inScopeFields(
+	code, industry, market string, item portfolio.Portfolio, matcher *ScopeMatcher,
+) bool {
 	scope := portfolio.ParseScopeValue(item.ScopeValueJSON)
 
 	switch item.ScopeType {
 	case portfolio.ScopeManualCodes:
 		found := false
-		for _, code := range scope.Codes {
-			if code == strength.Code {
+		for _, want := range scope.Codes {
+			if want == code {
 				found = true
 				break
 			}
@@ -802,11 +864,11 @@ func inPortfolioScope(strength portfolio.StrengthRow, item portfolio.Portfolio, 
 			return false
 		}
 	case portfolio.ScopeIndustry:
-		if !matchScopeItem(scope.Items, strength, matcher, true) {
+		if !scopeHit(scope.Items, code, industry, matcher, true) {
 			return false
 		}
 	case portfolio.ScopeConcept:
-		if !matchScopeItem(scope.Items, strength, matcher, false) {
+		if !scopeHit(scope.Items, code, industry, matcher, false) {
 			return false
 		}
 	}
@@ -816,10 +878,10 @@ func inPortfolioScope(strength portfolio.StrengthRow, item portfolio.Portfolio, 
 	// ⚠ 同样必须经 `score.MarketInScope` 映射（理由见 `buildCandidatePoolFrom`）。
 	// 这里判错的话，范围**内**的持仓会被当成"左连接落空"→ 评分/现价记 0
 	// → 实盘建议会把所有持仓判成弱持仓清仓/换出。
-	return score.MarketInScope(strength.Market, scope.Markets)
+	return score.MarketInScope(market, scope.Markets)
 }
 
-// matchScopeItem 判定股票是否命中范围里的**任意一个**行业/概念名。
+// scopeHit 判定股票是否命中范围里的**任意一个**行业/概念名。
 //
 // ⚠ **行业与概念的口径不一样**，必须分开实现 —— 这是原实现
 // `_scope_filter`（portfolio_service.py:3284-3324）里两段不同的代码：
@@ -843,18 +905,18 @@ func inPortfolioScope(strength portfolio.StrengthRow, item portfolio.Portfolio, 
 // 已知未实现：原实现还允许用**板块代码**（`board_code`）匹配 items，
 // 而本项目的 `ScopeMatcher` 只按名称建索引。界面的范围选择器传的是板块名，
 // 所以这条路径实际不可达；若以后要支持，需要给成员表补一份 code 索引。
-func matchScopeItem(items []string, strength portfolio.StrengthRow, matcher *ScopeMatcher, industry bool) bool {
+func scopeHit(items []string, code, industry string, matcher *ScopeMatcher, industryScope bool) bool {
 	if len(items) == 0 {
 		return false
 	}
-	if industry {
+	if industryScope {
 		// 并集：单值行业名命中即可，不必依赖成员表
 		useMembers := matcher.HasIndustryData()
 		for _, want := range items {
-			if strength.Industry == want {
+			if industry == want {
 				return true
 			}
-			if useMembers && matcher.HasIndustry(strength.Code, want) {
+			if useMembers && matcher.HasIndustry(code, want) {
 				return true
 			}
 		}
@@ -865,7 +927,7 @@ func matchScopeItem(items []string, strength portfolio.StrengthRow, matcher *Sco
 		return false
 	}
 	for _, want := range items {
-		if matcher.HasSector(strength.Code, want) {
+		if matcher.HasSector(code, want) {
 			return true
 		}
 	}
@@ -935,6 +997,8 @@ func strengthToRow(strength portfolio.StrengthRow) score.Row {
 	return score.Row{
 		Code: strength.Code, Name: strength.Name,
 		Market:     strength.Market,
+		Industry:   strength.Industry,
+		TradeDate:  strength.TradeDate,
 		TotalScore: strength.TotalScore, TrendScore: strength.TrendScore,
 		StructureScore: strength.StructureScore, RSScore: strength.RSScore,
 		CapitalScore: strength.CapitalScore, RepairScore: strength.RepairScore,
@@ -967,13 +1031,32 @@ func strengthToRow(strength portfolio.StrengthRow) score.Row {
 //   - highest_price = max(entry_price, current_price, 建仓日至今日的收盘价最大值)
 //   - holding_trade_days = 建仓日至今日之间**不同交易日**的数量（入场当天算 1）
 //
+// ⚠ **`entry_date` 无效时是 0，不是 1。** 原实现（portfolio_service.py:3208）是
+//
+//	merged["holding_trade_days"] = np.where(
+//	    merged["entry_date"].astype(str).str.strip().ne(""), 1, 0)
+//
+// 而且前面还有一道 `_normalize_trade_date`（:3206）—— 非空但解析不出来的字符串
+// 会被**归一化成空串**，于是也走 0 那一支。Go 原来在"空日期"和"解析失败"两条
+// 早退路径上返回 1，两条都错。
+//
+// 后果不是差一个数：`holding_trade_days` 会喂给
+// `should_quick_profit_take`（要求 1<=days<=2）、
+// `isBullTrendContinuationAddSignal`（要求 >=2/4）、
+// `canAddSecondLayer` 的 `current_layers>=2 && holding_days<3` —— 脏数据持仓
+// 在 Go 里会因为 days=1 而**真的产出 reduce/clear 动作**，原版不会。
+//
 // 逐只查历史：持仓通常只有几只，成本可接受。
 func (s *PortfolioService) holdingExtremes(code, entryDate string, endDate int, entryPrice, currentPrice float64) (float64, int) {
 	highest := entryPrice
 	if currentPrice > highest {
 		highest = currentPrice
 	}
-	if s.stock == nil || entryDate == "" {
+	// 日期无效 → 0（原实现：空串或归一化后为空 → 0）。详见函数注释。
+	if strings.TrimSpace(entryDate) == "" {
+		return highest, 0
+	}
+	if s.stock == nil {
 		return highest, 1
 	}
 	provider, _ := s.stock.snapshot()
@@ -983,7 +1066,8 @@ func (s *PortfolioService) holdingExtremes(code, entryDate string, endDate int, 
 	start := 0
 	fmt.Sscanf(entryDate, "%d", &start)
 	if start <= 0 || start > endDate {
-		return highest, 1
+		// 非空但解析不出来 —— 原版的 `_normalize_trade_date` 也会把它变成空串 → 0
+		return highest, 0
 	}
 	quotes, err := provider.DailyHistory(context.Background(), code, start, endDate)
 	if err != nil || len(quotes) == 0 {

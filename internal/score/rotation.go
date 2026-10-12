@@ -130,6 +130,22 @@ type Row struct {
 	// Market 是个股所属市场（main/gem/star），用于按档设分数门槛。
 	// 原实现按市场分档设门槛，没有这个字段就只能取一个统一值。
 	Market string `json:"market"`
+	// Industry 是所属行业名（板块优先级第一名的单值）。
+	//
+	// ⚠ **范围过滤要用它，不能让调用方另外传**。原实现的行业范围是
+	// `industry.isin(板块名) | ts_code ∈ 成员表`（**并集**，
+	// portfolio_service.py:3302-3304）。Go 曾经在回测里把行业硬编码成空串
+	//（`rowToStrength(row, "")`），于是并集退化成"只靠成员表"这一支 ——
+	// 候选池被削成严格子集，且与上游 `buildStrengthDays`（用真实行业放行）
+	// 口径不一致：同一天先放行、又被砍掉。
+	Industry string `json:"industry"`
+	// TradeDate 是这行评分所属的交易日。
+	//
+	// ⚠ 贴信号（merge_asof attach）**必须知道每行的交易日**才能算 `signal_age`。
+	// 此前这个信息只存在于 `portfolio.StrengthRow` 上，服务层只好另外维护一个
+	// 平行的 dates 切片 —— 那个切片在"行数可能变少"的 attach 前后很容易错位。
+	// 放进 `Row` 本身之后，行与日期不再可能失配。
+	TradeDate int64 `json:"tradeDate"`
 
 	// 评分
 	TotalScore         float64 `json:"totalScore"`
@@ -953,7 +969,13 @@ func BuildRotationPlan(in RotationInput) RotationPlan {
 				}
 				target = permittedMax(layers, freeLayers)
 			default:
-				target = initialEntryLayers(candidate, cfg, freeLayers)
+				// `remaining_slot_need = max(0, add_need - len(added_rows))`
+				//（原实现 :2467），用于 `capacity_pressure` 那一支。
+				remainingSlotNeed := addNeed - added
+				if remainingSlotNeed < 0 {
+					remainingSlotNeed = 0
+				}
+				target = initialEntryLayers(candidate, cfg, freeLayers, remainingSlotNeed)
 			}
 			// 不能超出剩余层数额度
 			if target > freeLayers {

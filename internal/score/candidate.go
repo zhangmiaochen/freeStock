@@ -149,7 +149,10 @@ func buildReplacementPairs(in RotationInput, protectStart, protectRetrace float6
 			// full_replace 是整仓换股，按正常建仓层数给；partial_rotate 只承接释放出来的 1 层。
 			entryLayers := 1
 			if mode == "full_replace" {
-				entryLayers = initialEntryLayers(cand, cfg, 0)
+				// 原版这里是 `initial_entry_layers(chosen, policy)` ——
+				// free_layers 与 remaining_slot_need 都用默认值 0（故 capacity_pressure 恒假，
+				// 只有 `bull_ready` / `range_ready` 能命中）。两个 0 必须照传。
+				entryLayers = initialEntryLayers(cand, cfg, 0, 0)
 			}
 			pairs = append(pairs, ReplacementPair{
 				HoldingCode:    hold.Code,
@@ -283,11 +286,14 @@ func CandidateQualityOK(row Row, cfg StrategyConfig, marketState string, replace
 	// `signal_bonus`：原实现（portfolio_rotation_logic.py:1151-1169）
 	// `min_score = base - (2.0 if 有新鲜信号 else 0.0)`。
 	//
-	// ⚠ **本项目没有 ML 信号数据，`SignalType` 恒为空** → 正确值是 **0**，不是 −2。
-	// 此前三处一律写死 `- 2`，等于给所有候选**无条件放宽 2 分** ——
-	// 与"有信号才放宽"的语义正好相反。
+	// ⚠ 原来这里写的是"本项目没有 ML 信号数据，`SignalType` 恒为空" —— **已过期**：
+	// 信号表与 merge_asof 回填都已接上，`plan.go` 确实会把 `active_signal_*` 贴上。
+	//
+	// 另一处**必须照抄**的细节：原实现判的是 `signal_type in {"buy","candidate_buy"}`，
+	// 不是只认 `buy`。只认 buy 会让 `candidate_buy` 的候选**门槛高 2 分**
+	//（range 下 `min_score` 从 70 变 72），位于该区间的候选会被静默拒掉。
 	signalBonus := 0.0
-	if row.SignalType == "buy" && row.SignalAge <= signalMaxAgeForState(marketState) {
+	if row.hasFreshSignal(signalMaxAgeForState(marketState)) {
 		signalBonus = 2.0
 	}
 
@@ -599,6 +605,25 @@ func replacementReason(hold, cand Row) string {
 	return best
 }
 
+// SortCandidates 是 `sortCandidates` 的导出包装。
+//
+// 导出是因为**调用点在 service 层**（`buildCandidatePoolFrom`）：原实现把它
+// 嵌在 `select_candidate_pool` 的最里层（portfolio_rotation_logic.py:1728
+// `prioritize_trend_growth_entry_points(_candidate_sort_frame(work))`），
+// 对每一种策略都跑，位置在策略重排**之前**。
+//
+// ⚠ 此前它是**死代码**（生产从不调用），只有测试引用 —— 于是超跌/高手的候选池
+// 实际按 `ORDER BY total_score DESC, ts_code` 排，同分时的取舍与原版不同。
+func SortCandidates(rows []Row) []Row {
+	if len(rows) == 0 {
+		return rows
+	}
+	out := make([]Row, len(rows))
+	copy(out, rows)
+	sortCandidates(out)
+	return out
+}
+
 // sortCandidates 按候选池排序规则排序（4.2）。
 //
 //	total_score DESC, signal_priority ASC, active_signal_score DESC,
@@ -659,12 +684,18 @@ func signalPriority(row Row) int {
 // ⚠ 此前非低吸**恒返回 1** —— 原版"趋势成长在震荡市首次建仓 2 层"、
 // "超跌反弹高分建 2 层"都被压成了 1 层，仓位直接少一半。
 //
-// freeLayers / remainingSlotNeed 在原实现里是给那四组信号条件用的，
-// 本项目不可达，故不参与判定。
-func initialEntryLayers(row Row, cfg StrategyConfig, freeLayers int) int {
-	_ = freeLayers
+// ⚠ 注释里曾写"freeLayers / remainingSlotNeed 那四组信号条件在本项目不可达，
+// 故不参与判定" —— **那句已经过期**：信号表与 merge_asof 回填都接上了，
+// 原版的 `bull_ready` / `range_ready` / `bull_fill_ready` / `range_fill_ready`
+// 四组条件**全部可达**，而且它们正是"牛市首次建仓给 2 层"的来源。
+// 现在逐条照抄（阈值、`>=`/`<=` 方向、`close>0` 与 `ma<=0` 的守卫都一样）。
+func initialEntryLayers(row Row, cfg StrategyConfig, freeLayers, remainingSlotNeed int) int {
 	if isLowBuyStrategy(cfg.StrategyID) {
-		return atLeastOne(permittedMax(2, cfg.MaxLayersPerStock))
+		// ⚠ 原版是 `max(1, **min**(2, policy.max_layers_per_stock))` ——
+		// 取的是 **min**。Go 原来写的是 `permittedMax(2, …)`（取 max），
+		// 于是 `max_layers_per_stock=1`（单层配置）时低吸会建 **2 层**，
+		// **超出单股层数上限**。由 oracle 逐例比对抓出。
+		return atLeastOne(min(2, cfg.MaxLayersPerStock))
 	}
 	if cfg.MaxLayersPerStock <= 1 {
 		return 1
@@ -682,6 +713,67 @@ func initialEntryLayers(row Row, cfg StrategyConfig, freeLayers int) int {
 		if cfg.MarketState == StateRange {
 			return permittedMax(2, cfg.MaxLayersPerStock)
 		}
+	}
+
+	// 以下四组条件只对"非低吸/非高手/非超跌"的策略生效（原实现 :1465 之后）。
+	//
+	// `range_ready` / `range_fill_ready` 对**趋势成长**是死代码
+	//（震荡市已在上面提前 return），但对其它策略 id 仍可达 —— 所以照抄，不省。
+	state := cfg.MarketState
+	isBull := state == StateBull
+	isRange := state == StateRange
+	buySignal := row.SignalType == "buy"
+	score := row.TotalScore
+	trend, structure, rs := row.TrendScore, row.StructureScore, row.RSScore
+	signalScore := row.SignalScore
+	signalAge := row.SignalAge
+	closePrice, ma20, ma30 := row.Close, row.Ma20, row.Ma30
+	drawdown := row.DrawdownFromHigh120
+	overheated := func() bool { return isOverheatedCandidate(row, state) }
+	// 均线守卫：均线无效（<=0）时该条不参与判定
+	aboveMa := func(ma, ratio float64) bool { return ma <= 0 || closePrice >= ma*ratio }
+
+	bullReady := isBull && buySignal && signalAge <= 2 &&
+		score >= 80.0 && trend >= 22.0 && structure >= 12.0 && rs >= 10.0 &&
+		signalScore >= 68.0 && closePrice > 0 &&
+		aboveMa(ma20, 0.998) && aboveMa(ma30, 1.002) &&
+		drawdown <= 4.0 && drawdown >= -16.0 && !overheated()
+
+	rangeReady := isRange && buySignal && signalAge <= 2 &&
+		score >= 84.0 && trend >= 23.0 && structure >= 13.0 && rs >= 11.0 &&
+		signalScore >= 74.0 && closePrice > 0 &&
+		aboveMa(ma20, 0.99) && aboveMa(ma30, 0.995) &&
+		drawdown <= -1.0 && drawdown >= -18.0 && !overheated()
+
+	desiredTotal := cfg.DesiredTotalLayers
+	if desiredTotal < 1 {
+		desiredTotal = 1
+	}
+	minFree := remainingSlotNeed + 1
+	if minFree < 2 {
+		minFree = 2
+	}
+	capacityPressure := freeLayers > 0 &&
+		freeLayers >= minFree &&
+		float64(freeLayers)/float64(desiredTotal) >= 0.2
+
+	bullFillReady := isBull && buySignal && signalAge <= 4 &&
+		score >= 77.0 && trend >= 21.0 && structure >= 11.0 && rs >= 9.0 &&
+		signalScore >= 66.0 && closePrice > 0 &&
+		aboveMa(ma20, 0.995) && aboveMa(ma30, 0.998) &&
+		drawdown <= 4.0 && drawdown >= -20.0 && !overheated()
+
+	rangeFillReady := isRange && buySignal && signalAge <= 2 &&
+		score >= 81.0 && trend >= 21.0 && structure >= 11.0 && rs >= 9.0 &&
+		signalScore >= 70.0 && closePrice > 0 &&
+		aboveMa(ma20, 0.986) && aboveMa(ma30, 0.992) &&
+		drawdown <= -1.0 && drawdown >= -20.0 && !overheated()
+
+	if bullReady || rangeReady {
+		return permittedMax(2, cfg.MaxLayersPerStock)
+	}
+	if capacityPressure && (bullFillReady || rangeFillReady) {
+		return permittedMax(2, cfg.MaxLayersPerStock)
 	}
 	return 1
 }

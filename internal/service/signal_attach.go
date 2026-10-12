@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"time"
 
+	"freestock/internal/backtest"
 	"freestock/internal/portfolio"
 	"freestock/internal/score"
 )
@@ -128,6 +129,52 @@ func (s *PortfolioService) attachSignalsToRows(
 	}
 	attached, _ := score.AttachSignalCandidates(rows, dates, candidates, calendar, score.SignalAttachOptions{})
 	return attached
+}
+
+// attachSignalsToDays 按**整个区间**给回测的评分日贴一次信号。
+//
+// 对应原版回测路径上的 `_attach_signal_candidates(scope_history, start, end)`
+// （portfolio_service.py:1004）—— 它是对**整段帧**做一次 merge_asof，
+// 而不是逐日做。这里同样只查两次库（候选 + 日历）：
+// `attachSignalsToRows` 内部按 min/max 日期一次性取候选，逐行匹配。
+//
+// 行会按日重新分组（attach 可能丢弃不在交易日历里的行），所以返回新的切片，
+// 且**可能比入参少行** —— 调用方必须用返回值。
+func (s *PortfolioService) attachSignalsToDays(
+	stored *portfolio.Store, days []backtest.StrengthDay,
+) []backtest.StrengthDay {
+	if stored == nil || len(days) == 0 {
+		return days
+	}
+	total := 0
+	for _, day := range days {
+		total += len(day.Rows)
+	}
+	if total == 0 {
+		return days
+	}
+	rows := make([]score.Row, 0, total)
+	dates := make([]int64, 0, total)
+	for _, day := range days {
+		for _, row := range day.Rows {
+			rows = append(rows, row)
+			dates = append(dates, row.TradeDate)
+		}
+	}
+	attached := s.attachSignalsToRows(stored, rows, dates)
+
+	// 按日回填。用日期索引而不是位置索引 —— attach 之后行序与行数都可能变，
+	// 按位置切会**把行错配到别的交易日**（那是静默的错误信号年龄）。
+	byDate := make(map[int64][]score.Row, len(days))
+	for _, row := range attached {
+		byDate[row.TradeDate] = append(byDate[row.TradeDate], row)
+	}
+	out := make([]backtest.StrengthDay, 0, len(days))
+	for _, day := range days {
+		day.Rows = byDate[int64(atoiDate(day.Date))]
+		out = append(out, day)
+	}
+	return out
 }
 
 // calendarFromDates 是 `_calendar_dates` 取不到日历时的退路：

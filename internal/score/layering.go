@@ -64,8 +64,12 @@ func isConfirmedPullbackRebound(priceOpen, priceHigh, priceLow, priceClose, pctC
 }
 
 // signalMaxAgeForState 候选信号的最大年龄（原实现 :20-25）。
+//
+// ⚠ 必须先 `normalizeMarketState`：原版走的是
+// `normalize_market_state(market_state)` 再查表，未知/空状态归 `range`。
+// 直接 switch 的话 "BULL" 会落到默认值 3（= range），而原版是 bull 的 4。
 func signalMaxAgeForState(marketState string) int {
-	switch marketState {
+	switch normalizeMarketState(marketState) {
 	case StateBull:
 		return 4
 	case StateBear:

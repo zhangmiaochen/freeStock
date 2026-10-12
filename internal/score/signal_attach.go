@@ -143,7 +143,14 @@ func AttachSignalCandidates(
 		row.SignalCount = 0
 
 		if point, matched := matchSignalPoint(byCode[row.Code], idx, tolerance); matched {
-			row.SignalType = point.item.SignalType
+			// ⚠ **必须小写化**：原实现在 `prepare_strength_frame` 里对
+			// `active_signal_type` 做了 `.str.lower()`（portfolio_rotation_logic.py:387），
+			// 而下游处处按字面量比较（`signal_type == "buy"`、`hasFreshSignal`、
+			// `overflow_candidate_quality_ok` 等）。Go 以前原样透传，
+			// 于是库里若出现 `"BUY"`，原版仍算有信号、Go 会当没信号
+			// —— 熊市闸门/加层/建仓层数全部静默走另一条分支。
+			// 由 oracle 逐例比对抓出（黄金值里有 `signal_type="BUY"` 一例）。
+			row.SignalType = strings.ToLower(point.item.SignalType)
 			row.SignalScore = point.item.Score
 			row.SignalModelID = point.item.ModelID
 			row.SignalModelName = point.item.ModelName

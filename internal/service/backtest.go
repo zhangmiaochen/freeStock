@@ -120,6 +120,23 @@ func (s *PortfolioService) CreateBacktest(req BacktestRequest) (runResult *Backt
 		return nil, fmt.Errorf("回测区间内没有可用的评分交易日")
 	}
 
+	// ①.5 **按整个区间贴一次信号**（原版 portfolio_service.py:1004
+	// `scope_history = self._attach_signal_candidates(scope_history, start_date, end_date)`
+	// 就在回测路径上）。
+	//
+	// ⚠ 这一步曾经整块缺失：回测把 `nil` 传给候选池 → 每一行的
+	// `SignalType/SignalAge/SignalScore` 恒为空/0，于是
+	//   - 熊市闸门（`candidate.go` 的 `HasSignalSource=true` 分支）把
+	//     **每一只**候选都判成"无新鲜信号"而拒 → 整段熊市零成交、净值一条直线；
+	//   - `signal_bonus` 恒为 0 → 该放宽 2 分的候选被拒；
+	//   - 候选排序的第 2/3/4 号键（signal_priority / signal_score / signal_age）
+	//     全相等 → 平局时选出的票与原版不同；
+	//   - `is_strong_stock_for_layering` 的信号分支走不到 → 少加一层。
+	//
+	// 一次贴整个区间（而不是逐日查库）与原版一致：merge_asof 是**逐行**的，
+	// 只要候选集与日历覆盖整个区间，逐日贴与整段贴结果相同，但只需两次查询。
+	days = s.attachSignalsToDays(store, days)
+
 	// ② 日线价格（区间内涉及的全部代码）
 	//
 	// 这一步是回测的**主要成本**：每只股票一次 HTTP 往返。
@@ -353,7 +370,7 @@ func (s *PortfolioService) buildStrengthDays(
 	matcher := s.scopeMatcher()
 
 	for _, row := range strengths {
-		if !inPortfolioScope(row, pf, matcher) {
+		if !inPortfolioScopeStrength(row, pf, matcher) {
 			continue
 		}
 		date := fmt.Sprintf("%d", row.TradeDate)
@@ -490,11 +507,17 @@ func (s *PortfolioService) backtestPlanBuilder(
 ) backtest.PlanBuilder {
 	return func(held []score.Row, day backtest.StrengthDay) score.RotationPlan {
 		marketState := day.MarketState
-		// 当日评分行（转回 StrengthRow 以便复用候选池过滤）
-		all := make([]portfolio.StrengthRow, 0, len(day.Rows))
-		for _, row := range day.Rows {
-			all = append(all, rowToStrength(row, ""))
-		}
+		// 当日评分行**直接进候选池**。
+		//
+		// ⚠ 这里原来绕了一趟 `rowToStrength(row, "")`，有两个静默后果：
+		//  1. `Industry` 被写成空串 → 行业范围从"单值 OR 成员表**并集**"
+		//     退化成"只靠成员表"（严格子集）。而 `buildStrengthDays` 已经用
+		//     真实行业放行过一遍 → 同一天先放行、又被内层砍掉，两层口径不一致；
+		//  2. 整套 `active_signal_*` 被清零 → 熊市闸门把**每一只**候选都判成
+		//     "无新鲜信号"而拒（`candidate.go` 的 `HasSignalSource=true` 分支）。
+		//     原版回测会贴信号（portfolio_service.py:1004），所以这是实打实的差异。
+		// `day.Rows` 自身的信号列由 `CreateBacktest` 按区间预贴，见那里。
+		all := day.Rows
 		// ⚠ **持仓但当天没评分的行不进 `all`**。
 		//
 		// 它们本来就会被"剔除已持仓"过滤掉（`buildCandidatePoolFrom` 的 held 集合），
@@ -522,7 +545,7 @@ func (s *PortfolioService) backtestPlanBuilder(
 		)
 		cfg.LowBuyBreadthReadyCount = breadthReady
 		poolBegan := time.Now()
-		candidates, universeScores := s.buildCandidatePoolFrom(nil, all, item, cfg, heldCodes)
+		candidates, universeScores, _ := s.buildCandidatePoolFrom(nil, all, item, cfg, heldCodes)
 		poolElapsed := time.Since(poolBegan)
 		slog.Info("回测候选池完成",
 			"date", day.Date, "持仓", len(held),
@@ -815,6 +838,9 @@ func marketScopeKey(item portfolio.Portfolio) string {
 func rowToStrength(row score.Row, industry string) portfolio.StrengthRow {
 	return portfolio.StrengthRow{
 		Code: row.Code, Name: row.Name, Industry: industry,
+		// ⚠ `TradeDate` 也必须镜像：贴信号要靠它算 `signal_age`，
+		// 漏了就是 0 → attach 的日期区间非法 → **静默不贴信号**。
+		TradeDate:  row.TradeDate,
 		Market:     row.Market,
 		TotalScore: row.TotalScore, TrendScore: row.TrendScore,
 		StructureScore: row.StructureScore, RSScore: row.RSScore,

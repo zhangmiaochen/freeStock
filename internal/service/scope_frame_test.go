@@ -43,7 +43,7 @@ func TestBreadthFrameIsScopeFiltered(t *testing.T) {
 		scopeRow("300750", "chinext", "电池", 90),
 		scopeRow("688981", "star", "半导体", 85),
 	}
-	_, universeScores := svc.buildCandidatePoolFrom(nil, all, item, cfg, nil)
+	_, universeScores, _ := svc.buildCandidatePoolFrom(nil, toScoreRows(all), item, cfg, nil)
 
 	// **只有主板的两只**应进入广度帧
 	if len(universeScores) != 2 {
@@ -71,7 +71,7 @@ func TestBreadthFrameIncludesAllWhenScopeAll(t *testing.T) {
 		scopeRow("000001", "sz-main", "银行", 10), // 低于 candidate floor，但**仍算进广度帧**
 		scopeRow("300750", "chinext", "电池", 90),
 	}
-	_, universeScores := svc.buildCandidatePoolFrom(nil, all, item, cfg, nil)
+	_, universeScores, _ := svc.buildCandidatePoolFrom(nil, toScoreRows(all), item, cfg, nil)
 	if len(universeScores) != 3 {
 		t.Errorf("全市场范围的广度帧应含 3 只（不受分数下限影响），实际 %d", len(universeScores))
 	}
@@ -110,7 +110,7 @@ func TestLowBuyFiltersBeforeTruncation(t *testing.T) {
 	good.DrawdownFromHigh20 = -10
 	all = append(all, good)
 
-	out, _ := svc.buildCandidatePoolFrom(nil, all, item, cfg, nil)
+	out, _, _ := svc.buildCandidatePoolFrom(nil, toScoreRows(all), item, cfg, nil)
 
 	// 关键断言：合格的那只**必须在**候选池里（先过滤再截断才能保住它）
 	found := false
@@ -149,7 +149,7 @@ func TestMarketScopeVocabularyMismatch(t *testing.T) {
 		scopeRow("688981", "star", "半导体", 85), // 范围外（未勾科创板）
 		scopeRow("920001", "bse", "其他", 88),   // 范围外（映射不出来）
 	}
-	out, universe := svc.buildCandidatePoolFrom(nil, all, item, cfg, nil)
+	out, universe, _ := svc.buildCandidatePoolFrom(nil, toScoreRows(all), item, cfg, nil)
 
 	if len(universe) == 0 {
 		t.Fatal("广度帧为空 —— 市场过滤把每一行都剔掉了（词汇表没映射）")
@@ -187,14 +187,14 @@ func TestInPortfolioScopeUsesMarketVocabulary(t *testing.T) {
 	}
 	for _, c := range cases {
 		strength := portfolio.StrengthRow{Code: c.code, Market: c.market}
-		if got := inPortfolioScope(strength, item, svc.scopeMatcher()); got != c.want {
-			t.Errorf("inPortfolioScope(%s, %s) = %v，期望 %v", c.code, c.market, got, c.want)
+		if got := inPortfolioScopeStrength(strength, item, svc.scopeMatcher()); got != c.want {
+			t.Errorf("inPortfolioScopeStrength(%s, %s) = %v，期望 %v", c.code, c.market, got, c.want)
 		}
 	}
 
 	// 没设市场范围 = 全部市场，连 bse 也要放行
 	open := portfolio.Portfolio{ID: "pf_open", ScopeType: portfolio.ScopeAll, ScopeValueJSON: `{}`}
-	if !inPortfolioScope(portfolio.StrengthRow{Code: "920001", Market: "bse"}, open, svc.scopeMatcher()) {
+	if !inPortfolioScopeStrength(portfolio.StrengthRow{Code: "920001", Market: "bse"}, open, svc.scopeMatcher()) {
 		t.Error("未设市场范围时应视为全部市场")
 	}
 }

@@ -243,45 +243,6 @@ export function PreviewAutoPortfolio(req: $models.AutoPortfolioRequest): $Cancel
     });
 }
 
-/**
- * RefreshBackfill 批量给 [startDate, endDate] 区间内每个交易日打分。
- * 
- * ⚠ **与原实现有两处结构性差异（都是我加的，原版没有）**：
- * 
- *  1. **`limit` 参数原版不存在**。原实现是
- *     `refresh_backfill(start_date, end_date)`（portfolio_service.py:685）——
- *     **永远全市场**，没有"回填股票数"这种东西。
- * 
- *     这个参数是本次移植时为了"保护慢数据源"加的，**但它是用户那个
- *     「回测零成交」问题的直接成因**：广度闸门判的是"全市场评分≥70 的只数"，
- *     只回填 1000 只会让这个数被系统性低估，闸门恒判"广度不足"并删光买入信号。
- *     UI 已把默认值改成 0（全市场）并对覆盖不足 50% 的情况显式告警。
- * 
- *  2. **原版一次刷所有"活跃策略"**（`refresh_latest` → `_active_strategy_ids()`：
- *     取所有**非 archived** 组合用到的策略去重），我这里是一次一个策略。
- *     对多个组合用不同策略的场景，原版一次就能全部刷新，我需要逐个调用。
- * 
- * 保留 `limit` 的理由：写测试/快速验证时确实需要小样本。
- * 但**生产路径应当传 0**。
- * 
- * limit 语义：
- * 
- * 	limit <= 0 → **全市场**（所有有行情的股票）
- * 	limit >  0 → 从全市场里**等距抽样** limit 只（跨板块，不是"代码最小的前 N 只"）
- * 
- * ⚠ **回测必须用全市场**。非 0 的 limit 只适合"快速验证通路"：
- * 抽样再均匀，广度那类**全市场计数**也一定是被低估的
- * （低吸开仓要看"全市场 close>MA60 且 MA20>MA60 的只数 ≥ 1000"），
- * 用它跑出来的组合与实盘建议不是一回事。
- * 
- * 历史上这里取的是"代码序前 limit 只"，limit=1000 时只会评到
- * 000/001/002（深市主板）—— 创业板/科创板一只不评，
- * 于是「主板+创业板」的组合候选恒为空、低吸广度恒判不足、回测恒为 0 成交。
- * 已改为等距抽样（见 `scoringUniverse`）。
- * 
- * force=false 时**增量**：已经算过的 (交易日, 代码) 不再重算 ——
- * 重跑一个已经填过的区间应当在几秒内结束，而不是又花几分钟。
- */
 export function RefreshBackfill(strategyID: string, startDate: number, endDate: number, limit: number, force: boolean): $CancellablePromise<$models.BackfillResult | null> {
     return $Call.ByID(1067070197, strategyID, startDate, endDate, limit, force).then(($result: any) => {
         return $$createType33($result);

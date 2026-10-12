@@ -5,6 +5,7 @@ import (
 
 	"freestock/internal/cnlake"
 	"freestock/internal/portfolio"
+	"freestock/internal/score"
 )
 
 // strengthRowWithIndustry 造一个只带代码与行业名的评分行。
@@ -159,6 +160,25 @@ func TestMatchScopeItemFallsBackToSingleValue(t *testing.T) {
 // 之前 Go 把两者合成一个函数，且成员表可用时 `continue` 掉了单值那一支 ——
 // 行业范围**少选**一批票；概念在成员表不可用时又退回按行业名单值匹配 ——
 // 概念范围**多选**一批票。
+// matchScopeItem 是 `scopeHit` 的测试便捷包装（吃物化评分行）。
+//
+// 生产代码里 `scopeHit` 收的是 `(code, industry)` 两个字段，而不是整行 ——
+// 因为范围判定同时服务于 `score.Row`（候选池）与 `portfolio.StrengthRow`
+// （回填/自动组合的范围过滤），绑死行类型就会逼出"整行转换"的拷贝开销。
+// 测试关心的是匹配语义，所以这里保留按行调用的写法。
+func matchScopeItem(items []string, strength portfolio.StrengthRow, matcher *ScopeMatcher, industry bool) bool {
+	return scopeHit(items, strength.Code, strength.Industry, matcher, industry)
+}
+
+// toScoreRows 把物化评分行转成轮动行，供测试走新的候选池签名。
+func toScoreRows(all []portfolio.StrengthRow) []score.Row {
+	out := make([]score.Row, 0, len(all))
+	for _, strength := range all {
+		out = append(out, strengthToRow(strength))
+	}
+	return out
+}
+
 func TestMatchScopeItemIndustryUnionSectorOnly(t *testing.T) {
 	// 股票 600519：单值行业是"白酒"；成员表里它属于"银行"（故意的错配，
 	// 用来区分"命中的是单值那一支"还是"成员表那一支"）

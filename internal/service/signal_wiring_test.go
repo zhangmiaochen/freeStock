@@ -61,7 +61,7 @@ func TestPlanConsumesSignalHistory(t *testing.T) {
 	}
 	cfg := score.BuildStrategyConfig(strategyID, score.StateRange, 5, 10, 3, "all")
 
-	rows, universeScores := svc.buildCandidatePoolFrom(store, all, item, cfg, nil)
+	rows, universeScores, _ := svc.buildCandidatePoolFrom(store, toScoreRows(all), item, cfg, nil)
 	if len(universeScores) == 0 {
 		t.Fatal("广度分数不应为空")
 	}

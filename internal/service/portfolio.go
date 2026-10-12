@@ -343,11 +343,32 @@ func (s *PortfolioService) AddPosition(portfolioID string, in portfolio.Position
 			}
 		}
 	}
-	// 建仓日期没给时用最新交易日补（对应 Python `entry_date or latest_trade_date`），
-	// 而不是"今天" —— 周末/盘前新增会算错持有交易日数
-	if in.EntryDate == "" && s.stock != nil {
-		if universe, err := s.stock.GetStockUniverse(false); err == nil && universe.TradeDate > 0 {
-			in.EntryDate = fmt.Sprintf("%d", universe.TradeDate)
+	// 建仓日期没给时的回退链 —— **顺序必须与原版一致**。
+	//
+	// 原实现（portfolio_service.py:513/524）：
+	//
+	//	latest_trade_date = (_get_latest_strength_trade_date()      # ① 全表 MAX(stock_strength.trade_date)
+	//	                     or _normalize_trade_date(payload.entry_date)
+	//	                     or pro.get_latest_daily_trade_date())  # ③ 行情最新交易日
+	//	entry_date = _normalize_trade_date(payload.entry_date) or latest_trade_date
+	//
+	// ⚠ Go 原来是**先**用行情最新交易日填 `in.EntryDate`，于是 store 层那条
+	// "全表最新评分日" 的兜底（`LatestStrengthDateAny`）**永远走不到**。
+	// 评分停在 20261009、行情已到 20261013 时：原版落 `20261009`、
+	// Go 落 `20261013` —— 持有交易日数、120 日最高价窗口起点都会跟着偏。
+	// 所以这里按原版把**评分日放第一位**，行情日只做第三级兜底。
+	if in.EntryDate == "" {
+		filled := false
+		// ① 全表最新评分日（原版 `_get_latest_strength_trade_date()`）
+		if date, err := store.LatestStrengthDateAny(); err == nil && date > 0 {
+			in.EntryDate = fmt.Sprintf("%d", date)
+			filled = true
+		}
+		// ③ 行情最新交易日（原版 `pro.get_latest_daily_trade_date()`）
+		if !filled && s.stock != nil {
+			if universe, err := s.stock.GetStockUniverse(false); err == nil && universe.TradeDate > 0 {
+				in.EntryDate = fmt.Sprintf("%d", universe.TradeDate)
+			}
 		}
 	}
 

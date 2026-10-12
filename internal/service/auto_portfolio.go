@@ -77,6 +77,10 @@ type autoComposeContext struct {
 	selected   []score.Row
 	candidates []score.Row
 	rotation   []score.RotationRow
+	// candidateCount 是**截断前**的候选池大小（原版 `candidate_count =
+	// len(candidate_pool)`，用的是完整池，而 `candidates` 是 head 截断后的
+	// `candidate_ranked`）。报数用它，建仓/配对照旧用 `candidates`。
+	candidateCount int
 }
 
 // PreviewAutoPortfolio 预演自动组合（不落库）。
@@ -220,7 +224,7 @@ func (s *PortfolioService) buildAutoCompose(req AutoPortfolioRequest) (*autoComp
 	scopeMatcher := s.scopeMatcher()
 	inScope := 0
 	for _, row := range all {
-		if inPortfolioScope(row, item, scopeMatcher) {
+		if inPortfolioScopeStrength(row, item, scopeMatcher) {
 			inScope++
 		}
 	}
@@ -246,7 +250,13 @@ func (s *PortfolioService) buildAutoCompose(req AutoPortfolioRequest) (*autoComp
 	cfg.LowBuyBreadthReadyCount = breadthReady
 
 	// 用**空持仓**跑一次正常计划 —— 计划里的 add 行就是首批建仓
-	candidates, universeScores := s.buildCandidatePoolFrom(store, all, item, cfg, nil)
+	rowsIn := make([]score.Row, 0, len(all))
+	for _, strength := range all {
+		rowsIn = append(rowsIn, strengthToRow(strength))
+	}
+	// 第三个返回值是**截断前**的候选数（原版 `candidate_count = len(candidate_pool)`，
+	// 用的是完整池而不是 `candidate_ranked`）。
+	candidates, universeScores, candidateCount := s.buildCandidatePoolFrom(store, rowsIn, item, cfg, nil)
 	plan := score.BuildRotationPlan(score.RotationInput{
 		Holdings: nil, Candidates: candidates, Config: cfg,
 		MarketState: state, MaxStockLimit: item.MaxStockCount,
@@ -327,7 +337,7 @@ func (s *PortfolioService) buildAutoCompose(req AutoPortfolioRequest) (*autoComp
 		PortfolioScore: round4(portfolioScore),
 		HealthLabel:    HealthLabel(portfolioScore),
 		PositionCount:  len(selected),
-		CandidateCount: len(candidates),
+		CandidateCount: candidateCount,
 		AddCount:       len(selected),
 		ActionBrief:    fmt.Sprintf("自动生成 %d 只初始持仓", len(selected)),
 		PortfolioType:  item.Type, PortfolioTypeLabel: item.TypeLabel,
@@ -336,6 +346,7 @@ func (s *PortfolioService) buildAutoCompose(req AutoPortfolioRequest) (*autoComp
 	return &autoComposeContext{
 		tradeDate: int(strengthDate), item: item, snapshot: snapshot,
 		selected: selected, candidates: candidates, rotation: plan.Rows,
+		candidateCount: candidateCount,
 	}, nil
 }
 
@@ -353,7 +364,7 @@ func (s *PortfolioService) autoComposePayload(ctx *autoComposeContext, mode stri
 		OK: true, Available: len(ctx.selected) > 0, Mode: mode, Message: message,
 		TradeDate: ctx.tradeDate, Portfolio: ctx.item, Snapshot: ctx.snapshot,
 		SelectedPositions: ctx.selected, TopCandidates: top, Rotation: ctx.rotation,
-		SelectedCount: len(ctx.selected), CandidateCount: len(ctx.candidates),
+		SelectedCount: len(ctx.selected), CandidateCount: ctx.candidateCount,
 	}
 }
 

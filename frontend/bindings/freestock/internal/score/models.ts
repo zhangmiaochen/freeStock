@@ -441,6 +441,28 @@ export class Row {
     "market": string;
 
     /**
+     * Industry 是所属行业名（板块优先级第一名的单值）。
+     * 
+     * ⚠ **范围过滤要用它，不能让调用方另外传**。原实现的行业范围是
+     * `industry.isin(板块名) | ts_code ∈ 成员表`（**并集**，
+     * portfolio_service.py:3302-3304）。Go 曾经在回测里把行业硬编码成空串
+     * （`rowToStrength(row, "")`），于是并集退化成"只靠成员表"这一支 ——
+     * 候选池被削成严格子集，且与上游 `buildStrengthDays`（用真实行业放行）
+     * 口径不一致：同一天先放行、又被砍掉。
+     */
+    "industry": string;
+
+    /**
+     * TradeDate 是这行评分所属的交易日。
+     * 
+     * ⚠ 贴信号（merge_asof attach）**必须知道每行的交易日**才能算 `signal_age`。
+     * 此前这个信息只存在于 `portfolio.StrengthRow` 上，服务层只好另外维护一个
+     * 平行的 dates 切片 —— 那个切片在"行数可能变少"的 attach 前后很容易错位。
+     * 放进 `Row` 本身之后，行与日期不再可能失配。
+     */
+    "tradeDate": number;
+
+    /**
      * 评分
      */
     "totalScore": number;
@@ -548,6 +570,12 @@ export class Row {
         }
         if (!("market" in $$source)) {
             this["market"] = "";
+        }
+        if (!("industry" in $$source)) {
+            this["industry"] = "";
+        }
+        if (!("tradeDate" in $$source)) {
+            this["tradeDate"] = 0;
         }
         if (!("totalScore" in $$source)) {
             this["totalScore"] = 0;

@@ -138,7 +138,7 @@ func TestRealSignalEndToEnd(t *testing.T) {
 	}
 	t.Logf("消费：%d 行里有 %d 行贴上了信号（signal_age 分布 %v）", len(attached), fresh, ages)
 
-	candidates, _ := svc.buildCandidatePoolFrom(store, all, portfolio.Portfolio{
+	candidates, _, _ := svc.buildCandidatePoolFrom(store, toScoreRows(all), portfolio.Portfolio{
 		ID: "pf_e2e", StrategyID: score.StrategyTrendGrowth,
 		TargetPositionCount: 5, TotalLayers: 10,
 		ScopeType: portfolio.ScopeAll, ScopeValueJSON: `{"markets":["main","gem","star"]}`,
