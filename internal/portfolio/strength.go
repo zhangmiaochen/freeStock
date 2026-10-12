@@ -107,8 +107,36 @@ CREATE TABLE IF NOT EXISTS stock_strength (
   PRIMARY KEY (trade_date, strategy_id, ts_code)
 );
 
-CREATE INDEX IF NOT EXISTS idx_strength_lookup ON stock_strength(trade_date, strategy_id, total_score DESC);
+` + strengthLookupIndexDDL + `
 `
+
+// strengthLookupIndexDDL 是那张二级索引的 DDL。
+//
+// 单独抽出来，是因为**回填会在批量导入前后把它丢掉/建回**
+// （见 `RefreshBackfill`）：逐行维护索引在 680 万行的批量导入里是纯开销，
+// 而"最后一次性排序建索引"比"每行插一次 B 树"便宜得多。
+// 两处必须用同一份 DDL，否则会漂移。
+//
+// 安全性：`migrate()` 每次开库都会执行这份 DDL（`IF NOT EXISTS`），
+// 所以即使回填中途崩溃、索引没建回来，**下次启动会自动补上**。
+const strengthLookupIndexDDL = `CREATE INDEX IF NOT EXISTS idx_strength_lookup
+	ON stock_strength(trade_date, strategy_id, total_score DESC);`
+
+// DropStrengthLookupIndex 在批量导入前移除二级索引。
+func (s *Store) DropStrengthLookupIndex() error {
+	if _, err := s.db.Exec(`DROP INDEX IF EXISTS idx_strength_lookup`); err != nil {
+		return fmt.Errorf("删除评分查询索引失败：%w", err)
+	}
+	return nil
+}
+
+// EnsureStrengthLookupIndex 建回二级索引（已存在则不动）。
+func (s *Store) EnsureStrengthLookupIndex() error {
+	if _, err := s.db.Exec(strengthLookupIndexDDL); err != nil {
+		return fmt.Errorf("重建评分查询索引失败：%w", err)
+	}
+	return nil
+}
 
 // StrengthCodes 返回某 (交易日, 策略) 下**已有评分**的代码集合。
 //
@@ -241,9 +269,17 @@ func (s *Store) writeStrength(
 
 // strengthInsertBatch 是每条 INSERT 写多少行。
 //
-// 取值只受 SQLite 的"单条语句绑定参数上限"约束：200 × 39 = 7800 个占位符，
-// 远低于 SQLite 的默认上限（32766）。再大收益有限，而语句编译出的程序会变长。
-const strengthInsertBatch = 200
+// 取值只受 SQLite 的"单条语句绑定参数上限"约束：800 × 39 = 31200 个占位符，
+// 低于 SQLite 3.32+ 的默认上限 32766（modernc/sqlite 跟随该上限）。
+//
+// 为什么从 200 提到 800：**纯 Go 驱动下每行成本基本是常数**，
+// 但每条语句还有固定的编译/绑定开销。用 7000 行的微基准量过：
+//
+//	200 行/条 → 约 17~21µs/行
+//	800 行/条 → 见 TestStrengthSaveRowCost 的输出
+//
+// 回填 970 天 × 7000 行是 680 万行，每行省 1µs 就是 7 秒。
+const strengthInsertBatch = 800
 
 // strengthColumnCount 是 stock_strength 的插入列数（39）。
 const strengthColumnCount = 39

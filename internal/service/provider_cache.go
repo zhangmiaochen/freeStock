@@ -154,6 +154,20 @@ func (p *rangeCachingProvider) DailyBars(
 	ctx context.Context, code string, start, end int,
 ) ([]score.Bar, error) {
 
+	// ⚠ **底层自带"按日分区批量缓存"时，这一层必须让路。**
+	//
+	// 这层缓存的策略是"每只股票首次访问就把**整个预取窗口**取一遍"。
+	// 对没有批量能力的源（stockdb）这是对的：它把 N 天 × M 只的重复请求
+	// 压成 M 次。但对数据湖是**反向优化** —— 数据湖的天然粒度是"日分区"，
+	// 它自己的 `bulkBars` 已经做到"每个日文件只读一次、全市场共享"，
+	// 而这层会让每只股票**各自**把整窗（2022~2026 场景约 1500 个日文件）
+	// 重读一遍：7600 只 × 1500 个文件 = 上千万次文件打开。
+	//
+	// 直接透传，剩下的交给 `lakeProvider` 的分块批量读 + `TrimBulk`。
+	if _, isLake := p.Provider.(*lakeProvider); isLake {
+		return p.Provider.DailyBars(ctx, code, start, end)
+	}
+
 	// 与 DailyHistory 同样的保护：区间超出预取窗口就不敢用缓存
 	if start < p.from || end > p.to {
 		return p.Provider.DailyBars(ctx, code, start, end)

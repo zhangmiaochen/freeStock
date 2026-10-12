@@ -77,6 +77,26 @@ type BackfillResult struct {
 //
 // force=false 时**增量**：已经算过的 (交易日, 代码) 不再重算 ——
 // 重跑一个已经填过的区间应当在几秒内结束，而不是又花几分钟。
+// bulkBarsTrimmer 是"能按日期裁剪自己批量缓存"的数据源。
+//
+// 只有数据湖实现（见 `lakeProvider.TrimBulk`）：它按日分区批量读全市场，
+// 缓存会随回填不断长大，必须由调用方按滑动窗口裁掉不再需要的那一段。
+type bulkBarsTrimmer interface {
+	TrimBulk(before int)
+}
+
+// bulkTrimEveryDays 是裁剪间隔（交易日）。
+//
+// 不必每天裁：每次裁都要遍历全部代码并把保留部分复制一遍，
+// 天天裁等于把裁剪成本乘以天数。隔 N 天裁一次，内存上限只多出 N 天。
+const bulkTrimEveryDays = 20
+
+// strengthIndexDropMinDays 是"要不要在批量导入期间移除评分查询索引"的天数门槛。
+//
+// 逐行维护二级索引在几百万行的导入里是纯开销；天数太少时
+// "删索引 + 建索引"两次全表扫描反而不划算。
+const strengthIndexDropMinDays = 40
+
 func (s *PortfolioService) RefreshBackfill(
 	strategyID string, startDate, endDate, limit int, force bool,
 ) (*BackfillResult, error) {
@@ -127,6 +147,7 @@ func (s *PortfolioService) RefreshBackfill(
 	scoring := NewScoringService(s.stock)
 	var stats cacheStats
 	var cacheRef *rangeCachingProvider
+	var trimmer bulkBarsTrimmer
 	if provider, _ := s.stock.snapshot(); provider != nil && startDate > 0 {
 		windowStart := scoreWindowStart(startDate, scoreLookbackTradingDays)
 		cache := newRangeCachingProvider(provider, windowStart, endDate)
@@ -134,6 +155,10 @@ func (s *PortfolioService) RefreshBackfill(
 		// 留给紧接着的回测复用 —— 回测要的价格是这个窗口的子集
 		s.setBackfillCache(provider, cache)
 		cacheRef = cache
+		// 数据源自带按日分区的批量缓存（数据湖）时，由它自己分块读 + 裁剪
+		if candidate, ok := provider.(bulkBarsTrimmer); ok {
+			trimmer = candidate
+		}
 		slog.Info("回填启用日线缓存",
 			"windowStart", windowStart, "windowEnd", endDate,
 			"before", fmt.Sprintf("%d 次/只", len(dates)), "after", "1 次/只")
@@ -145,7 +170,34 @@ func (s *PortfolioService) RefreshBackfill(
 	}
 	var scoreTotal, saveTotal time.Duration
 
-	for _, date := range dates {
+	// **批量导入期间移除二级索引。**
+	//
+	// `idx_strength_lookup(trade_date, strategy_id, total_score DESC)` 每插一行
+	// 都要维护一次 B 树；970 天 × 7000 行 = 680 万次。而最后一次性
+	// 排序建索引远比逐行插便宜。
+	//
+	// 只在"确实要写很多行"时才做（force=true 且天数够多）：
+	// 天数少时，"删索引 + 建索引"两次全表扫描反而不划算。
+	// 用 defer 保证**失败也会建回来**；即使进程直接挂掉，
+	// `migrate()` 下次开库会用同一份 DDL 自动补上。
+	if force && len(dates) >= strengthIndexDropMinDays {
+		if err := store.DropStrengthLookupIndex(); err != nil {
+			slog.Warn("移除评分查询索引失败，继续按原样导入", "err", err)
+		} else {
+			slog.Info("批量导入前已移除评分查询索引", "tradingDays", len(dates))
+			defer func() {
+				began := time.Now()
+				if err := store.EnsureStrengthLookupIndex(); err != nil {
+					slog.Warn("重建评分查询索引失败（下次启动会自动重建）", "err", err)
+					return
+				}
+				slog.Info("评分查询索引已重建",
+					"elapsed", time.Since(began).Round(time.Millisecond))
+			}()
+		}
+	}
+
+	for index, date := range dates {
 		// **增量**：已经算过的 (交易日, 代码) 不再重算。
 		//
 		// 和单日刷新同一个道理 —— 评分只取决于 (代码, 交易日, 策略)，
@@ -204,6 +256,18 @@ func (s *PortfolioService) RefreshBackfill(
 		saveTotal += time.Since(saveBegan)
 		out.Scored++
 		out.PerDay[fmt.Sprintf("%d", date)] = len(result.Rows)
+
+		// **按滑动窗口裁剪数据湖的批量缓存。**
+		//
+		// 回填是往前推的：第 i 天只要 [D_i-320, D_i]，更早的数据不会再被读到。
+		// 不裁剪的话，2022~2026 这种区间会把约 1300 个交易日 × 5500 只
+		// 全留在内存（实测约 600MB）。
+		//
+		// 不必每天都裁（每天裁一次要多做 O(全部行) 的拷贝），
+		// 每 `bulkTrimEveryDays` 天裁一次即可 —— 多留的那几天是常数级开销。
+		if trimmer != nil && (index+1)%bulkTrimEveryDays == 0 && index+1 < len(dates) {
+			trimmer.TrimBulk(scoreWindowStart(dates[index+1], scoreLookbackTradingDays))
+		}
 	}
 
 	out.Elapsed = time.Since(began).Round(time.Millisecond).String()

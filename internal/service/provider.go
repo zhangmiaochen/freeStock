@@ -222,9 +222,15 @@ type lakeProvider struct {
 	//
 	// 所以第一次有人要某段区间时，就把这段区间的**全市场**一次读进来，
 	// 后续所有代码直接从内存取 —— **对调用方完全透明**。
-	bulkMu     sync.Mutex
-	bulkFrom   int
-	bulkTo     int
+	bulkMu   sync.Mutex
+	bulkFrom int
+	bulkTo   int
+	// bulkScored 是 bulkBars 的"已组装成 score.Bar"版本，**与它同步维护**。
+	//
+	// 为什么需要：`DailyBars` 若每次从 bulkBars 逐行组装，回填每天要重做
+	// 窗口内每根行（全市场约 174 万行/天，实测约 110ms/天）。
+	// 批量读是按日分区**增量**来的，所以组装也增量做，之后按区间二分子切片。
+	bulkScored map[string][]score.Bar
 	bulkFilled bool
 	bulkBars   map[string][]cnlake.BarRow
 
@@ -293,12 +299,21 @@ func (p *lakeProvider) valuationFor(code string, start, end int) map[int64]cnlak
 	return out
 }
 
-// bulkMaxDays 是允许走批量读的**最长区间**（交易日数）。
+// bulkChunkDays 是**单次**批量读最多覆盖的交易日数（分块大小）。
 //
-// 上限的意义是**给内存封顶**：一天约 5500 只股票，
-// 400 个交易日约 220 万行。再长就会把整段历史读进内存
-// （K 线页可能一次要十年），所以那种情况仍走按代码读。
-const bulkMaxDays = 700
+// ⚠ 这里原本是 `bulkMaxDays = 700`，语义是"区间**超过就不许批量读**"。
+// 于是长区间会整段退化成逐只读 —— 而代价是量级差：
+//
+//	批量读（全市场）：1 年 ≈ 1.2 秒，3 年 ≈ 3.4 秒
+//	逐只读（每只一次窗口读）：1 年 546ms/只、7 年 2.8s/只
+//	→ 全市场 7600 只外推：1 年 1 小时、7 年 6 小时
+//
+// 组合回测「全量重算区间 2022~2026」的回填窗口约 **1500 个交易日**，
+// 恰好超过 700，于是每次都走逐只慢读 —— 这就是"耗时太久"的根因。
+//
+// 现在改成：**照样批量读，但一次不超过这么多天**。单次读的规模有上限，
+// 内存总量由 `TrimBulk`（调用方按滑动窗口裁剪）控制。
+const bulkChunkDays = 250
 
 // NewLakeProvider 用数据湖构造行情来源。
 func NewLakeProvider(lake *cnlake.Lake) Provider {
@@ -485,6 +500,94 @@ func (p *lakeProvider) barsFor(code string, start, end int) ([]cnlake.BarRow, er
 	return p.lake.DailyBars(code, start/10000, end/10000)
 }
 
+// mergeSortedBars 把已排序的 `add` 并入已排序的 `have`，结果仍按日期升序。
+//
+// ⚠ **不能直接 append。** 分块读只有在"块按日期递增"时才有序，
+// 但缓存里可能**已经有更晚的一段**：实测回填时先填了
+// `20260825~20261009`（`marketState`/基准先访问），再填
+// `20231026~20260824`，直接 append 会让每条切片变成
+// "2026 在前、2023 在后" —— 后果有两个，都是静默的：
+//
+//  1. `quoteRange` 靠升序推导前收盘 → 前收盘取错；
+//  2. `TrimBulk` 用二分找裁剪点 → 找不到，裁剪形同失效（实测只丢掉 2017 行）。
+//
+// 快路径：新块整体晚于已有数据时直接 append（正常向前推进就是这条）。
+func mergeSortedBars(have, add []cnlake.BarRow) []cnlake.BarRow {
+	if len(have) == 0 {
+		return add
+	}
+	if len(add) == 0 {
+		return have
+	}
+	if have[len(have)-1].TradeDate <= add[0].TradeDate {
+		return append(have, add...)
+	}
+	merged := make([]cnlake.BarRow, 0, len(have)+len(add))
+	i, j := 0, 0
+	for i < len(have) && j < len(add) {
+		if have[i].TradeDate <= add[j].TradeDate {
+			merged = append(merged, have[i])
+			i++
+		} else {
+			merged = append(merged, add[j])
+			j++
+		}
+	}
+	merged = append(merged, have[i:]...)
+	merged = append(merged, add[j:]...)
+	return merged
+}
+
+// barsForRange 与 `barsFor` 相同，但把结果**裁到 [start, end]**。
+//
+// 为什么要单独一个：批量缓存命中时 `cachedBars` 返回的是该股票的**整条切片**
+// （回填场景约 640 根），而 `DailyBars` 会逐根遍历、且**每根都要查一次股本算换手率**。
+// 于是"窗口 640 根、实际只要 320 根"时白做一倍的行级工作 ——
+// 全市场 5441 只 × 每天多遍历 320 根 ≈ 170 万行/天，实测就是数据湖比
+// stockdb 每天多出的那 150ms（stockdb 那条路是 `sliceBars` 二分子切片，不做遍历）。
+//
+// ⚠ 只有 `DailyBars` 能用它：`quoteRange` 要用 `list[len(list)-2]` 推导**前收盘**，
+// 裁掉 start 之前的那一根会让 `start == end` 时前收变成 0。
+func (p *lakeProvider) barsForRange(code string, start, end int) ([]cnlake.BarRow, error) {
+	rows, err := p.barsFor(code, start, end)
+	if err != nil || len(rows) == 0 {
+		return rows, err
+	}
+	from := sort.Search(len(rows), func(i int) bool { return int(rows[i].Date()) >= start })
+	to := sort.Search(len(rows), func(i int) bool { return int(rows[i].Date()) > end })
+	if from >= to {
+		return nil, nil
+	}
+	return rows[from:to], nil
+}
+
+// mergeSortedScored 与 `mergeSortedBars` 同构，用于已组装的 `score.Bar`。
+func mergeSortedScored(have, add []score.Bar) []score.Bar {
+	if len(have) == 0 {
+		return add
+	}
+	if len(add) == 0 {
+		return have
+	}
+	if have[len(have)-1].Date <= add[0].Date {
+		return append(have, add...)
+	}
+	merged := make([]score.Bar, 0, len(have)+len(add))
+	i, j := 0, 0
+	for i < len(have) && j < len(add) {
+		if have[i].Date <= add[j].Date {
+			merged = append(merged, have[i])
+			i++
+		} else {
+			merged = append(merged, add[j])
+			j++
+		}
+	}
+	merged = append(merged, have[i:]...)
+	merged = append(merged, add[j:]...)
+	return merged
+}
+
 // cachedBars 命中批量缓存时返回该股票的日线。
 func (p *lakeProvider) cachedBars(code string, start, end int) ([]cnlake.BarRow, bool) {
 	p.bulkMu.Lock()
@@ -500,7 +603,12 @@ func (p *lakeProvider) cachedBars(code string, start, end int) ([]cnlake.BarRow,
 	return bars, true
 }
 
-// bulkFillAllowed 判断这个区间是否适合批量读（按"区间内的交易日数"算）。
+// bulkFillAllowed 判断这次请求是否**需要**（且可以）走批量读。
+//
+// ⚠ 不再按区间长度拒绝：长度只决定"分几块读"（见 bulkChunkDays），
+// 不决定"读不读"。拒绝的条件只剩两个：
+//   - 现有缓存已经覆盖了这次请求；
+//   - 区间内一个日分区都没有。
 func (p *lakeProvider) bulkFillAllowed(start, end int) bool {
 	p.bulkMu.Lock()
 	covered := p.bulkBars != nil && start >= p.bulkFrom && end <= p.bulkTo
@@ -512,7 +620,78 @@ func (p *lakeProvider) bulkFillAllowed(start, end int) bool {
 	if err != nil {
 		return false
 	}
-	return len(dates) > 0 && len(dates) <= bulkMaxDays
+	return len(dates) > 0
+}
+
+// TrimBulk 丢弃早于 before 的日线，把内存压回"滑动窗口"大小。
+//
+// 回填是**按交易日往前推**的：第 i 天只需要 [D_i-320, D_i]，更早的数据
+// 再也不会被读到。不裁剪的话，970 天的区间会把约 1300 个交易日 × 5500 只
+// 全留在内存里（实测约 600MB）。
+//
+// 语义安全：只丢 `date < before` 的行，而调用方保证 `before` 不晚于
+// 之后任何一次请求的 `start` —— 所以不会丢掉还会被读到的数据。
+func (p *lakeProvider) TrimBulk(before int) {
+	if before <= 0 {
+		return
+	}
+	p.bulkMu.Lock()
+	defer p.bulkMu.Unlock()
+	if p.bulkBars == nil || before <= p.bulkFrom {
+		return
+	}
+	dropped := 0
+	for bare, bars := range p.bulkBars {
+		if len(bars) == 0 {
+			delete(p.bulkBars, bare)
+			continue
+		}
+		// 该股票最新的数据都早于裁剪线 → 整条移除（后续读到它是"无数据"，正确）
+		if int(bars[len(bars)-1].Date()) < before {
+			dropped += len(bars)
+			delete(p.bulkBars, bare)
+			continue
+		}
+		if int(bars[0].Date()) >= before {
+			continue
+		}
+		idx := sort.Search(len(bars), func(i int) bool { return int(bars[i].Date()) >= before })
+		if idx > 0 {
+			dropped += idx
+			// 复制而不是重新切片：重新切片会继续引用整个底层数组，
+			// 那样"裁剪"就省不下内存，等于白做。
+			p.bulkBars[bare] = append([]cnlake.BarRow(nil), bars[idx:]...)
+		}
+	}
+	p.bulkFrom = before
+	slog.Info("数据湖批量缓存裁剪",
+		"before", before, "droppedRows", dropped, "codes", len(p.bulkBars))
+	// bulkScored 必须**同步裁剪**：它和 bulkBars 是同一批数据的两种形态，
+	// 只裁一边会让"已组装缓存"比覆盖区间更宽 —— 那样 `cachedScoredBars`
+	// 会返回已经不在 bulkFrom 之后的数据，而调用方以为那是当前窗口。
+	scoredDropped := 0
+	for bare, bars := range p.bulkScored {
+		if len(bars) == 0 {
+			delete(p.bulkScored, bare)
+			continue
+		}
+		if int(bars[len(bars)-1].Date) < before {
+			scoredDropped += len(bars)
+			delete(p.bulkScored, bare)
+			continue
+		}
+		if int(bars[0].Date) >= before {
+			continue
+		}
+		idx := sort.Search(len(bars), func(i int) bool { return int(bars[i].Date) >= before })
+		if idx > 0 {
+			scoredDropped += idx
+			p.bulkScored[bare] = append([]score.Bar(nil), bars[idx:]...)
+		}
+	}
+	if scoredDropped > 0 {
+		slog.Info("数据湖已组装缓存同步裁剪", "dropped", scoredDropped)
+	}
 }
 
 // fillBulk 把 [start, end] 的**全市场**日线一次读进内存。
@@ -548,27 +727,60 @@ func (p *lakeProvider) fillBulk(start, end int) error {
 		}
 	}
 
-	began := time.Now()
-	rows, err := p.lake.DailyBarsInRange(nil, int64(readFrom), int64(readTo))
+	// **按日分区列表分块读。**
+	//
+	// 块与块之间日期递增且不重叠，所以"每块内部各代码排好序 → 直接 append"
+	// 之后整体仍然有序（quoteRange 依赖这个顺序推导前收盘），
+	// 不需要每块都对全量重排。
+	dates, err := p.lake.DatesInRange(int64(readFrom), int64(readTo))
 	if err != nil {
-		return fmt.Errorf("批量读取数据湖 daily_bars 失败：%w", err)
+		return fmt.Errorf("读取数据湖日分区列表失败：%w", err)
 	}
-
+	if len(dates) == 0 {
+		return fmt.Errorf("区间 %d~%d 内没有日分区", readFrom, readTo)
+	}
 	if p.bulkBars == nil {
 		p.bulkBars = make(map[string][]cnlake.BarRow, 8192)
 	}
-	byCode := p.bulkBars
-	for _, row := range rows {
-		bare := cnlake.BareSymbol(row.Symbol)
-		if bare == "" {
-			continue
-		}
-		byCode[bare] = append(byCode[bare], row)
+	if p.bulkScored == nil {
+		p.bulkScored = make(map[string][]score.Bar, 8192)
 	}
-	// 各代码的行按日期升序（quoteRange 依赖这个顺序推导前收盘）
-	for bare, bars := range byCode {
-		sort.Slice(bars, func(i, j int) bool { return bars[i].TradeDate < bars[j].TradeDate })
-		byCode[bare] = bars
+
+	began := time.Now()
+	totalRows, blocks := 0, 0
+	for offset := 0; offset < len(dates); offset += bulkChunkDays {
+		last := offset + bulkChunkDays
+		if last > len(dates) {
+			last = len(dates)
+		}
+		chunkFrom, chunkTo := int(dates[offset]), int(dates[last-1])
+		blockBegan := time.Now()
+		rows, err := p.lake.DailyBarsInRange(nil, int64(chunkFrom), int64(chunkTo))
+		if err != nil {
+			return fmt.Errorf("批量读取数据湖 daily_bars 失败（%d~%d）：%w", chunkFrom, chunkTo, err)
+		}
+		chunked := make(map[string][]cnlake.BarRow, 8192)
+		for _, row := range rows {
+			bare := cnlake.BareSymbol(row.Symbol)
+			if bare == "" {
+				continue
+			}
+			chunked[bare] = append(chunked[bare], row)
+		}
+		for bare, bars := range chunked {
+			sort.Slice(bars, func(i, j int) bool { return bars[i].TradeDate < bars[j].TradeDate })
+			p.bulkBars[bare] = mergeSortedBars(p.bulkBars[bare], bars)
+			// **同步增量组装 score.Bar**：只组装这一块（1 天或 1 个分块），
+			// 而不是每天把整个窗口重组装一遍。
+			scored := scoredBarsFrom(bars, p.shareHistory(bare))
+			p.bulkScored[bare] = mergeSortedScored(p.bulkScored[bare], scored)
+		}
+		totalRows += len(rows)
+		blocks++
+		slog.Info("数据湖批量读分块完成",
+			"read", fmt.Sprintf("%d~%d", chunkFrom, chunkTo),
+			"codes", len(chunked), "rows", len(rows),
+			"elapsed", time.Since(blockBegan).Round(time.Millisecond))
 	}
 
 	if p.bulkBars == nil || !p.bulkFilled {
@@ -585,7 +797,7 @@ func (p *lakeProvider) fillBulk(start, end int) error {
 	slog.Info("数据湖批量读完成",
 		"read", fmt.Sprintf("%d~%d", readFrom, readTo),
 		"covered", fmt.Sprintf("%d~%d", p.bulkFrom, p.bulkTo),
-		"codes", len(byCode), "rows", len(rows),
+		"blocks", blocks, "codes", len(p.bulkBars), "rows", totalRows,
 		"elapsed", time.Since(began).Round(time.Millisecond))
 	return nil
 }
@@ -1019,35 +1231,19 @@ func (p *lakeProvider) clearCaches() {
 // DailyBars：只要 OHLCV 的轻量路径
 // ---------------------------------------------------------------------------
 
-// DailyBars 直接读数据湖的 BarRow，**不组装 Quote**。
+// scoredBarsFrom 把已按日期升序的原始日线组装成 `score.Bar`。
 //
-// 组件 Quote 的每根成本实测 26.2µs，而这里只搬 7 个字段 —— 这是回填
-// 从 30 秒级降下来的关键。过滤与排序规则与 barsFromQuotes 保持一致。
-func (p *lakeProvider) DailyBars(ctx context.Context, code string, start, end int) ([]score.Bar, error) {
-	if end <= 0 {
-		end = 20991231
-	}
-	if start <= 0 {
-		start = 19900101
-	}
-
-	rows, err := p.barsFor(code, start, end)
-	if err != nil {
-		return nil, err
-	}
-	// 股本结构与 quoteRange 走同一份缓存（shareHistory 内部只读一次数据集）
-	shares := p.shareHistory(cnlake.BareSymbol(code))
-
+// **必须只有这一份实现**：`DailyBars` 的即时路径与 `fillBulk` 的增量缓存
+// 都调它，否则"过滤规则/换手率算法"两处会漂移，而这种漂移是静默的
+// （同一只票走缓存与不走缓存算出不同的评分）。
+func scoredBarsFrom(rows []cnlake.BarRow, shares []cnlake.ShareStructureRow) []score.Bar {
 	bars := make([]score.Bar, 0, len(rows))
 	for _, row := range rows {
-		date := row.Date()
-		if date < int64(start) || date > int64(end) {
-			continue
-		}
 		// 与 barsFromQuotes 一致：收盘价无效的行不要
 		if row.Close <= 0 {
 			continue
 		}
+		date := row.Date()
 		// **换手率必须算出来** —— 评分里 `TurnRankPct` 用的是全市场换手率排名，
 		// 少了它结果会变。算法与 buildQuote **逐字一致**：
 		//   Turnover = round(Volume / FloatShare * 100, 4)，FloatShare<=0 时为 0。
@@ -1069,7 +1265,64 @@ func (p *lakeProvider) DailyBars(ctx context.Context, code string, start, end in
 	if !sort.SliceIsSorted(bars, func(i, j int) bool { return bars[i].Date < bars[j].Date }) {
 		sort.Slice(bars, func(i, j int) bool { return bars[i].Date < bars[j].Date })
 	}
-	return bars, nil
+	return bars
+}
+
+// cachedScoredBars 从"已组装的批量缓存"里按区间切一段。
+//
+// ok=false 表示缓存没覆盖这个区间（调用方需要先填充）；ok=true 且返回空
+// 表示"覆盖了、但这只票在该区间没有有效数据"——这与 `cachedBars` 的语义一致。
+func (p *lakeProvider) cachedScoredBars(code string, start, end int) ([]score.Bar, bool) {
+	p.bulkMu.Lock()
+	defer p.bulkMu.Unlock()
+	if p.bulkScored == nil || start < p.bulkFrom || end > p.bulkTo {
+		return nil, false
+	}
+	bars := p.bulkScored[cnlake.BareSymbol(code)]
+	if len(bars) == 0 {
+		return nil, true
+	}
+	from := sort.Search(len(bars), func(i int) bool { return int(bars[i].Date) >= start })
+	to := sort.Search(len(bars), func(i int) bool { return int(bars[i].Date) > end })
+	if from >= to {
+		return nil, true
+	}
+	return bars[from:to], true
+}
+
+// DailyBars 直接读数据湖的 BarRow，**不组装 Quote**。
+//
+// 组件 Quote 的每根成本实测 26.2µs，而这里只搬 7 个字段 —— 这是回填
+// 从 30 秒级降下来的关键。过滤与排序规则与 barsFromQuotes 保持一致。
+func (p *lakeProvider) DailyBars(ctx context.Context, code string, start, end int) ([]score.Bar, error) {
+	if end <= 0 {
+		end = 20991231
+	}
+	if start <= 0 {
+		start = 19900101
+	}
+
+	// **先试"已组装的批量缓存"。**
+	//
+	// 原来这里每天都要把窗口内每根行重新组装一遍（查股本算换手率 + 建结构体）：
+	// 全市场 5441 只 × 320 根 ≈ 174 万行/天，实测就是数据湖比 stockdb
+	// 每天多出的约 110ms（stockdb 那条路是 `sliceBars` 二分子切片，零行级工作）。
+	// 数据湖是按日分区**增量**读的，所以组装也可以增量做（见 fillBulk）。
+	if bars, ok := p.cachedScoredBars(code, start, end); ok {
+		return bars, nil
+	}
+
+	rows, err := p.barsForRange(code, start, end)
+	if err != nil {
+		return nil, err
+	}
+	// 填充之后应当已经覆盖 —— 再试一次，命中就完全不必逐行组装
+	if bars, ok := p.cachedScoredBars(code, start, end); ok {
+		return bars, nil
+	}
+	// 股本结构与 quoteRange 走同一份缓存（shareHistory 内部只读一次数据集）
+	shares := p.shareHistory(cnlake.BareSymbol(code))
+	return scoredBarsFrom(rows, shares), nil
 }
 
 // DailyBars 对 free-stockdb 走原路径再剥字段。
