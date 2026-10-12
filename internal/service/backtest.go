@@ -121,7 +121,7 @@ func (s *PortfolioService) CreateBacktest(req BacktestRequest) (runResult *Backt
 	loadStrengthElapsed := time.Since(phaseBegan)
 
 	phaseBegan = time.Now()
-	days, codes, scopeErrors := s.buildStrengthDays(store, strengths, item)
+	days, codes, scopeErrors, readyByDate := s.buildStrengthDays(store, strengths, item)
 	if len(days) == 0 {
 		return nil, fmt.Errorf("回测区间内没有可用的评分交易日")
 	}
@@ -132,6 +132,22 @@ func (s *PortfolioService) CreateBacktest(req BacktestRequest) (runResult *Backt
 		"评分行数", len(strengths), "交易日", len(days), "代码数", len(codes),
 		"读评分", loadStrengthElapsed.Round(time.Millisecond),
 		"组装评分日", buildDaysElapsed.Round(time.Millisecond))
+
+	// **覆盖率要在最前面就提示**，不能等回测跑完（那要几分钟）。
+	//
+	// 用户实际踩过：跑 4 年区间（968 个交易日），而评分表只有 243 天 ——
+	// 前 3 年没有候选、整天空仓（逐月净值平在 100000），收益自然"远不如原版"。
+	// 结果里的 `scope_warning` 也会带这条（前端 `BacktestView.vue:352` 用 ⚠ 渲染），
+	// 但那是**跑完**才出现，所以这里先写一条日志。
+	if wantDays, err := s.tradingDates(req.StartDate, req.EndDate); err == nil && len(wantDays) > 0 {
+		if missing := len(wantDays) - len(days); missing*5 >= len(wantDays) {
+			slog.Warn("⚠ 评分覆盖不完整：缺的那些交易日不会产生任何交易（引擎整天空仓）",
+				"区间交易日", len(wantDays), "评分覆盖", len(days),
+				"缺失", missing,
+				"缺失占比", fmt.Sprintf("%.0f%%", float64(missing)*100/float64(len(wantDays))),
+				"建议", "对完整区间执行一次「全量重算区间」后再跑，否则无法与原版对比")
+		}
+	}
 
 	// ①.5 **按整个区间贴一次信号**（原版 portfolio_service.py:1004
 	// `scope_history = self._attach_signal_candidates(scope_history, start_date, end_date)`
@@ -252,7 +268,7 @@ func (s *PortfolioService) CreateBacktest(req BacktestRequest) (runResult *Backt
 			indexGates = s.stock.lowBuyIndexGatesForRange(dates)
 		}
 	}
-	buildPlan := s.backtestPlanBuilder(item, store, marketStateByDate(store, days), targetCount, maxStocks, indexGates)
+	buildPlan := s.backtestPlanBuilder(item, store, marketStateByDate(store, days), targetCount, maxStocks, indexGates, readyByDate)
 	// ★ 评分日与价格日**必须有交集**，否则整个回测一条计划都产不出来。
 	//
 	// 原实现直接抛错（portfolio_service.py:1011-1018
@@ -312,7 +328,7 @@ func (s *PortfolioService) CreateBacktest(req BacktestRequest) (runResult *Backt
 	// 初始资金已在组装 cfg 时定好（回落到 100000），这里直接用 ——
 	// 引擎与指标、落库三处必须是同一个数。
 	metrics := backtest.CalculateMetrics(result.Snapshots, result.Trades, cfg.InitialCapital)
-	metrics.ScopeWarning = s.backtestScopeWarning(codes, len(result.Trades), days)
+	metrics.ScopeWarning = s.backtestScopeWarning(codes, len(result.Trades), days, req.StartDate, req.EndDate)
 
 	// ⑤ 落库
 	runID := portfolio.NewBacktestRunID()
@@ -419,7 +435,7 @@ func (s *PortfolioService) DeleteBacktest(runID string) error {
 // 那些日期回测不会生成新计划（原实现同样要求评分日与价格日都有）。
 func (s *PortfolioService) buildStrengthDays(
 	store *portfolio.Store, strengths []portfolio.StrengthRow, pf portfolio.Portfolio,
-) ([]backtest.StrengthDay, []string, []string) {
+) ([]backtest.StrengthDay, []string, []string, map[string]int) {
 	byDate := map[string][]score.Row{}
 	marketByDate := map[string]string{}
 	var order []string
@@ -435,6 +451,36 @@ func (s *PortfolioService) buildStrengthDays(
 	// 所以这次提前解析只是顺手去掉 125 万次 JSON 反序列化（真实但不大的收益），
 	// **不是**"回测慢"的根因。真正定位靠下面的分阶段计时。
 	scope := portfolio.ParseScopeValue(pf.ScopeValueJSON)
+
+	// **低吸广度就绪数：在范围过滤之前、全市场上数**（原版口径）。
+	//
+	// 原实现（`portfolio_service.py:1841-1853`）是在 `market_df` 上数的 ——
+	// 那是 `apply_strategy_scores` **之前**的全市场行情帧，**与组合范围无关**：
+	//
+	//	low_buy_ready_mask = (close>ma60) & (ma20>ma60) & (close>0) & (ma60>0)
+	//	low_buy_breadth = target_df.groupby("trade_date")["_low_buy_ready"].sum()
+	//
+	// 而 Go 回测原来数的是 `day.Rows` —— **已经被组合范围过滤过**的行。
+	// 用户的范围是「主板+创业板」时，科创板/北交所被剔掉，就绪数偏低
+	// → 落到更低的档位（档位是 1000/1500/2000/2600）
+	// → 动态目标只数更小 → 仓位更小 → 收益系统性偏低。
+	//
+	// ⚠ 而且 Go 的**实盘**路径走的是 SQL `Store.LowBuyBreadthReadyCount`
+	//（不带范围过滤），与本来的回测口径**互相矛盾** —— 同一个组合，
+	// 实盘和回测会给出不同的目标只数。统一到"过滤前"之后两边一致，也与原版一致。
+	readyByDate := map[string]int{}
+	for _, row := range strengths {
+		// ⚠ 还要套**全市场股票集白名单**（原版 `_load_market_frame` 的代码前缀正则，
+		// portfolio_service.py:1256-1258）：**不含北交所（920）**，
+		// 也**不含新版创业板代码段 302**（实测库里 302 有 243 行、920 有 62379 行）。
+		// 只排除 `market=="bse"` 是不够的 —— 302 的 market 是 chinext，仍会被算进来。
+		if !portfolio.IsAShareBareCode(row.Code) {
+			continue
+		}
+		if row.Close > 0 && row.Ma60 > 0 && row.Close > row.Ma60 && row.Ma20 > row.Ma60 {
+			readyByDate[fmt.Sprintf("%d", row.TradeDate)]++
+		}
+	}
 
 	for _, row := range strengths {
 		if !inScopeFieldsParsed(row.Code, row.Industry, row.Market, pf.ScopeType, scope, matcher) {
@@ -468,7 +514,7 @@ func (s *PortfolioService) buildStrengthDays(
 		}
 	}
 	sort.Strings(codeList)
-	return days, codeList, nil
+	return days, codeList, nil, readyByDate
 }
 
 // loadBacktestBars 并发取区间内每只股票的日线。
@@ -571,6 +617,7 @@ func (s *PortfolioService) loadBacktestBars(codes []string, start, end int) ([]b
 func (s *PortfolioService) backtestPlanBuilder(
 	item portfolio.Portfolio, store *portfolio.Store, states map[string]string,
 	targetCount, maxStocks int, indexGates map[string]score.LowBuyIndexGate,
+	readyByDate map[string]int,
 ) backtest.PlanBuilder {
 	return func(held []score.Row, day backtest.StrengthDay) score.RotationPlan {
 		marketState := day.MarketState
@@ -602,7 +649,13 @@ func (s *PortfolioService) backtestPlanBuilder(
 		// 原实现把它挂在每一行上（portfolio_rotation_logic.py:2044），
 		// 所以候选池过滤（dd20 档位）与建仓额度都要用它 ——
 		// **必须在建候选池之前写进 cfg**。
-		breadthReady := lowBuyBreadthReadyCountOf(day.Rows)
+		// **优先用"范围过滤前的全市场"那一份**（原版口径，见 `buildStrengthDays`
+		// 里 `readyByDate` 的注释）。只有查不到该日时才回落到按当日候选行现算
+		//（现算是**范围内**的，会比原版偏小，所以只作兜底）。
+		breadthReady, ok := readyByDate[day.Date]
+		if !ok {
+			breadthReady = lowBuyBreadthReadyCountOf(day.Rows)
+		}
 
 		cfg := score.BuildStrategyConfig(
 			item.StrategyID, marketState,
@@ -677,6 +730,7 @@ func (s *PortfolioService) backtestPlanBuilder(
 // 改了才是偏离。只把"样本不够"这件事明确讲出来。
 func (s *PortfolioService) backtestScopeWarning(
 	codes []string, trades int, days []backtest.StrengthDay,
+	startDate, endDate int,
 ) string {
 	// ---- ① 评分表"每天只覆盖一小段"的检测：各日行数差异悬殊 ----
 	//
@@ -700,6 +754,39 @@ func (s *PortfolioService) backtestScopeWarning(
 				"广度类判定按**全市场**统计，样本偏了会恒判「广度不足」→ 清仓且不开新仓 → 回测零成交。"+
 				"请把「回填股票数」填 0（全市场）并对区间执行一次「全量重算区间」。",
 			thinDays, minRows, maxRows)
+	}
+
+	// ---- ② 评分表"根本没有覆盖这段日期"的检测 ----
+	//
+	// ⚠ 这一条是**用户实际踩到的坑**：他跑 4 年回测（968 个交易日），
+	// 而评分表只有最后 243 天（20251009 起）—— 前 3 年一个评分行都没有，
+	// 于是引擎那 3 年**每天都没有候选、一直空仓**（逐月净值平在 100000.0），
+	// 收益自然"远不如原版"（原版从自己的数据源现算，全程有评分）。
+	//
+	// 上面那条 `strengthRowSpread` 只看"某些天行数偏少"，**发现不了日期缺失**，
+	// 所以这里单独比一次：请求区间的交易日数 vs 评分表实际覆盖的交易日数。
+	if covered := len(days); covered > 0 {
+		want := 0
+		if list, err := s.tradingDates(startDate, endDate); err == nil {
+			want = len(list)
+		}
+		if want > 0 && covered < want {
+			missing := want - covered
+			// 只在缺得多的时候报（少量缺失可能是停牌/新股上市，属正常）
+			if missing*5 >= want { // 缺 20% 以上
+				coverageWarning := fmt.Sprintf(
+					"回测区间内共 %d 个交易日，但评分表只覆盖 %d 天（缺 %d 天，%.0f%%）"+
+						"——缺的那些交易日**不会产生任何交易**（没有评分就没有候选，引擎整天空仓）。"+
+						"如果你在与原版对比收益，先对**完整区间**执行一次「全量重算区间」再跑，"+
+						"否则两边不是同一段持仓期。",
+					want, covered, missing,
+					float64(missing)*100/float64(want))
+				if thinWarning != "" {
+					thinWarning += " "
+				}
+				thinWarning += coverageWarning
+			}
+		}
 	}
 
 	if s.stock == nil || len(codes) == 0 {

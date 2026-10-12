@@ -2,9 +2,12 @@
 /**
  * 板块热力图（ECharts treemap）。
  *
- * 面积 = 成交额，颜色 = 涨跌幅。用 treemap 而不是树图/柱图，
+ * 面积 = 当日成交额，颜色 = **所选周期**的涨跌幅。用 treemap 而不是树图/柱图，
  * 是因为它能在有限空间里同时表达「体量」和「涨跌」两个维度，
  * 这也是行情软件里板块页的通行做法。
+ *
+ * 面积固定用当日成交额（体量是"当前热度"，不该随回看周期变化），
+ * 颜色跟着周期走 —— 所以换周期时方块的大小不变、颜色整体换一套。
  */
 import { onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
 import { BarChart3 } from "@lucide/vue";
@@ -13,9 +16,10 @@ import { TreemapChart } from "echarts/charts";
 import { TooltipComponent } from "echarts/components";
 import { CanvasRenderer } from "echarts/renderers";
 
-import type { BoardQuote } from "@/lib/backend";
+import type { BoardPeriodWindow, BoardQuote } from "@/lib/backend";
 import { formatAmount, formatPercent } from "@/lib/format";
 import { heatColor, heatTextColor } from "@/lib/heat";
+import { DEFAULT_BOARD_PERIOD, periodLabel, periodPct, periodWindow, periodWindowText } from "@/lib/boardPeriod";
 
 echarts.use([TreemapChart, TooltipComponent, CanvasRenderer]);
 
@@ -23,6 +27,10 @@ const props = defineProps<{
   boards: BoardQuote[];
   /** 最多显示多少个板块（按成交额取前 N） */
   limit?: number;
+  /** 颜色按哪个周期着色（交易日；1 = 当日） */
+  periodDays?: number;
+  /** 各周期的日历窗口（用于悬停提示） */
+  windows?: BoardPeriodWindow[];
 }>();
 
 const emit = defineEmits<{ select: [BoardQuote] }>();
@@ -31,11 +39,56 @@ const container = ref<HTMLElement | null>(null);
 const chart = shallowRef<echarts.ECharts | null>(null);
 let observer: ResizeObserver | null = null;
 
+/** 当前着色用的周期（默认 5 日） */
+function days(): number {
+  return props.periodDays ?? DEFAULT_BOARD_PERIOD;
+}
+
+/** 板块在着色周期上的涨跌幅；undefined 表示这个周期算不出来（显示「—」）。 */
+function pctValue(board: BoardQuote): number | undefined {
+  return periodPct(board, days());
+}
+
+/** 着色用的数值：算不出来时按 0（中性色），提示与标签里会显示「—」。 */
+function pct(board: BoardQuote): number {
+  return pctValue(board) ?? 0;
+}
+
+/** 标签上的涨跌幅：算不出来时必须是「—」，否则 0% 会被读成"没涨没跌"。 */
+function pctText(board: BoardQuote): string {
+  const value = pctValue(board);
+  return value === undefined ? "—" : formatPercent(value);
+}
+
 /** 实际参与渲染的板块：按成交额取前 N，太小的板块在热力图里只是噪声 */
 function visibleBoards(): BoardQuote[] {
   const limit = props.limit ?? 60;
   const sorted = [...props.boards].sort((a, b) => b.amount - a.amount);
   return sorted.slice(0, limit);
+}
+
+function tooltipOf(board: BoardQuote): string {
+  const period = days();
+  const value = periodPct(board, period);
+  const label = periodLabel(period);
+  const color = value === undefined || value === 0 ? "#a1a1aa" : value > 0 ? "#ef4444" : "#22c55e";
+  const window = period === 1 ? undefined : periodWindow(props.windows, period);
+  const leader = (period === 1 ? board.leader : board.periods?.find((item) => item.days === period)?.leader) ?? board.leader;
+  const leaderText = leader?.name
+    ? `${leader.name} <b style="color:#ef4444">${formatPercent(leader.pctChg)}</b>`
+    : "—";
+
+  const rows = [
+    `<div style="font-weight:600;margin-bottom:4px">${board.name}</div>`,
+    `<div>${label} <b style="color:${color}">${value === undefined ? "—" : formatPercent(value)}</b>　当日 <b>${formatPercent(board.pctChg)}</b></div>`,
+    `<div>当日成交额 <b>${formatAmount(board.amount)}</b>　换手 ${board.turnover.toFixed(2)}%</div>`,
+    `<div>成分 <b>${board.memberCount}</b> 只　当日涨/跌 <b style="color:#ef4444">${board.upCount}</b>/<b style="color:#22c55e">${board.downCount}</b></div>`,
+    `<div>区间领涨 ${leaderText}</div>`,
+  ];
+  if (window) {
+    rows.push(`<div style="color:#a1a1aa;margin-top:4px">${periodWindowText(window)}</div>`);
+  }
+  return rows.join("");
 }
 
 function buildOption(): echarts.EChartsCoreOption {
@@ -50,17 +103,7 @@ function buildOption(): echarts.EChartsCoreOption {
       formatter: (info: { data?: { board?: BoardQuote } }) => {
         const board = info.data?.board;
         if (!board) return "";
-        const color = board.pctChg > 0 ? "#ef4444" : board.pctChg < 0 ? "#22c55e" : "#a1a1aa";
-        const leader = board.leader?.name
-          ? `${board.leader.name} <b style="color:#ef4444">${formatPercent(board.leader.pctChg)}</b>`
-          : "—";
-        return [
-          `<div style="font-weight:600;margin-bottom:4px">${board.name}</div>`,
-          `<div>加权涨跌 <b style="color:${color}">${formatPercent(board.pctChg)}</b>　等权 ${formatPercent(board.pctChgEqual)}</div>`,
-          `<div>成交额 <b>${formatAmount(board.amount)}</b>　换手 ${board.turnover.toFixed(2)}%</div>`,
-          `<div>成分 <b>${board.memberCount}</b> 只　涨/跌 <b style="color:#ef4444">${board.upCount}</b>/<b style="color:#22c55e">${board.downCount}</b></div>`,
-          `<div>领涨 ${leader}</div>`,
-        ].join("");
+        return tooltipOf(board);
       },
     },
     series: [
@@ -82,7 +125,7 @@ function buildOption(): echarts.EChartsCoreOption {
           formatter: (params: { data?: { board?: BoardQuote } }) => {
             const board = params.data?.board;
             if (!board) return "";
-            return `{name|${board.name}}\n{pct|${formatPercent(board.pctChg)}}`;
+            return `{name|${board.name}}\n{pct|${pctText(board)}}`;
           },
           rich: {
             name: { fontSize: 12, fontWeight: 600, lineHeight: 16 },
@@ -96,10 +139,10 @@ function buildOption(): echarts.EChartsCoreOption {
           value: Math.max(board.amount, 1),
           board,
           itemStyle: {
-            color: heatColor(board.pctChg),
+            color: heatColor(pct(board)),
             borderColor: "#18181b",
           },
-          label: { color: heatTextColor(board.pctChg) },
+          label: { color: heatTextColor(pct(board)) },
         })),
       },
     ],
@@ -138,6 +181,9 @@ onBeforeUnmount(() => {
 
 watch(() => props.boards, render, { deep: false });
 watch(() => props.limit, render);
+// 换周期只换颜色与提示，方块面积（当日成交额）不变
+watch(() => props.periodDays, render);
+watch(() => props.windows, render, { deep: false });
 </script>
 
 <template>
@@ -151,6 +197,7 @@ watch(() => props.limit, render);
       v-if="boards.length > (limit ?? 60)"
       class="text-muted-foreground pointer-events-none absolute right-3 bottom-2 text-[11px]"
     >
+      面积＝当日成交额，颜色＝{{ periodLabel(periodDays ?? DEFAULT_BOARD_PERIOD) }}涨跌幅；
       按成交额显示前 {{ limit ?? 60 }} 个板块（共 {{ boards.length }} 个）
     </p>
   </div>

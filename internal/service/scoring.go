@@ -446,6 +446,16 @@ func (s *ScoringService) loadScoreInputs(provider Provider, codes []string, star
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 
+	// **跳过原因计数**（诊断"某些交易日只评出极少数股票"用）。
+	//
+	// 症状：某段交易日 `scored=146 skipped=5675`，而批量缓存里明明有数据。
+	// 跳过只有下面三个分支，计数之后一眼能分辨是哪一类：
+	//   skipEmpty —— 取数为空：**取数路径问题**（缓存/数据源）
+	//   skipShort —— 根数 < 30：**预热窗口不够**（早期交易日算不出均线）
+	//   skipInd   —— 指标算不出来：数据质量问题
+	var skipEmpty, skipShort, skipInd, skipErr int
+	shortSamples := make([]string, 0, 8)
+
 	workers := scoreWorkers
 	if workers > len(codes) {
 		workers = len(codes)
@@ -463,14 +473,30 @@ func (s *ScoringService) loadScoreInputs(provider Provider, codes []string, star
 				// 99% 花在这上面。DailyBars 只搬 7 个字段。
 				bars, err := provider.DailyBars(ctx, item.code, start, end)
 				if err != nil || len(bars) == 0 {
+					mu.Lock()
+					if err != nil {
+						skipErr++
+					} else {
+						skipEmpty++
+					}
+					mu.Unlock()
 					continue
 				}
 				if len(bars) < 30 {
 					// 数据太短的股票算不出有意义的指标
+					mu.Lock()
+					skipShort++
+					if len(shortSamples) < 8 {
+						shortSamples = append(shortSamples, fmt.Sprintf("%s(%d根)", item.code, len(bars)))
+					}
+					mu.Unlock()
 					continue
 				}
 				ind, ok := score.ComputeIndicators(bars)
 				if !ok {
+					mu.Lock()
+					skipInd++
+					mu.Unlock()
 					continue
 				}
 				prevHigh := score.PrevHigh60(bars)
@@ -503,6 +529,17 @@ func (s *ScoringService) loadScoreInputs(provider Provider, codes []string, star
 	}
 	close(jobs)
 	wg.Wait()
+
+	// **一行汇总把"为什么跳过"说清楚**（只在与取数区间相关的场景才有价值，
+	// 所以只在真的跳过了不少票时才打，避免刷屏）。
+	if skipped := skipEmpty + skipShort + skipInd + skipErr; skipped > 0 && skipped*5 >= len(codes) {
+		slog.Warn("⚠ 取数阶段跳过了大量股票（这就是「某些交易日只评出极少数股票」的来源）",
+			"请求区间", fmt.Sprintf("%d~%d", start, end),
+			"请求只数", len(codes), "成功", len(results), "跳过", skipped,
+			"取数为空", skipEmpty, "根数<30", skipShort,
+			"指标算不出", skipInd, "取数报错", skipErr,
+			"短样本示例", shortSamples)
+	}
 	return results
 }
 

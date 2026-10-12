@@ -5,6 +5,8 @@ import type {
   BoardFilter,
   BoardInfo,
   BoardMemberQuote,
+  BoardPeriodStat,
+  BoardPeriodWindow,
   BoardQuote,
   BoardQuoteResult,
   DataLakeInfo,
@@ -122,6 +124,8 @@ export type {
   BoardFilter,
   BoardInfo,
   BoardMemberQuote,
+  BoardPeriodStat,
+  BoardPeriodWindow,
   BoardQuote,
   BoardQuoteResult,
   DataLakeInfo,
@@ -194,9 +198,14 @@ export const api = {
   getBoardCategories: () =>
     StockService.GetBoardCategories() as Promise<BoardCategoryInfo[]>,
   getBoards: (category: string) => StockService.GetBoards(category) as Promise<BoardInfo[]>,
-  /** 板块行情：由成分股行情在后端聚合，口径见 internal/service/board.go */
-  getBoardQuotes: (category: string, limit = 0) =>
-    StockService.GetBoardQuotes(category, limit) as Promise<BoardQuoteResult | null>,
+  /**
+   * 板块行情：由成分股行情在后端聚合，口径见 internal/service/board.go 与 board_period.go。
+   *
+   * periodDays 是区间周期（交易日数，如 5/10/15/30/60），空数组时后端用默认周期。
+   * 1 日不是区间周期 —— 它是「当日」，数据在 BoardQuote 的当日字段里。
+   */
+  getBoardQuotes: (category: string, periodDays: number[] = [], limit = 0) =>
+    StockService.GetBoardQuotes(category, periodDays, limit) as Promise<BoardQuoteResult | null>,
   getBoardMembers: (code: string) =>
     StockService.GetBoardMembers(code) as Promise<BoardMemberQuote[]>,
   getDataSources: () => StockService.GetDataSources() as Promise<DataSourceInfo[]>,

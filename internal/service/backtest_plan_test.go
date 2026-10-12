@@ -204,8 +204,12 @@ func TestBacktestPlanBuilderProducesLowBuyAdds(t *testing.T) {
 	}
 
 	// ① 闸门齐备（=修复后的回测路径）：必须产出 add
+	//
+	// 最后一个参数是"范围过滤前的全市场低吸就绪数"（按交易日）。
+	// 这里传 nil → 走按当日候选行现算的兜底路径（本用例的 `day` 里
+	// 已经带了足够多的就绪行）。
 	withGates := svc.backtestPlanBuilder(item, nil, nil, 5, 5,
-		map[string]score.LowBuyIndexGate{day.Date: readyGate})(nil, day)
+		map[string]score.LowBuyIndexGate{day.Date: readyGate}, nil)(nil, day)
 	if countAdds(withGates.Rows) == 0 {
 		t.Errorf("闸门齐备时应产出 add，实际计划 %d 行：%+v", len(withGates.Rows), withGates.Rows)
 	}
@@ -225,7 +229,7 @@ func TestBacktestPlanBuilderProducesLowBuyAdds(t *testing.T) {
 
 	// ② 不喂闸门（=修复前的回测路径）：必须**出不来** add
 	//    这条断言就是"组合回测结果恒为 0"的最小复现。
-	withoutGates := svc.backtestPlanBuilder(item, nil, nil, 5, 5, nil)(nil, day)
+	withoutGates := svc.backtestPlanBuilder(item, nil, nil, 5, 5, nil, nil)(nil, day)
 	if countAdds(withoutGates.Rows) != 0 {
 		t.Errorf("不喂低吸闸门时不应产出 add（此前回测就是这样恒为 0 的），实际 %+v",
 			withoutGates.Rows)

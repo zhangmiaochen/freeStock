@@ -567,11 +567,18 @@ func (s *Store) LoadStrengthForCodes(tradeDate int64, strategyID string, codes [
 //
 // ⚠ 口径差异：这里是在**已物化的评分表**上数（受 RefreshStrength 的 limit 截断），
 // 原实现是在全市场评分帧上数。limit 越小这个数越偏小，低吸越容易被误判为广度不足。
+//
+// ⚠ **样本集必须与回测完全一致**：原版的全市场帧套了一道代码前缀白名单
+// （`_load_market_frame`，portfolio_service.py:1256-1258），**不含北交所（920）
+// 与新版创业板代码段 302**。回测侧（`buildStrengthDays` 的 `readyByDate`）
+// 用的是 `IsAShareBareCode`，这里用同一份名单的 SQL 形式 `ASharePrefixSQL` ——
+// 两边否则会给出不同的就绪数，同一个组合的实盘建议与回测结果就会互相矛盾。
 func (s *Store) LowBuyBreadthReadyCount(tradeDate int64, strategyID string) (int, error) {
 	var count int
 	err := s.db.QueryRow(`
 		SELECT COUNT(*) FROM stock_strength
 		WHERE trade_date=? AND strategy_id=?
+		  AND substr(ts_code,1,3) IN (`+ASharePrefixSQL+`)
 		  AND close_price > 0 AND ma60_price > 0
 		  AND close_price > ma60_price AND ma20_price > ma60_price`,
 		tradeDate, strategyID,

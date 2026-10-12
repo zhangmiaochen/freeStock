@@ -156,6 +156,14 @@ type StockService struct {
 	boards   []stockdb.Board
 	boardsAt time.Time
 
+	// 板块区间行情用的"一批股票 × 一段区间"日线缓存（见 board_period.go）。
+	//
+	// ⚠ **不在这里加锁清空**：`ClearCache` 可能被一次十几秒的取数堵住，
+	// 而切换数据源必须立刻返回（见 ClearCache 的说明）。
+	// 作废交给 cache 里的 `gen`（数据源代次）判断。
+	periodMu    sync.Mutex
+	periodCache *boardPeriodCache
+
 	// 搜索索引（代码/名称/拼音/首字母），随股票列表一起失效
 	indexMu       sync.Mutex
 	searchIdx     []searchEntry
@@ -520,6 +528,13 @@ func (s *StockService) ClearCache() {
 		s.universe = nil
 		s.universeAt = time.Time{}
 		s.universeMu.Unlock()
+	}
+
+	// 区间日线缓存可能很大（一次全市场 × 一段区间），顺手释放；
+	// 拿不到锁说明正在取数，那份缓存的 gen 已经过期，下次构建时会被替换。
+	if s.periodMu.TryLock() {
+		s.periodCache = nil
+		s.periodMu.Unlock()
 	}
 
 	s.boardsMu.Lock()

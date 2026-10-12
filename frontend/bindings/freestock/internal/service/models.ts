@@ -1054,6 +1054,148 @@ export class BoardMemberQuote {
 }
 
 /**
+ * BoardPeriodStat 是一个板块在某个周期内的行情。
+ */
+export class BoardPeriodStat {
+    "days": number;
+
+    /**
+     * PctChg 是流通市值加权区间涨跌幅 %，PctChgEqual 是等权区间涨跌幅 %。
+     */
+    "pctChg": number;
+    "pctChgEqual": number;
+    "upCount": number;
+    "downCount": number;
+    "flatCount": number;
+
+    /**
+     * QuotedCount 是**能算出这个区间涨跌幅**的成分数：它需要成分股在区间起点
+     * 之前就有行情。次新股 / 区间内一直停牌 / 未同步的成分会被排除在外，
+     * 所以它与 MemberCount 不等是正常的，界面要能看出差在哪。
+     */
+    "quotedCount": number;
+    "memberCount": number;
+
+    /**
+     * Leader / Laggard 是区间涨跌幅最高 / 最低的成分股（PctChg 是**区间**涨跌幅）。
+     */
+    "leader": BoardMemberQuote | null;
+    "laggard": BoardMemberQuote | null;
+
+    /** Creates a new BoardPeriodStat instance. */
+    constructor($$source: Partial<BoardPeriodStat> = {}) {
+        if (!("days" in $$source)) {
+            this["days"] = 0;
+        }
+        if (!("pctChg" in $$source)) {
+            this["pctChg"] = 0;
+        }
+        if (!("pctChgEqual" in $$source)) {
+            this["pctChgEqual"] = 0;
+        }
+        if (!("upCount" in $$source)) {
+            this["upCount"] = 0;
+        }
+        if (!("downCount" in $$source)) {
+            this["downCount"] = 0;
+        }
+        if (!("flatCount" in $$source)) {
+            this["flatCount"] = 0;
+        }
+        if (!("quotedCount" in $$source)) {
+            this["quotedCount"] = 0;
+        }
+        if (!("memberCount" in $$source)) {
+            this["memberCount"] = 0;
+        }
+        if (!("leader" in $$source)) {
+            this["leader"] = null;
+        }
+        if (!("laggard" in $$source)) {
+            this["laggard"] = null;
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new BoardPeriodStat instance from a string or object.
+     */
+    static createFrom($$source: any = {}): BoardPeriodStat {
+        const $$createField8_0 = $$createType23;
+        const $$createField9_0 = $$createType23;
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        if ("leader" in $$parsedSource) {
+            $$parsedSource["leader"] = $$createField8_0($$parsedSource["leader"]);
+        }
+        if ("laggard" in $$parsedSource) {
+            $$parsedSource["laggard"] = $$createField9_0($$parsedSource["laggard"]);
+        }
+        return new BoardPeriodStat($$parsedSource as Partial<BoardPeriodStat>);
+    }
+}
+
+/**
+ * BoardPeriodWindow 是一个周期的日历窗口。它与具体板块无关（只由交易日历决定），
+ * 所以放在结果这一层，全部分类共用。
+ * 
+ * 为什么要单独一层：某个板块可能一个成分都算不出区间涨跌幅（全是次新股/停牌），
+ * 界面仍然需要知道这个周期的起止日期来给出表头与提示。
+ */
+export class BoardPeriodWindow {
+    "days": number;
+    "label": string;
+
+    /**
+     * BaseDate 是基准日：区间起点的**前一个交易日**，区间涨跌幅以它的收盘价为基准。
+     */
+    "baseDate": number;
+    "startDate": number;
+    "endDate": number;
+
+    /**
+     * Available 为 false 表示历史交易日不够这个周期（例如数据源只同步了最近 20 天）。
+     */
+    "available": boolean;
+    "message": string;
+
+    /** Creates a new BoardPeriodWindow instance. */
+    constructor($$source: Partial<BoardPeriodWindow> = {}) {
+        if (!("days" in $$source)) {
+            this["days"] = 0;
+        }
+        if (!("label" in $$source)) {
+            this["label"] = "";
+        }
+        if (!("baseDate" in $$source)) {
+            this["baseDate"] = 0;
+        }
+        if (!("startDate" in $$source)) {
+            this["startDate"] = 0;
+        }
+        if (!("endDate" in $$source)) {
+            this["endDate"] = 0;
+        }
+        if (!("available" in $$source)) {
+            this["available"] = false;
+        }
+        if (!("message" in $$source)) {
+            this["message"] = "";
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new BoardPeriodWindow instance from a string or object.
+     */
+    static createFrom($$source: any = {}): BoardPeriodWindow {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new BoardPeriodWindow($$parsedSource as Partial<BoardPeriodWindow>);
+    }
+}
+
+/**
  * BoardQuote 是一个板块的行情聚合结果。
  */
 export class BoardQuote {
@@ -1107,6 +1249,16 @@ export class BoardQuote {
      */
     "laggard": BoardMemberQuote | null;
 
+    /**
+     * Periods 是这个板块在各**区间周期**上的行情，顺序与请求的周期一致（升序）。
+     * 
+     * 为什么放在板块上而不是结果这一层：每个板块的区间行情都不一样，
+     * 而周期列表是全分类共用的（见 BoardQuoteResult.Periods）。
+     * 算不出的周期**不会**出现在这里（例如 5 日有、60 日因为上市太短没有），
+     * 界面按 Days 去找，找不到就显示「—」，而不是显示 0%。
+     */
+    "periods": BoardPeriodStat[];
+
     /** Creates a new BoardQuote instance. */
     constructor($$source: Partial<BoardQuote> = {}) {
         if (!("code" in $$source)) {
@@ -1157,6 +1309,9 @@ export class BoardQuote {
         if (!("laggard" in $$source)) {
             this["laggard"] = null;
         }
+        if (!("periods" in $$source)) {
+            this["periods"] = [];
+        }
 
         Object.assign(this, $$source);
     }
@@ -1167,12 +1322,16 @@ export class BoardQuote {
     static createFrom($$source: any = {}): BoardQuote {
         const $$createField14_0 = $$createType23;
         const $$createField15_0 = $$createType23;
+        const $$createField16_0 = $$createType79;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("leader" in $$parsedSource) {
             $$parsedSource["leader"] = $$createField14_0($$parsedSource["leader"]);
         }
         if ("laggard" in $$parsedSource) {
             $$parsedSource["laggard"] = $$createField15_0($$parsedSource["laggard"]);
+        }
+        if ("periods" in $$parsedSource) {
+            $$parsedSource["periods"] = $$createField16_0($$parsedSource["periods"]);
         }
         return new BoardQuote($$parsedSource as Partial<BoardQuote>);
     }
@@ -1194,6 +1353,23 @@ export class BoardQuoteResult {
      */
     "boardCount": number;
     "boards": BoardQuote[];
+
+    /**
+     * Periods 是本次请求实际算出来的区间周期（交易日数，升序）。
+     * 界面直接用它渲染"多周期对比"的表头，不必自己记请求里传了什么。
+     */
+    "periods": number[];
+
+    /**
+     * Windows 与 Periods 一一对应，给出每个周期的基准日与起止日（全分类共用）。
+     */
+    "windows": BoardPeriodWindow[];
+
+    /**
+     * PeriodNotice 非空表示**区间行情整体没算出来**（日行情仍然有效），
+     * 例如历史日线没同步。界面据此提示，而不是显示一屏 0%。
+     */
+    "periodNotice": string;
     "upBoards": number;
     "downBoards": number;
     "flatBoards": number;
@@ -1225,6 +1401,15 @@ export class BoardQuoteResult {
         if (!("boards" in $$source)) {
             this["boards"] = [];
         }
+        if (!("periods" in $$source)) {
+            this["periods"] = [];
+        }
+        if (!("windows" in $$source)) {
+            this["windows"] = [];
+        }
+        if (!("periodNotice" in $$source)) {
+            this["periodNotice"] = "";
+        }
         if (!("upBoards" in $$source)) {
             this["upBoards"] = 0;
         }
@@ -1255,9 +1440,17 @@ export class BoardQuoteResult {
      */
     static createFrom($$source: any = {}): BoardQuoteResult {
         const $$createField3_0 = $$createType25;
+        const $$createField4_0 = $$createType82;
+        const $$createField5_0 = $$createType81;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("boards" in $$parsedSource) {
             $$parsedSource["boards"] = $$createField3_0($$parsedSource["boards"]);
+        }
+        if ("periods" in $$parsedSource) {
+            $$parsedSource["periods"] = $$createField4_0($$parsedSource["periods"]);
+        }
+        if ("windows" in $$parsedSource) {
+            $$parsedSource["windows"] = $$createField5_0($$parsedSource["windows"]);
         }
         return new BoardQuoteResult($$parsedSource as Partial<BoardQuoteResult>);
     }
@@ -4301,3 +4494,8 @@ const $$createType74 = $Create.Array($$createType73);
 const $$createType75 = StockItem.createFrom;
 const $$createType76 = $Create.Array($$createType75);
 const $$createType77 = config$0.UpdatePrefs.createFrom;
+const $$createType78 = BoardPeriodStat.createFrom;
+const $$createType79 = $Create.Array($$createType78);
+const $$createType80 = BoardPeriodWindow.createFrom;
+const $$createType81 = $Create.Array($$createType80);
+const $$createType82 = $Create.Array($Create.Any);

@@ -56,6 +56,14 @@ type BoardQuote struct {
 
 	Leader  *BoardMemberQuote `json:"leader"`  // 领涨股
 	Laggard *BoardMemberQuote `json:"laggard"` // 领跌股
+
+	// Periods 是这个板块在各**区间周期**上的行情，顺序与请求的周期一致（升序）。
+	//
+	// 为什么放在板块上而不是结果这一层：每个板块的区间行情都不一样，
+	// 而周期列表是全分类共用的（见 BoardQuoteResult.Periods）。
+	// 算不出的周期**不会**出现在这里（例如 5 日有、60 日因为上市太短没有），
+	// 界面按 Days 去找，找不到就显示「—」，而不是显示 0%。
+	Periods []BoardPeriodStat `json:"periods"`
 }
 
 // BoardQuoteResult 是某个分类下全部板块的行情快照。
@@ -66,6 +74,15 @@ type BoardQuoteResult struct {
 	// BoardCount 是板块总数（Boards 可能被 limit 截断）
 	BoardCount int          `json:"boardCount"`
 	Boards     []BoardQuote `json:"boards"`
+
+	// Periods 是本次请求实际算出来的区间周期（交易日数，升序）。
+	// 界面直接用它渲染"多周期对比"的表头，不必自己记请求里传了什么。
+	Periods []int `json:"periods"`
+	// Windows 与 Periods 一一对应，给出每个周期的基准日与起止日（全分类共用）。
+	Windows []BoardPeriodWindow `json:"windows"`
+	// PeriodNotice 非空表示**区间行情整体没算出来**（日行情仍然有效），
+	// 例如历史日线没同步。界面据此提示，而不是显示一屏 0%。
+	PeriodNotice string `json:"periodNotice,omitempty"`
 
 	UpBoards    int     `json:"upBoards"`
 	DownBoards  int     `json:"downBoards"`
@@ -86,10 +103,16 @@ type BoardQuoteResult struct {
 
 // GetBoardQuotes 按分类聚合板块行情。category 为空时聚合全部板块。
 //
+// periodDays 是要额外计算的**区间周期**（交易日数，如 5/10/15/30/60 或自定义），
+// 由 NormalizeBoardPeriods 去重、升序、限幅（2 ~ 250）；传空则用 DefaultBoardPeriods。
+// 注意 1 日不是区间周期 —— 它就是「当日」，走成分股当日行情那条路
+//（BoardQuote 上的 PctChg / Amount / Turnover / UpCount…），不重复计算。
+//
 // limit > 0 时只返回涨跌幅绝对值最大的前 limit 个（概念板块有近千个，
 // 全量返回对界面没意义），但统计数字仍按全量计算。
-func (s *StockService) GetBoardQuotes(category string, limit int) (*BoardQuoteResult, error) {
+func (s *StockService) GetBoardQuotes(category string, periodDays []int, limit int) (*BoardQuoteResult, error) {
 	started := time.Now()
+	periods := NormalizeBoardPeriods(periodDays)
 
 	boards, err := s.loadBoards()
 	if err != nil {
@@ -103,15 +126,30 @@ func (s *StockService) GetBoardQuotes(category string, limit int) (*BoardQuoteRe
 
 	// 成分股行情索引：板块聚合要按代码反复查，必须先建索引
 	quotes := make(map[string]StockItem, len(universe.Stocks))
+	latest := make(map[string]float64, len(universe.Stocks))
 	for _, item := range universe.Stocks {
 		if item.HasQuote {
 			quotes[item.Code] = item
+		}
+		if item.Close > 0 {
+			latest[item.Code] = item.Close
 		}
 	}
 
 	result := &BoardQuoteResult{
 		Category:  category,
 		TradeDate: universe.TradeDate,
+		Periods:   periods,
+	}
+
+	// 区间行情需要回看历史日线。取不到时**不整页失败**：
+	// 当日行情照样给（那是内存里就有的数据），只是没有区间列。
+	index, periodErr := s.boardPeriodData(periods, int(universe.TradeDate), latest)
+	if periodErr != nil {
+		slog.Warn("板块区间行情不可用，仅返回当日行情", "err", periodErr)
+		result.PeriodNotice = periodErr.Error()
+	} else {
+		result.Windows = index.windows
 	}
 
 	all := make([]BoardQuote, 0, len(boards))
@@ -121,7 +159,14 @@ func (s *StockService) GetBoardQuotes(category string, limit int) (*BoardQuoteRe
 			continue
 		}
 		memberTotal += len(board.Symbols)
-		all = append(all, aggregateBoard(board, quotes))
+		quote := aggregateBoard(board, quotes)
+		if index != nil {
+			quote.Periods = make([]BoardPeriodStat, 0, len(periods))
+			for _, days := range periods {
+				quote.Periods = append(quote.Periods, aggregateBoardPeriod(board, quotes, index, days))
+			}
+		}
+		all = append(all, quote)
 	}
 
 	result.BoardCount = len(all)

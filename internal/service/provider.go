@@ -60,9 +60,35 @@ type Provider interface {
 	// 语义必须与 `barsFromQuotes(DailyHistory(...))` **完全一致**：
 	// 同样按 [start, end] 过滤、同样丢弃 Close<=0 的行、同样按日期升序。
 	DailyBars(ctx context.Context, code string, start, end int) ([]score.Bar, error)
+	// TradingDates 返回 [start, end] 内的**交易日**（升序）。
+	//
+	// 板块区间行情要用它把"N 个交易日"折算成具体日期：
+	// 周期是按交易日算的，而取数窗口是自然日，中间隔着周末与长假。
+	TradingDates(ctx context.Context, start, end int) ([]int, error)
+	// ClosesBefore 批量取"若干交易日 → 代码 → 收盘价"，语义是**不晚于该日**的最近一根。
+	//
+	// 为什么是"不晚于"而不是"等于"：停牌股在基准日往往没有成交，
+	// 而区间涨跌幅要用它停牌前的价格作基准（行情软件的通行口径）。
+	// 完全没有数据的代码不会出现在结果里。
+	//
+	// **为什么不直接给"一段区间的全部日线"**：free-stockdb 的区间查询会把
+	// 每条记录的 21 个字段全返回（实测 106 个交易日 = 34KB/只，全市场约 190MB，
+	// 16 秒），而它真正便宜的原语是**点查询**（约 320 字节/只，7500 只 1 秒）。
+	// 于是这里要的正好是点查询能给的东西：几个日期上的收盘价。
+	ClosesBefore(ctx context.Context, codes []string, dates []int) (map[int]map[string]float64, error)
 	DividendFactors(ctx context.Context, code string) ([]stockdb.Factor, error)
 	MoneyFlowRange(ctx context.Context, code string, start, end int) ([]stockdb.MoneyFlow, error)
 	Boards(ctx context.Context) ([]stockdb.Board, error)
+}
+
+// miniBar 是只保留**区间计算**所需字段的日线（日期 / 收盘）。
+//
+// 为什么单独一个类型：板块的「最近 N 个交易日涨跌幅」只需要基准日与最新日的收盘价。
+// 数据湖那条路一次扫全市场几十万行，用 `stockdb.Quote` 会多解码 18 个字段、
+// 多组装一次股本/换手率，每行多花的时间会直接乘上百万倍。
+type miniBar struct {
+	Date  int64
+	Close float64
 }
 
 // ---------------------------------------------------------------------------
@@ -172,6 +198,106 @@ func (p *stockdbProvider) QuoteRangeDesc(ctx context.Context, code string, start
 
 func (p *stockdbProvider) DailyHistory(ctx context.Context, code string, start, end int) ([]*stockdb.Quote, error) {
 	return p.client.DailyHistory(ctx, code, start, end)
+}
+
+// TradingDates 用两只"从不停牌"的活跃股票推断交易日历。
+//
+// free-stockdb 没有交易日历表，而 `keys 日k key:000001 N` 能一次拿回该股全部日期键。
+// 取两只并集是为了防止某一天恰好只有其中一只停牌 —— 那样周期边界会整体错一天。
+func (p *stockdbProvider) TradingDates(ctx context.Context, start, end int) ([]int, error) {
+	seen := make(map[int]struct{}, 512)
+	var lastErr error
+
+	for _, code := range tradeDateProbes {
+		list, err := p.client.QuoteRangeDesc(ctx, code, start, end)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		for _, quote := range list {
+			if quote == nil {
+				continue
+			}
+			date := int(quote.Date)
+			if date < start || date > end {
+				continue
+			}
+			seen[date] = struct{}{}
+		}
+	}
+
+	if len(seen) == 0 {
+		if lastErr != nil {
+			return nil, fmt.Errorf("读取 %d~%d 的交易日失败：%w", start, end, lastErr)
+		}
+		return nil, fmt.Errorf("在 %d~%d 内没有找到任何交易日（日 K 数据可能未同步）", start, end)
+	}
+
+	dates := make([]int, 0, len(seen))
+	for date := range seen {
+		dates = append(dates, date)
+	}
+	sort.Ints(dates)
+	return dates, nil
+}
+
+// closesLookbackDays 是"某天没成交时往前找最近一根"的回看自然日数。
+//
+// 与 `QuotePoint` 的窗口一致（长期停牌的票找不到基准价时，它这个周期就不参与统计，
+// 覆盖率会如实反映出来）。
+const closesLookbackDays = 120
+
+// ClosesBefore 对每个交易日做一次**点查询**批量取回收盘价。
+//
+// 为什么不是区间查询：free-stockdb 的区间查询会把每条记录的 21 个字段全返回，
+// 实测 106 个交易日 = 34KB/只（全市场 190MB、16 秒），而点查询只有 320 字节
+//（7500 只 1 秒）。周期只需要几个日期上的收盘价，点查询正好。
+func (p *stockdbProvider) ClosesBefore(ctx context.Context, codes []string, dates []int) (map[int]map[string]float64, error) {
+	out := make(map[int]map[string]float64, len(dates))
+	if len(codes) == 0 || len(dates) == 0 {
+		return out, nil
+	}
+
+	var lastErr error
+	for _, date := range dates {
+		quotes, err := p.LatestQuotes(ctx, codes, date)
+		if err != nil {
+			lastErr = err
+		}
+
+		byCode := make(map[string]float64, len(quotes))
+		for code, quote := range quotes {
+			if quote != nil && quote.Close > 0 {
+				byCode[code] = quote.Close
+			}
+		}
+
+		// 该日没有记录的（停牌 / 未上市 / 退市）：回溯取"不晚于该日的最近一根"。
+		// 区间查询是倒序的，第一条就是最近的一根。
+		misses := make([]string, 0, 64)
+		for _, code := range codes {
+			if _, ok := byCode[code]; !ok {
+				misses = append(misses, code)
+			}
+		}
+		if len(misses) > 0 {
+			windowStart := shiftBack(date, closesLookbackDays)
+			var mu sync.Mutex
+			runWorkers(ctx, fallbackWorkers, len(misses), func(i int) {
+				list, err := p.client.QuoteRangeDesc(ctx, misses[i], windowStart, date)
+				if err != nil || len(list) == 0 || list[0] == nil || list[0].Close <= 0 {
+					return
+				}
+				mu.Lock()
+				byCode[misses[i]] = list[0].Close
+				mu.Unlock()
+			})
+		}
+
+		out[date] = byCode
+		slog.Debug("基准日收盘价就绪", "date", date, "codes", len(byCode), "misses", len(misses))
+	}
+	return out, lastErr
 }
 
 func (p *stockdbProvider) DividendFactors(ctx context.Context, code string) ([]stockdb.Factor, error) {
@@ -439,6 +565,102 @@ func (p *lakeProvider) QuoteRangeDesc(ctx context.Context, code string, start, e
 
 func (p *lakeProvider) DailyHistory(ctx context.Context, code string, start, end int) ([]*stockdb.Quote, error) {
 	return p.quoteRange(code, start, end, false)
+}
+
+// TradingDates 直接读数据湖的日分区目录名（`trade_date=2026-10-09`）。
+//
+// ⚠ 数据湖的 `trading_calendar` 是**预生成**的，可能跑在 K 线前面
+//（见 provider.go 顶部关于数据缺口的说明），所以这里用"实际有日线的日期"
+//（`DatesInRange` 读的就是 daily_bars 的分区），而不是日历表 ——
+// 否则周期基准日会落到一个还没有行情的日期上。
+func (p *lakeProvider) TradingDates(ctx context.Context, start, end int) ([]int, error) {
+	if start <= 0 {
+		start = 19900101
+	}
+	if end <= 0 {
+		end = 20991231
+	}
+	dates, err := p.lake.DatesInRange(int64(start), int64(end))
+	if err != nil {
+		return nil, fmt.Errorf("读取数据湖日分区列表失败：%w", err)
+	}
+	out := make([]int, 0, len(dates))
+	for _, date := range dates {
+		out = append(out, int(date))
+	}
+	return out, nil
+}
+
+// ClosesBefore 一次扫完区间内的日分区，再对每个基准日取"不晚于该日的最后一根"。
+//
+// 数据湖与 free-stockdb 的取数成本结构**正好相反**：它按交易日分区，
+// 所以"一批股票 × 一段区间"只该扫一遍分区（实测 250 个交易日全市场约 1.5 秒），
+// 而逐只按代码读会把同一批分区重复打开几千次（1.75 秒/只）。
+func (p *lakeProvider) ClosesBefore(ctx context.Context, codes []string, dates []int) (map[int]map[string]float64, error) {
+	out := make(map[int]map[string]float64, len(dates))
+	if len(codes) == 0 || len(dates) == 0 {
+		return out, nil
+	}
+
+	// 区间要往前留出"停牌兜底"的余量：基准日当天没成交的票要往前找
+	sorted := append([]int(nil), dates...)
+	sort.Ints(sorted)
+	from := shiftBack(sorted[0], closesLookbackDays)
+
+	bars, err := p.dailyBarsMulti(codes, from, sorted[len(sorted)-1])
+	if err != nil {
+		return nil, err
+	}
+
+	for _, date := range dates {
+		out[date] = make(map[string]float64, len(codes))
+	}
+	for code, list := range bars {
+		for _, date := range sorted {
+			idx := sort.Search(len(list), func(i int) bool { return list[i].Date > int64(date) })
+			if idx == 0 {
+				continue // 该日之前这根票还没有数据
+			}
+			out[date][code] = list[idx-1].Close
+		}
+	}
+	return out, nil
+}
+
+// dailyBarsMulti 一次扫完区间内的日分区，取回这一批股票的收盘价序列。
+//
+// `cnlake.Lake.DailyBarsInRange` 返回的行按 (交易日, 代码) 升序，
+// 所以同一只股票内部天然按日期升序 —— 不需要再排序。
+func (p *lakeProvider) dailyBarsMulti(codes []string, start, end int) (map[string][]miniBar, error) {
+	if start <= 0 {
+		start = 19900101
+	}
+	if end <= 0 {
+		end = 20991231
+	}
+
+	rows, err := p.lake.DailyBarsInRange(codes, int64(start), int64(end))
+	if err != nil {
+		return nil, fmt.Errorf("读取数据湖 daily_bars 失败：%w", err)
+	}
+
+	out := make(map[string][]miniBar, len(codes))
+	for _, row := range rows {
+		// 与 barsFromQuotes / scoredBarsFrom 一致：收盘价无效的行不要
+		if row.Close <= 0 {
+			continue
+		}
+		date := row.Date()
+		if date < int64(start) || date > int64(end) {
+			continue
+		}
+		bare := cnlake.BareSymbol(row.Symbol)
+		if bare == "" {
+			continue
+		}
+		out[bare] = append(out[bare], miniBar{Date: date, Close: row.Close})
+	}
+	return out, nil
 }
 
 // buildQuote 把一根 K 线 + 估值 + 股本组装成行情。
@@ -732,6 +954,18 @@ func (p *lakeProvider) fillBulk(start, end int) error {
 	// 块与块之间日期递增且不重叠，所以"每块内部各代码排好序 → 直接 append"
 	// 之后整体仍然有序（quoteRange 依赖这个顺序推导前收盘），
 	// 不需要每块都对全量重排。
+	// **诊断日志**：把"请求区间 / 已有覆盖 / 实际要补的段"完整打出来。
+	//
+	// 为什么需要：`cachedBars` 在"缓存覆盖了、但这只票没数据"时会返回
+	// `(nil, true)` —— 调用方把 5800 只票**瞬间**判成"无数据"（实测 7.7µs/只，
+	// 每天 45ms，`scored=146 skipped=5675`）。那说明**覆盖标记被推到了
+	// 实际没有读到数据的地方**，而推进覆盖标记的只有下面两条路。
+	// 这条日志 + 空段分支那条 Warn 一起，能把"哪次调用推坏的"直接指出来。
+	slog.Info("数据湖批量读开始",
+		"请求", fmt.Sprintf("%d~%d", start, end),
+		"已有覆盖", fmt.Sprintf("%d~%d(filled=%v)", p.bulkFrom, p.bulkTo, p.bulkFilled),
+		"要补的段", fmt.Sprintf("%d~%d", readFrom, readTo))
+
 	dates, err := p.lake.DatesInRange(int64(readFrom), int64(readTo))
 	if err != nil {
 		return fmt.Errorf("读取数据湖日分区列表失败：%w", err)
@@ -760,6 +994,7 @@ func (p *lakeProvider) fillBulk(start, end int) error {
 		//
 		// 正确语义：把覆盖区间推进到请求的区间（"这里没有数据"也是一个有效答案，
 		// `cachedBars` 对缓存覆盖范围内查不到的股票返回"无数据"），然后返回。
+		before := fmt.Sprintf("%d~%d", p.bulkFrom, p.bulkTo)
 		if !p.bulkFilled {
 			p.bulkFrom, p.bulkTo = readFrom, readTo
 			p.bulkFilled = true
@@ -771,9 +1006,15 @@ func (p *lakeProvider) fillBulk(start, end int) error {
 				p.bulkTo = readTo
 			}
 		}
-		slog.Info("数据湖批量读：该段没有日分区，直接推进覆盖区间",
-			"read", fmt.Sprintf("%d~%d", readFrom, readTo),
-			"covered", fmt.Sprintf("%d~%d", p.bulkFrom, p.bulkTo))
+		// ⚠ 这条 Warn 是**诊断用**：它一旦出现，就说明"覆盖标记被推进到了
+		// 一个没有读到任何数据的区间" —— 之后 5800 只票会被 `cachedBars`
+		// 以 7.7µs/只的速度**瞬间**判成"无数据"（症状：`scored=146 skipped=5675`）。
+		// 把 before/after 与请求区间都打出来，就能定位是哪次调用推坏的。
+		slog.Warn("⚠ 数据湖批量读：该段没有日分区，却推进了覆盖区间（后续会被判成「无数据」）",
+			"请求区间", fmt.Sprintf("%d~%d", start, end),
+			"要补的段", fmt.Sprintf("%d~%d", readFrom, readTo),
+			"覆盖(前)", before,
+			"覆盖(后)", fmt.Sprintf("%d~%d", p.bulkFrom, p.bulkTo))
 		return nil
 	}
 
@@ -830,6 +1071,17 @@ func (p *lakeProvider) fillBulk(start, end int) error {
 		"covered", fmt.Sprintf("%d~%d", p.bulkFrom, p.bulkTo),
 		"blocks", blocks, "codes", len(p.bulkBars), "rows", totalRows,
 		"elapsed", time.Since(began).Round(time.Millisecond))
+
+	// **诊断**：区间里有日分区、却一行都没读出来 —— 这同样是"覆盖标记被推进到
+	// 没有数据的地方"的信号（会让后续所有代码被判成「无数据」）。
+	// 正常读取绝不会 0 行：日分区存在就意味着里面有行。
+	if totalRows == 0 {
+		slog.Warn("⚠ 数据湖批量读读到 0 行，却推进了覆盖区间（后续会被判成「无数据」）",
+			"请求区间", fmt.Sprintf("%d~%d", start, end),
+			"实际读的段", fmt.Sprintf("%d~%d", readFrom, readTo),
+			"分区块数", blocks, "分区数", len(dates),
+			"覆盖(后)", fmt.Sprintf("%d~%d", p.bulkFrom, p.bulkTo))
+	}
 	return nil
 }
 

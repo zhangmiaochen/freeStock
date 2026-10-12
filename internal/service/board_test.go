@@ -165,7 +165,7 @@ func TestGetBoardQuotesMarksOverlap(t *testing.T) {
 	requireLocalServer(t, svc)
 
 	// 申万一级是层级分类：每只股票只属于一个一级行业
-	industry, err := svc.GetBoardQuotes("申万一级", 0)
+	industry, err := svc.GetBoardQuotes("申万一级", nil, 0)
 	if err != nil {
 		t.Fatalf("申万一级聚合失败: %v", err)
 	}
@@ -174,7 +174,7 @@ func TestGetBoardQuotesMarksOverlap(t *testing.T) {
 	}
 
 	// 概念是多对多
-	concept, err := svc.GetBoardQuotes("概念", 0)
+	concept, err := svc.GetBoardQuotes("概念", nil, 0)
 	if err != nil {
 		t.Fatalf("概念聚合失败: %v", err)
 	}
@@ -195,7 +195,7 @@ func TestGetBoardQuotesAgainstLocalServer(t *testing.T) {
 	svc := newLocalService()
 	requireLocalServer(t, svc)
 
-	result, err := svc.GetBoardQuotes("申万一级", 0)
+	result, err := svc.GetBoardQuotes("申万一级", nil, 0)
 	if err != nil {
 		t.Fatalf("GetBoardQuotes 失败: %v", err)
 	}
@@ -245,11 +245,11 @@ func TestGetBoardQuotesLimit(t *testing.T) {
 	svc := newLocalService()
 	requireLocalServer(t, svc)
 
-	full, err := svc.GetBoardQuotes("申万一级", 0)
+	full, err := svc.GetBoardQuotes("申万一级", nil, 0)
 	if err != nil {
 		t.Fatalf("失败: %v", err)
 	}
-	limited, err := svc.GetBoardQuotes("申万一级", 5)
+	limited, err := svc.GetBoardQuotes("申万一级", nil, 5)
 	if err != nil {
 		t.Fatalf("失败: %v", err)
 	}
@@ -274,7 +274,7 @@ func TestGetBoardMembersAgainstLocalServer(t *testing.T) {
 	svc := newLocalService()
 	requireLocalServer(t, svc)
 
-	result, err := svc.GetBoardQuotes("申万一级", 0)
+	result, err := svc.GetBoardQuotes("申万一级", nil, 0)
 	if err != nil || len(result.Boards) == 0 {
 		t.Fatalf("拿不到板块: %v", err)
 	}
