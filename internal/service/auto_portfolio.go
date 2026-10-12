@@ -164,6 +164,31 @@ func (s *PortfolioService) CreateAutoPortfolio(req AutoPortfolioRequest) (*AutoP
 	result.PortfolioID = created.ID
 	result.PositionCount = written
 	result.Message = fmt.Sprintf("自动组合已创建，初始持仓 %d 只", written)
+
+	// **创建后立刻重建组合视图**（原实现 portfolio_service.py:444
+	// `built = self._rebuild_portfolio_view(pid, trade_date, latest_scores=...)`）。
+	//
+	// 原版这一步会覆盖写四张留档表：`portfolio_score_snapshot` /
+	// `portfolio_candidate_snapshot` / `rotation_signal` / `hold_compare`。
+	// Go 的等价物就是 `BuildPlan`（它末尾调 `savePlanSnapshots`）。
+	//
+	// 少了它，新组合在这四张表里**一行都没有** —— 用户不点一次"调仓建议"
+	// 就查不到"系统当时建议过什么"，事后无法对账。
+	// 而且此时持仓已落库，所以重建出来的是"带初始持仓"的那一版，
+	// 与创建前那次预演（空持仓）不是同一个快照。
+	//
+	// ⚠ 失败**不回滚、也不返回错误**：持仓已经写成功，
+	// 因为留档失败就让用户以为创建失败是错的。原实现是同一次调用里抛错，
+	// 但本项目的既有约定是"落档失败只记日志"（见 `BuildPlan` 里那句注释）。
+	if rebuilt, err := s.BuildPlan(created.ID); err != nil {
+		slog.Warn("自动组合创建后重建视图失败（持仓已写入，仅缺留档）",
+			"portfolio", created.ID, "err", err)
+	} else {
+		slog.Info("自动组合创建后已重建视图",
+			"portfolio", created.ID, "tradeDate", rebuilt.StrengthDate,
+			"candidates", len(rebuilt.Candidates), "rotationRows", len(rebuilt.Plan.Rows))
+	}
+
 	slog.Info("自动组合已创建",
 		"portfolio", created.ID, "strategy", created.StrategyID,
 		"positions", written, "tradeDate", ctx.tradeDate)
@@ -254,9 +279,9 @@ func (s *PortfolioService) buildAutoCompose(req AutoPortfolioRequest) (*autoComp
 	for _, strength := range all {
 		rowsIn = append(rowsIn, strengthToRow(strength))
 	}
-	// 第三个返回值是**截断前**的候选数（原版 `candidate_count = len(candidate_pool)`，
+	// 第三个返回值是**截断前**的完整池（原版 `candidate_count = len(candidate_pool)`，
 	// 用的是完整池而不是 `candidate_ranked`）。
-	candidates, universeScores, candidateCount := s.buildCandidatePoolFrom(store, rowsIn, item, cfg, nil)
+	candidates, universeScores, fullPool := s.buildCandidatePoolFrom(store, rowsIn, item, cfg, nil)
 	plan := score.BuildRotationPlan(score.RotationInput{
 		Holdings: nil, Candidates: candidates, Config: cfg,
 		MarketState: state, MaxStockLimit: item.MaxStockCount,
@@ -337,7 +362,7 @@ func (s *PortfolioService) buildAutoCompose(req AutoPortfolioRequest) (*autoComp
 		PortfolioScore: round4(portfolioScore),
 		HealthLabel:    HealthLabel(portfolioScore),
 		PositionCount:  len(selected),
-		CandidateCount: candidateCount,
+		CandidateCount: len(fullPool),
 		AddCount:       len(selected),
 		ActionBrief:    fmt.Sprintf("自动生成 %d 只初始持仓", len(selected)),
 		PortfolioType:  item.Type, PortfolioTypeLabel: item.TypeLabel,
@@ -346,7 +371,7 @@ func (s *PortfolioService) buildAutoCompose(req AutoPortfolioRequest) (*autoComp
 	return &autoComposeContext{
 		tradeDate: int(strengthDate), item: item, snapshot: snapshot,
 		selected: selected, candidates: candidates, rotation: plan.Rows,
-		candidateCount: candidateCount,
+		candidateCount: len(fullPool),
 	}, nil
 }
 

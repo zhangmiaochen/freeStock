@@ -107,6 +107,10 @@ func (s *PortfolioService) CreateBacktest(req BacktestRequest) (runResult *Backt
 	}
 
 	// ① 区间内的评分（回测的前提：先做过历史回填）
+	//
+	// ⚠ 下面这些阶段计时是**为了定位"回测很慢"**加的：单看总耗时分不清
+	// 是取评分、贴信号、拉日线、还是引擎逐日跑计划慢。跑一次看日志即可。
+	phaseBegan := time.Now()
 	strengths, err := store.LoadStrengthRange(item.StrategyID, int64(req.StartDate), int64(req.EndDate))
 	if err != nil {
 		return nil, err
@@ -114,11 +118,20 @@ func (s *PortfolioService) CreateBacktest(req BacktestRequest) (runResult *Backt
 	if len(strengths) == 0 {
 		return nil, fmt.Errorf("回测区间内没有历史评分数据，请先执行历史回填")
 	}
+	loadStrengthElapsed := time.Since(phaseBegan)
 
+	phaseBegan = time.Now()
 	days, codes, scopeErrors := s.buildStrengthDays(store, strengths, item)
 	if len(days) == 0 {
 		return nil, fmt.Errorf("回测区间内没有可用的评分交易日")
 	}
+	buildDaysElapsed := time.Since(phaseBegan)
+
+	slog.Info("回测阶段耗时（前半）",
+		"评分区间", fmt.Sprintf("%d~%d", req.StartDate, req.EndDate),
+		"评分行数", len(strengths), "交易日", len(days), "代码数", len(codes),
+		"读评分", loadStrengthElapsed.Round(time.Millisecond),
+		"组装评分日", buildDaysElapsed.Round(time.Millisecond))
 
 	// ①.5 **按整个区间贴一次信号**（原版 portfolio_service.py:1004
 	// `scope_history = self._attach_signal_candidates(scope_history, start_date, end_date)`
@@ -133,9 +146,17 @@ func (s *PortfolioService) CreateBacktest(req BacktestRequest) (runResult *Backt
 	//     全相等 → 平局时选出的票与原版不同；
 	//   - `is_strong_stock_for_layering` 的信号分支走不到 → 少加一层。
 	//
-	// 一次贴整个区间（而不是逐日查库）与原版一致：merge_asof 是**逐行**的，
-	// 只要候选集与日历覆盖整个区间，逐日贴与整段贴结果相同，但只需两次查询。
+	// 一次取整个区间的候选 + 日历，**按 20 天分块**贴（分块而不是整段摊平、
+	// 也不是逐日，理由见 `attachSignalsToDays` 的注释）。
+	attachBegan := time.Now()
 	days = s.attachSignalsToDays(store, days)
+	attachedRows := 0
+	for _, day := range days {
+		attachedRows += len(day.Rows)
+	}
+	slog.Info("回测阶段耗时（贴信号）",
+		"交易日", len(days), "行数", attachedRows,
+		"elapsed", time.Since(attachBegan).Round(time.Millisecond))
 
 	// ② 日线价格（区间内涉及的全部代码）
 	//
@@ -245,10 +266,45 @@ func (s *PortfolioService) CreateBacktest(req BacktestRequest) (runResult *Backt
 				"请先对同一区间执行历史回填，或确认数据源的交易日历一致",
 			len(days), distinctBarDates(bars), req.StartDate, req.EndDate)
 	}
-	result, err := engine.Run(buildPlan)
+	// 引擎逐日跑计划 —— 这一步**过去没有任何日志**，250 天跑起来界面上
+	// 就是"卡住不动"，分不清是在跑还是死了。所以在这里按天打印进度与单日耗时，
+	// 既能看进度，也能一眼定位"是不是某一天的计划特别慢"。
+	runBegan := time.Now()
+	plansBuilt := 0
+	innerBuildPlan := buildPlan
+	if innerBuildPlan != nil {
+		innerBuildPlan = func(held []score.Row, day backtest.StrengthDay) score.RotationPlan {
+			dayBegan := time.Now()
+			out := buildPlan(held, day)
+			plansBuilt++
+			if elapsed := time.Since(dayBegan); elapsed > 3*time.Second {
+				slog.Warn("回测单日计划耗时偏长",
+					"tradeDate", day.Date, "rows", len(day.Rows),
+					"elapsed", elapsed.Round(time.Millisecond))
+			}
+			if plansBuilt%25 == 0 {
+				total := time.Since(runBegan)
+				slog.Info("回测进度",
+					"已跑交易日", plansBuilt, "共", len(days),
+					"累计", total.Round(time.Second),
+					"单日均值", (total / time.Duration(plansBuilt)).Round(time.Millisecond))
+			}
+			return out
+		}
+	}
+	result, err := engine.Run(innerBuildPlan)
 	if err != nil {
 		return nil, fmt.Errorf("回测执行失败：%w", err)
 	}
+	slog.Info("回测引擎跑完",
+		"交易日", len(days), "计划次数", plansBuilt,
+		"elapsed", time.Since(runBegan).Round(time.Millisecond),
+		"单日均值", func() time.Duration {
+			if plansBuilt == 0 {
+				return 0
+			}
+			return (time.Since(runBegan) / time.Duration(plansBuilt)).Round(time.Millisecond)
+		}())
 	if len(result.Snapshots) == 0 {
 		return nil, fmt.Errorf(
 			"回测区间内没有可用的交易日（区间 %d~%d），没有产生任何净值曲线", req.StartDate, req.EndDate)
@@ -368,9 +424,20 @@ func (s *PortfolioService) buildStrengthDays(
 	marketByDate := map[string]string{}
 	var order []string
 	matcher := s.scopeMatcher()
+	// 范围值解析提到循环外。
+	//
+	// ⚠ 更正一条**我写错的归因**：我一度把"组装评分日"测得 380ms/1485 行
+	// 说成是"每行一次 JSON 反序列化、外推 1 年要 5 分钟"。**那是算错了** ——
+	// 把 380ms 当成了按行成本。实测把 `ParseScopeValue` 提到循环外之后，
+	// 这一项**仍然是 382ms**：这 380ms 是 `s.scopeMatcher()` 首次构建匹配器
+	//（加载行业/成员数据集）的**一次性**开销，与行数无关。
+	//
+	// 所以这次提前解析只是顺手去掉 125 万次 JSON 反序列化（真实但不大的收益），
+	// **不是**"回测慢"的根因。真正定位靠下面的分阶段计时。
+	scope := portfolio.ParseScopeValue(pf.ScopeValueJSON)
 
 	for _, row := range strengths {
-		if !inPortfolioScopeStrength(row, pf, matcher) {
+		if !inScopeFieldsParsed(row.Code, row.Industry, row.Market, pf.ScopeType, scope, matcher) {
 			continue
 		}
 		date := fmt.Sprintf("%d", row.TradeDate)

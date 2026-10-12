@@ -3,8 +3,12 @@ package service
 import (
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
+
+	"freestock/internal/cnlake"
+	"freestock/internal/config"
 
 	"freestock/internal/portfolio"
 )
@@ -20,12 +24,44 @@ func TestBacktestPhaseTiming(t *testing.T) {
 	svc, _ := newPortfolioService(t)
 	t.Cleanup(svc.Close)
 
+	// 数据源可切换 —— "回测慢"必须按用户的实际源测：数据湖那条路
+	// 会为每根 K 线组装完整 Quote，与 stockdb 差一个量级。
+	if strings.EqualFold(os.Getenv("FREESTOCK_TIMING_SOURCE"), "cnlake") {
+		root := cnlake.Detect()
+		if root == "" {
+			t.Skip("没有数据湖")
+		}
+		svc.stock.applySource(config.KindCnLake, root)
+		t.Logf("数据源已切到数据湖：%s", root)
+	}
+
 	universe, err := svc.stock.GetStockUniverse(false)
 	if err != nil || universe == nil || universe.TradeDate <= 0 {
 		t.Skipf("数据源不可用：%v", err)
 	}
 	latest := int(universe.TradeDate)
-	start := shiftDays(t, latest, -12)
+	// 区间长度可用 `FREESTOCK_TIMING_DAYS`（自然日）放大 ——
+	// 用来复现"1 年全市场回测卡死"：各阶段的成本随**区间长度**的增长方式不同，
+	// 短区间测不出长区间的问题（例：取价要按区间给每根 K 线组装 Quote）。
+	spanDays := 12
+	if v := os.Getenv("FREESTOCK_TIMING_DAYS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			spanDays = n
+		}
+	}
+	start := shiftDays(t, latest, -spanDays)
+	t.Logf("回测区间跨度 %d 自然日：%d ~ %d", spanDays, start, latest)
+
+	// 策略也必须能切换：**趋势低吸与趋势成长的路径差别很大**。
+	//
+	// 低吸在候选池里要对**整池逐行**做质量过滤（`CandidateQualityOK`），
+	// 趋势成长不做。我第一次测用户场景时用了趋势成长，得出的"只要 37 秒"
+	// 因此不能代表用户实际跑的低吸。
+	strategyID := portfolio.StrategyTrendGrowth
+	if v := os.Getenv("FREESTOCK_TIMING_STRATEGY"); v != "" {
+		strategyID = portfolio.NormalizeStrategy(v, portfolio.StrategyTrendGrowth)
+	}
+	t.Logf("策略：%s", strategyID)
 
 	// ① 回填
 	//
@@ -38,7 +74,7 @@ func TestBacktestPhaseTiming(t *testing.T) {
 		}
 	}
 	began := time.Now()
-	bf, err := svc.RefreshBackfill(portfolio.StrategyTrendGrowth, start, latest, limit, true)
+	bf, err := svc.RefreshBackfill(strategyID, start, latest, limit, true)
 	if err != nil {
 		t.Fatalf("回填失败：%v", err)
 	}
@@ -57,7 +93,7 @@ func TestBacktestPhaseTiming(t *testing.T) {
 	}
 	created, err := svc.CreatePortfolio(portfolio.PortfolioInput{
 		Name: "阶段计时", Type: portfolio.TypeSemiAuto,
-		StrategyID:          portfolio.StrategyTrendGrowth,
+		StrategyID:          strategyID,
 		TargetPositionCount: intPtr(5),
 		MaxStockCount:       intPtr(8),
 		TotalLayers:         10,
@@ -66,7 +102,7 @@ func TestBacktestPhaseTiming(t *testing.T) {
 		t.Fatalf("建组合失败：%v", err)
 	}
 	dates := bf.Dates
-	seed, err := store.LoadStrength(int64(dates[len(dates)-1]), portfolio.StrategyTrendGrowth, 5)
+	seed, err := store.LoadStrength(int64(dates[len(dates)-1]), strategyID, 5)
 	if err != nil || len(seed) == 0 {
 		t.Skipf("评分表没有可用股票：%v", err)
 	}

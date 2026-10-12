@@ -736,14 +736,45 @@ func (p *lakeProvider) fillBulk(start, end int) error {
 	if err != nil {
 		return fmt.Errorf("读取数据湖日分区列表失败：%w", err)
 	}
-	if len(dates) == 0 {
-		return fmt.Errorf("区间 %d~%d 内没有日分区", readFrom, readTo)
-	}
 	if p.bulkBars == nil {
 		p.bulkBars = make(map[string][]cnlake.BarRow, 8192)
 	}
 	if p.bulkScored == nil {
 		p.bulkScored = make(map[string][]score.Bar, 8192)
+	}
+	if len(dates) == 0 {
+		// ⚠ **"这一段没有日分区"不是失败，不能返回 error。**
+		//
+		// 这是**回测点下去卡住不动**的根因（我自己引入的）：
+		//
+		// 增量补齐时缺的那一段常常天然为空 —— 比如回填到 20261009、
+		// 回测请求到 20261012，缺的就是 [20261010, 20261012]
+		//（周末 + 没有数据），一个日分区都没有。
+		//
+		// 原实现在这种情况下 `DailyBarsInRange` 返回空行，随后**照样把
+		// `bulkFrom/bulkTo` 推进到请求的区间**，于是后续每一只都命中缓存。
+		// 我改成分块读之后在这里直接 `return error` —— `barsFor` 把它当成
+		// "批量读失败"，**逐只回落到 `lake.DailyBars(code, 年, 年)` 慢路径**
+		//（实测 546ms/只；4600 只 ≈ 40 分钟，而且中间**一行日志都没有**，
+		// 表现就是"卡住不动"）。
+		//
+		// 正确语义：把覆盖区间推进到请求的区间（"这里没有数据"也是一个有效答案，
+		// `cachedBars` 对缓存覆盖范围内查不到的股票返回"无数据"），然后返回。
+		if !p.bulkFilled {
+			p.bulkFrom, p.bulkTo = readFrom, readTo
+			p.bulkFilled = true
+		} else {
+			if readFrom < p.bulkFrom {
+				p.bulkFrom = readFrom
+			}
+			if readTo > p.bulkTo {
+				p.bulkTo = readTo
+			}
+		}
+		slog.Info("数据湖批量读：该段没有日分区，直接推进覆盖区间",
+			"read", fmt.Sprintf("%d~%d", readFrom, readTo),
+			"covered", fmt.Sprintf("%d~%d", p.bulkFrom, p.bulkTo))
+		return nil
 	}
 
 	began := time.Now()

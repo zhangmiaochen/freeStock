@@ -131,51 +131,133 @@ func (s *PortfolioService) attachSignalsToRows(
 	return attached
 }
 
-// attachSignalsToDays 按**整个区间**给回测的评分日贴一次信号。
+// attachSignalsToDays 按区间给回测的评分日贴信号。
 //
 // 对应原版回测路径上的 `_attach_signal_candidates(scope_history, start, end)`
-// （portfolio_service.py:1004）—— 它是对**整段帧**做一次 merge_asof，
-// 而不是逐日做。这里同样只查两次库（候选 + 日历）：
-// `attachSignalsToRows` 内部按 min/max 日期一次性取候选，逐行匹配。
+// （portfolio_service.py:1004）—— 语义上是对**整段帧**做一次 merge_asof。
 //
-// 行会按日重新分组（attach 可能丢弃不在交易日历里的行），所以返回新的切片，
-// 且**可能比入参少行** —— 调用方必须用返回值。
+// ⚠ **实现上必须逐日贴，不能先把整个区间的行摊平。**
+//
+// 我第一版就是摊平的：把 970 天 × 7000 行 ≈ **680 万行** `score.Row` 复制进
+// 一个新切片（`score.Row` 很大，这一份就是 GB 级），再 `byDate` 分组回填、
+// 期间 attach 又返回一份新切片 —— 内存直接翻几倍，表现是**回测卡住不动**。
+//
+// 为什么逐日贴与整段贴**结果完全相同**：`signal_age` 是
+// `trade_idx(行) - trade_idx(信号)` —— 两个下标都取自**同一份交易日历**。
+// 这里仍然一次性取来整段区间的候选与日历，只是每天单独调
+// `AttachSignalCandidates`，所以下标（以及它们的差）与整段贴一字不差；
+// 变的只是"同时驻留的行数"，从 680 万降到一天的量级。
+//
+// 只查两次库（候选 + 日历），不会退化成逐日查库。
 func (s *PortfolioService) attachSignalsToDays(
 	stored *portfolio.Store, days []backtest.StrengthDay,
 ) []backtest.StrengthDay {
 	if stored == nil || len(days) == 0 {
 		return days
 	}
-	total := 0
-	for _, day := range days {
-		total += len(day.Rows)
+	minDate, maxDate := atoiDate(days[0].Date), atoiDate(days[len(days)-1].Date)
+	if minDate > maxDate {
+		minDate, maxDate = maxDate, minDate
 	}
-	if total == 0 {
+	if minDate <= 0 || maxDate <= 0 {
 		return days
 	}
-	rows := make([]score.Row, 0, total)
-	dates := make([]int64, 0, total)
-	for _, day := range days {
-		for _, row := range day.Rows {
-			rows = append(rows, row)
-			dates = append(dates, row.TradeDate)
+	signalStart := s.signalBufferStart(minDate, signalLookbackTradeDays)
+	if signalStart <= 0 {
+		return days
+	}
+	storedRows, err := stored.LoadSignalCandidates(int64(signalStart), int64(maxDate))
+	if err != nil {
+		// 读不到信号不该让整个回测失败：原实现此时走"全部默认值"的分支
+		//（`signal_df.empty` → active_signal_* 全空、signal_age=999）。
+		return days
+	}
+	rawDays, err := s.tradingDates(signalStart, maxDate)
+	calendar := make([]int64, 0, len(rawDays))
+	if err == nil {
+		for _, day := range rawDays {
+			calendar = append(calendar, int64(day))
 		}
 	}
-	attached := s.attachSignalsToRows(stored, rows, dates)
+	if len(calendar) == 0 {
+		// 没有日历就算不出 trade_idx；原实现在这里退回"并集排序"，
+		// 等价形式是拿行日期去重排序。
+		dates := make([]int64, 0, len(days))
+		for _, day := range days {
+			dates = append(dates, int64(atoiDate(day.Date)))
+		}
+		fallback := calendarFromDates(dates)
+		for _, day := range fallback {
+			calendar = append(calendar, int64(day))
+		}
+		if len(calendar) == 0 {
+			return days
+		}
+	}
+	candidates := make([]score.SignalCandidateRow, 0, len(storedRows))
+	for _, item := range storedRows {
+		candidates = append(candidates, score.SignalCandidateRow{
+			TradeDate: item.TradeDate, Code: item.Code,
+			ModelID: item.ModelID, ModelName: item.ModelName,
+			MarketState: item.MarketState, MarketStateLabel: item.MarketStateLabel,
+			SignalType: item.SignalType, SignalLevel: item.SignalLevel,
+			SignalLevelLabel: item.SignalLevelLabel, Score: item.Score,
+			SignalCount: item.SignalCount,
+		})
+	}
 
-	// 按日回填。用日期索引而不是位置索引 —— attach 之后行序与行数都可能变，
-	// 按位置切会**把行错配到别的交易日**（那是静默的错误信号年龄）。
-	byDate := make(map[int64][]score.Row, len(days))
-	for _, row := range attached {
-		byDate[row.TradeDate] = append(byDate[row.TradeDate], row)
+	opts := score.SignalAttachOptions{StartDate: int64(signalStart), EndDate: int64(maxDate)}
+
+	// **按天分块贴**，而不是整段摊平、也不是逐日。
+	//
+	// 两个极端都试过，都不行：
+	//   - **整段摊平**（第一版）：970 天 × 7000 行 ≈ 680 万行 `score.Row`
+	//     复制一份就是 GB 级，外加 `byDate` 回填与 attach 的输出切片 ——
+	//     内存翻几倍，回测**卡住不动**；
+	//   - **逐日**（第二版）：`AttachSignalCandidates` 每次调用都会从完整候选集
+	//     **重建并排序 `byCode`**（score/signal_attach.go:103-126）。逐日就是
+	//     把这份工作做 970 次 —— 内存是下来了，CPU 与分配反而爆掉。
+	//
+	// 分块取两者之间：每块 `attachChunkDays` 天，内存按块封顶，
+	// 候选分组只做 `天数/块大小` 次。
+	for start := 0; start < len(days); start += attachChunkDays {
+		stop := start + attachChunkDays
+		if stop > len(days) {
+			stop = len(days)
+		}
+		chunk := days[start:stop]
+		rows := make([]score.Row, 0, 4096)
+		dates := make([]int64, 0, 4096)
+		for _, day := range chunk {
+			date := int64(atoiDate(day.Date))
+			for _, row := range day.Rows {
+				rows = append(rows, row)
+				dates = append(dates, date)
+			}
+		}
+		if len(rows) == 0 {
+			continue
+		}
+		attached, _ := score.AttachSignalCandidates(rows, dates, candidates, calendar, opts)
+
+		// 用日期索引回填 —— attach 之后行数与行序都可能变
+		//（交易日不在日历里的行会被丢弃），按位置切会把行错配到别的交易日。
+		byDate := make(map[int64][]score.Row, len(chunk))
+		for _, row := range attached {
+			byDate[row.TradeDate] = append(byDate[row.TradeDate], row)
+		}
+		for i := range chunk {
+			chunk[i].Rows = byDate[int64(atoiDate(chunk[i].Date))]
+		}
 	}
-	out := make([]backtest.StrengthDay, 0, len(days))
-	for _, day := range days {
-		day.Rows = byDate[int64(atoiDate(day.Date))]
-		out = append(out, day)
-	}
-	return out
+	return days
 }
+
+// attachChunkDays 是回测贴信号的**分块天数**。
+//
+// 取值权衡见 `attachSignalsToDays`：块越大内存越高，越小则候选分组重复次数越多。
+// 20 天 ≈ 14 万行，一天的量级内；970 天的区间只需 49 次分组。
+const attachChunkDays = 20
 
 // calendarFromDates 是 `_calendar_dates` 取不到日历时的退路：
 // 用帧里出现过的日期去重排序（对应原实现

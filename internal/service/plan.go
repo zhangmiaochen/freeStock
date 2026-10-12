@@ -515,7 +515,9 @@ func (s *PortfolioService) BuildPlan(portfolioID string) (*PlanResult, error) {
 	cfg.LowBuyBreadthReadyCount = breadthReady
 
 	// ---- 候选池 ----
-	candidates, universeScores, err := s.buildCandidatePool(store, item, cfg, marketState, strengthDate, holdingCodes)
+	// 第二个返回值是**截断后**的池（喂给调仓计划），第三个是**截断前**的完整池
+	//（留档与报数用）—— 两者都是原实现里的东西，见 `buildCandidatePoolFrom` 尾部注释。
+	candidates, universeScores, fullPool, err := s.buildCandidatePool(store, item, cfg, marketState, strengthDate, holdingCodes)
 	if err != nil {
 		return nil, err
 	}
@@ -599,8 +601,11 @@ func (s *PortfolioService) BuildPlan(portfolioID string) (*PlanResult, error) {
 		MaxDrawdownPct: round4(maxDrawdown),
 		Plan:           plan,
 		Holdings:       holdingRows,
-		Candidates:     candidates,
-		Notes:          notes,
+		// `candidate_pool` 是**截断前**的完整池（原实现 :2080 把
+		// `candidate_pool` 与 `candidate_ranked` 分开）：留档表与
+		// `candidate_count` 都用它，而 `plan` 内部建仓/配对用截断后的那个。
+		Candidates: fullPool,
+		Notes:      notes,
 	}
 	// 落档失败**不影响建议本身** —— 记日志即可，
 	// 不要因为存档问题让用户看不到建议。
@@ -627,10 +632,10 @@ func (s *PortfolioService) buildCandidatePool(
 	marketState score.MarketState,
 	strengthDate int64,
 	holdingCodes []string,
-) ([]score.Row, []float64, error) {
+) ([]score.Row, []float64, []score.Row, error) {
 	all, err := store.LoadStrength(strengthDate, item.StrategyID, 0)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	// 物化评分 → 轮动行，**只在这里转一次**：转换会带上 Industry/TradeDate，
 	// 之后整条链路都在 `score.Row` 上走，不再有丢字段的往返。
@@ -638,8 +643,8 @@ func (s *PortfolioService) buildCandidatePool(
 	for _, strength := range all {
 		rowsIn = append(rowsIn, strengthToRow(strength))
 	}
-	rows, scores, _ := s.buildCandidatePoolFrom(store, rowsIn, item, cfg, holdingCodes)
-	return rows, scores, nil
+	rows, scores, fullPool := s.buildCandidatePoolFrom(store, rowsIn, item, cfg, holdingCodes)
+	return rows, scores, fullPool, nil
 }
 
 // buildCandidatePoolFrom 用**已加载好的评分行**建候选池。
@@ -663,7 +668,7 @@ func (s *PortfolioService) buildCandidatePoolFrom(
 	item portfolio.Portfolio,
 	cfg score.StrategyConfig,
 	holdingCodes []string,
-) ([]score.Row, []float64, int) {
+) ([]score.Row, []float64, []score.Row) {
 
 	held := map[string]bool{}
 	for _, code := range holdingCodes {
@@ -804,7 +809,7 @@ func (s *PortfolioService) buildCandidatePoolFrom(
 	//
 	// Go 此前只留了截断后的那个，于是 `candidateCount` 报的是 80（或 target*12），
 	// 而原版报的是完整池（全市场范围能到几千）。界面"候选池 N"因此差一个量级。
-	fullCount := len(out)
+	fullPool := out
 	head := 80
 	if size := item.TargetPositionCount * 12; size > head {
 		head = size
@@ -812,7 +817,7 @@ func (s *PortfolioService) buildCandidatePoolFrom(
 	if len(out) > head {
 		out = out[:head]
 	}
-	return out, universeScores, fullCount
+	return out, universeScores, fullPool
 }
 
 // inPortfolioScope 判定一只股票是否在组合的选股范围内。
@@ -845,24 +850,34 @@ func inPortfolioScopeStrength(
 	return inScopeFields(strength.Code, strength.Industry, strength.Market, item, matcher)
 }
 
-// inScopeFields 是范围判定的唯一实现（按字段，不绑行类型）。
+// inScopeFields 是范围判定的薄包装（自解析范围值）。
+//
+// ⚠ **逐行调用时不要用它**，用 `inScopeFieldsParsed` 把解析提到循环外。
+//
+// 注意别夸大这个优化：`ParseScopeValue` 是 JSON 反序列化，逐行调用确实是浪费
+// （回测 1 年全市场 = 125 万次），但它**不是**"回测慢"的根因 ——
+// 实测把它提出来之后"组装评分日"耗时几乎没变（那一项的大头是
+// `s.scopeMatcher()` 首次加载数据集的一次性开销）。定位性能问题要看分阶段计时。
 func inScopeFields(
 	code, industry, market string, item portfolio.Portfolio, matcher *ScopeMatcher,
 ) bool {
-	scope := portfolio.ParseScopeValue(item.ScopeValueJSON)
+	return inScopeFieldsParsed(code, industry, market, item.ScopeType,
+		portfolio.ParseScopeValue(item.ScopeValueJSON), matcher)
+}
 
-	switch item.ScopeType {
+// inScopeFieldsParsed 是范围判定的唯一实现：范围值**由调用方预先解析**。
+func inScopeFieldsParsed(
+	code, industry, market string, scopeType string, scope portfolio.ScopeValue,
+	matcher *ScopeMatcher,
+) bool {
+	switch scopeType {
 	case portfolio.ScopeManualCodes:
-		found := false
 		for _, want := range scope.Codes {
 			if want == code {
-				found = true
-				break
+				return score.MarketInScope(market, scope.Markets)
 			}
 		}
-		if !found {
-			return false
-		}
+		return false
 	case portfolio.ScopeIndustry:
 		if !scopeHit(scope.Items, code, industry, matcher, true) {
 			return false
