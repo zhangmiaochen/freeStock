@@ -451,6 +451,9 @@ export const api = {
       PortfolioService.ListBacktests(portfolioId) as Promise<BacktestRun[]>,
     /** 删除一次回测 */
     deleteBacktest: (runId: string) => PortfolioService.DeleteBacktest(runId),
+    /** 批量删除回测（多选）：返回成功条数；失败走 reject（Wails 把 Go 的 error 映射成异常） */
+    deleteBacktests: (runIds: string[]) =>
+      PortfolioService.DeleteBacktests(runIds) as Promise<number>,
 
     // ---- 自动建组合 ----
     /** 预演自动组合（不落库）：按策略与范围给出首批初始持仓 */

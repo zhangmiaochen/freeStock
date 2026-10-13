@@ -265,6 +265,67 @@ async function refreshOnShow() {
 onMounted(refreshOnShow); // 非 KeepAlive 场景（比如单独渲染/测试）
 onActivated(refreshOnShow); // KeepAlive 下每次切回来
 
+// ---- 回测记录删除（单个 / 批量）----
+// 确认弹窗用 shadcn-vue 的 AlertDialog 原语（reka-ui）：项目 ui/ 下没有 dialog 组件，
+// 只有一个 sheet 也是这么直接封装 reka-ui 的，所以这里不新增组件文件。
+import {
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogOverlay,
+  AlertDialogPortal,
+  AlertDialogRoot,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "reka-ui";
+// 注意：reka-ui 没有 AlertDialogHeader / AlertDialogFooter ——
+// shadcn 里这两个只是布局 div，所以下面直接用 <div class="..."> 写。
+
+// 选中集合用 runId；全选判断刻意写成**函数**而不是 computed，
+// 避免依赖本文件是否已 import computed。
+const selectedRuns = ref<string[]>([]);
+
+function allRunsSelected(): boolean {
+  return runs.value.length > 0 && selectedRuns.value.length === runs.value.length;
+}
+
+function toggleAllRuns(e: Event) {
+  selectedRuns.value = (e.target as HTMLInputElement).checked
+    ? runs.value.map((r) => r.runId)
+    : [];
+}
+
+/** 删一条：走后端已有单删接口（级联清净值与成交） */
+async function removeOneRun(runId: string) {
+  error.value = "";
+  message.value = "";
+  try {
+    await api.portfolio.deleteBacktest(runId);
+    selectedRuns.value = selectedRuns.value.filter((id) => id !== runId);
+    await loadRuns();
+    message.value = `已删除回测记录 ${runId}`;
+  } catch (e) {
+    error.value = String(e);
+  }
+}
+
+/** 批量删：Wails 把 Go 的 (int, error) 映射成"返回值=int、error→reject" */
+async function removeSelectedRuns() {
+  const ids = [...selectedRuns.value];
+  if (!ids.length) return;
+  error.value = "";
+  message.value = "";
+  try {
+    await api.portfolio.deleteBacktests(ids);
+    selectedRuns.value = [];
+    await loadRuns();
+    message.value = `已删除 ${ids.length} 条回测记录`;
+  } catch (e) {
+    error.value = String(e);
+    await loadRuns(); // 可能已删掉一部分（后端单条失败不中断其余），刷新看实际结果
+  }
+}
 </script>
 
 <template>
@@ -374,11 +435,45 @@ onActivated(refreshOnShow); // KeepAlive 下每次切回来
 
     <!-- 历史回测记录 -->
     <Card v-if="runs.length > 0">
-      <CardHeader><CardTitle class="text-base">回测记录</CardTitle></CardHeader>
+      <CardHeader class="flex flex-row items-center justify-between">
+        <CardTitle class="text-base">回测记录（{{ runs.length }}）</CardTitle>
+        <div class="flex items-center gap-2">
+          <span v-if="selectedRuns.length" class="text-muted-foreground text-xs">已选 {{ selectedRuns.length }} 条</span>
+          <AlertDialogRoot>
+            <AlertDialogTrigger as-child>
+              <Button size="sm" variant="ghost" class="text-rose-600" :disabled="!selectedRuns.length">
+                删除选中
+              </Button>
+            </AlertDialogTrigger>
+            <AlertDialogPortal>
+              <AlertDialogOverlay class="fixed inset-0 z-50 bg-black/80" />
+              <AlertDialogContent class="fixed left-1/2 top-1/2 z-50 w-full max-w-sm -translate-x-1/2 -translate-y-1/2 rounded-lg border bg-background p-6 shadow-lg">
+                <div class="flex flex-col gap-2">
+                  <AlertDialogTitle class="text-base font-semibold">
+                    删除选中的 {{ selectedRuns.length }} 条回测记录？
+                  </AlertDialogTitle>
+                  <AlertDialogDescription class="text-muted-foreground text-sm">
+                    这些记录会连同各自的净值与成交明细一起删除，不可撤销。
+                  </AlertDialogDescription>
+                </div>
+                <div class="mt-4 flex justify-end gap-2">
+                  <AlertDialogCancel as-child><Button size="sm" variant="ghost">取消</Button></AlertDialogCancel>
+                  <AlertDialogAction as-child>
+                    <Button size="sm" variant="ghost" class="text-rose-600" @click="removeSelectedRuns">确认删除</Button>
+                  </AlertDialogAction>
+                </div>
+              </AlertDialogContent>
+            </AlertDialogPortal>
+          </AlertDialogRoot>
+        </div>
+      </CardHeader>
       <CardContent class="overflow-auto">
         <table class="w-full text-sm">
           <thead class="text-muted-foreground">
             <tr class="text-left">
+              <th class="py-1 w-8">
+                <input type="checkbox" :checked="allRunsSelected()" @change="toggleAllRuns" />
+              </th>
               <th class="py-1">运行</th><th>组合</th><th>策略</th><th>区间</th>
               <th class="text-right">总收益</th><th class="text-right">回撤</th>
               <th class="text-right">夏普</th><th class="text-right">笔数</th><th></th>
@@ -386,6 +481,9 @@ onActivated(refreshOnShow); // KeepAlive 下每次切回来
           </thead>
           <tbody>
             <tr v-for="run in runs" :key="run.runId" class="border-t">
+              <td class="py-1">
+                <input type="checkbox" :value="run.runId" v-model="selectedRuns" />
+              </td>
               <td class="py-1 font-mono text-xs">{{ run.runId }}</td>
               <td>{{ run.portfolioName }}</td>
               <td>{{ run.strategyLabel }}</td>
@@ -394,8 +492,30 @@ onActivated(refreshOnShow); // KeepAlive 下每次切回来
               <td class="text-right">{{ run.maxDrawdown?.toFixed?.(2) ?? run.maxDrawdown }}%</td>
               <td class="text-right">{{ run.sharpeRatio?.toFixed?.(2) ?? run.sharpeRatio }}</td>
               <td class="text-right">{{ run.totalTrades }}</td>
-              <td class="text-right">
+              <td class="text-right whitespace-nowrap">
                 <Button size="sm" variant="ghost" @click="openRun(run.runId)">查看</Button>
+                <AlertDialogRoot>
+                  <AlertDialogTrigger as-child>
+                    <Button size="sm" variant="ghost" class="text-rose-600">删除</Button>
+                  </AlertDialogTrigger>
+                  <AlertDialogPortal>
+                    <AlertDialogOverlay class="fixed inset-0 z-50 bg-black/80" />
+                    <AlertDialogContent class="fixed left-1/2 top-1/2 z-50 w-full max-w-sm -translate-x-1/2 -translate-y-1/2 rounded-lg border bg-background p-6 shadow-lg">
+                      <div class="flex flex-col gap-2">
+                        <AlertDialogTitle class="text-base font-semibold">删除这条回测记录？</AlertDialogTitle>
+                        <AlertDialogDescription class="text-muted-foreground text-sm">
+                          {{ run.runId }}（{{ run.startDate }}~{{ run.endDate }}）会连同净值与成交明细一起删除，不可撤销。
+                        </AlertDialogDescription>
+                      </div>
+                      <div class="mt-4 flex justify-end gap-2">
+                        <AlertDialogCancel as-child><Button size="sm" variant="ghost">取消</Button></AlertDialogCancel>
+                        <AlertDialogAction as-child>
+                          <Button size="sm" variant="ghost" class="text-rose-600" @click="removeOneRun(run.runId)">确认删除</Button>
+                        </AlertDialogAction>
+                      </div>
+                    </AlertDialogContent>
+                  </AlertDialogPortal>
+                </AlertDialogRoot>
               </td>
             </tr>
           </tbody>

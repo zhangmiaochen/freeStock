@@ -424,6 +424,38 @@ func (s *PortfolioService) DeleteBacktest(runID string) error {
 	return store.DeleteBacktestRun(runID)
 }
 
+// DeleteBacktests 批量删除回测记录（回测页多选删除用）。
+//
+// 语义：
+//   - 逐条走 `DeleteBacktestRun`（它已级联清理净值与成交），**单条失败不中断其余**；
+//   - 返回**成功删除的条数**与**首个错误** —— 界面既能显示"删了几条"，
+//     也能把失败原因暴露出来（而不是整体回滚、让人以为一条都没删）。
+//
+// 不返回错误的条数=0 与"全部失败"在界面上要区分开，所以 (deleted, err) 两个都要用。
+func (s *PortfolioService) DeleteBacktests(runIDs []string) (deleted int, err error) {
+	if len(runIDs) == 0 {
+		return 0, nil
+	}
+	store, err := s.db()
+	if err != nil {
+		return 0, err
+	}
+	var firstErr error
+	for _, id := range runIDs {
+		if id == "" {
+			continue
+		}
+		if e := store.DeleteBacktestRun(id); e != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("删除回测 %s 失败：%w", id, e)
+			}
+			continue
+		}
+		deleted++
+	}
+	return deleted, firstErr
+}
+
 // buildStrengthDays 把区间评分按交易日分组。
 //
 // **同时按组合范围过滤** —— 原实现是先 `_scope_filter` 再交给引擎的

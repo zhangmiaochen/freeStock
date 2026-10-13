@@ -116,6 +116,20 @@ export function DeleteBacktest(runID: string): $CancellablePromise<void> {
 }
 
 /**
+ * DeleteBacktests 批量删除回测记录（回测页多选删除用）。
+ * 
+ * 语义：
+ *   - 逐条走 `DeleteBacktestRun`（它已级联清理净值与成交），**单条失败不中断其余**；
+ *   - 返回**成功删除的条数**与**首个错误** —— 界面既能显示"删了几条"，
+ *     也能把失败原因暴露出来（而不是整体回滚、让人以为一条都没删）。
+ * 
+ * 不返回错误的条数=0 与"全部失败"在界面上要区分开，所以 (deleted, err) 两个都要用。
+ */
+export function DeleteBacktests(runIDs: string[]): $CancellablePromise<number> {
+    return $Call.ByID(1388705057, runIDs);
+}
+
+/**
  * DeletePortfolio 删除组合（持仓与流水级联清理）。
  */
 export function DeletePortfolio(id: string): $CancellablePromise<void> {
