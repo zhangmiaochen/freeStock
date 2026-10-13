@@ -23,11 +23,41 @@ type CneUpdateService struct {
 
 	mu sync.Mutex
 	r  *cne.Runner
+	// onDataChanged 是"数据湖变了"的回调，见 SetOnDataChanged
+	onDataChanged func()
 }
 
 // NewCneUpdateService 构造服务。
 func NewCneUpdateService(store *config.Store) *CneUpdateService {
 	return &CneUpdateService{store: store}
+}
+
+// SetOnDataChanged 注册"数据湖变了"的回调（由 main 接到行情服务上）。
+//
+// 为什么由外部注入而不是本服务直接依赖 StockService：本服务只负责跑 cne，
+// 不该知道行情层有哪些缓存；调用方（main）把两边接起来最清楚。
+func (s *CneUpdateService) SetOnDataChanged(fn func()) {
+	s.mu.Lock()
+	s.onDataChanged = fn
+	s.mu.Unlock()
+}
+
+// notifyDataChanged 在任务结束后通知回调（没有注册就什么都不做）。
+func (s *CneUpdateService) notifyDataChanged(job *cne.Job, err error) {
+	s.mu.Lock()
+	fn := s.onDataChanged
+	s.mu.Unlock()
+	if fn == nil {
+		return
+	}
+	// 进程失败（例如中途被取消）也可能已经落了一部分数据 —— 照样让缓存失效，
+	// 让下一次查询自己去校验指纹，比"赌它没写成"安全。
+	kind := ""
+	if job != nil {
+		kind = job.Kind
+	}
+	slog.Info("数据更新结束，让派生缓存失效重建", "kind", kind, "err", err)
+	fn()
 }
 
 // runnerOptions 把设置翻译成 Runner 的选项。
@@ -36,6 +66,7 @@ func (s *CneUpdateService) runnerOptions() cne.Options {
 	return cne.Options{
 		CNEPath:    prefs.CNEPath,
 		ProjectDir: prefs.ProjectDir,
+		OnFinish:   s.notifyDataChanged,
 	}
 }
 
@@ -489,10 +520,11 @@ func (s *CneUpdateService) SetUpdatePrefs(prefs config.UpdatePrefs) (UpdatePrefs
 		return UpdatePrefsInfo{}, errors.New("缺少配置存储")
 	}
 	stored := s.store.SetUpdatePrefs(prefs)
-	// 让 Runner 立刻用上新设置
+	// 让 Runner 立刻用上新设置（**带上 OnFinish 等其它选项**，
+	// 否则这里会把"更新结束 → 派生缓存失效"的回调悄悄丢掉）
 	s.mu.Lock()
 	if s.r != nil {
-		s.r.SetOptions(cne.Options{CNEPath: stored.CNEPath, ProjectDir: stored.ProjectDir})
+		s.r.SetOptions(s.runnerOptions())
 	}
 	s.mu.Unlock()
 

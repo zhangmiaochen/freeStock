@@ -94,6 +94,12 @@ type Options struct {
 	ProjectDir string
 	// LogDir 是日志目录；空则用 <ProjectDir>\data\cnequity\logs。
 	LogDir string
+	// OnFinish 在每次任务结束后回调（err 为 nil 表示进程正常退出）。
+	//
+	// 用途：数据湖刚落盘完，派生缓存（`cache/bars-by-symbol`）里的东西
+	// 可能已经过期了 —— 调用方在这里立刻让它失效重建，而不是等下一次查询
+	// 才发现源头变了。**在后台 goroutine 里调用**，不要阻塞太久。
+	OnFinish func(job *Job, err error)
 }
 
 // Job 是一次更新任务。
@@ -367,10 +373,14 @@ func (r *Runner) start(kind string, extra []string) (*Job, error) {
 		r.mu.Lock()
 		job.err = waitErr
 		r.last = job
+		onFinish := r.opts.OnFinish
 		r.mu.Unlock()
 		close(job.done)
 		slog.Info("cne 数据更新结束",
 			"kind", kind, "err", waitErr, "elapsed", time.Since(job.StartedAt).Round(time.Second))
+		if onFinish != nil {
+			onFinish(job, waitErr)
+		}
 	}()
 
 	return job, nil

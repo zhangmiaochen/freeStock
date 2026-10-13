@@ -3,8 +3,10 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -251,7 +253,7 @@ func (s *StockService) applySource(kind, raw string) {
 	if kind == config.KindCnLake {
 		lake := s.lakeHandle()
 		s.clientMu.Lock()
-		s.provider = NewLakeProvider(lake)
+		s.provider = s.newLakeProvider(lake)
 		s.source = config.DataSource{
 			Key:  "cnlake",
 			Name: "本地数据湖（cnequity）",
@@ -262,6 +264,49 @@ func (s *StockService) applySource(kind, raw string) {
 		return
 	}
 	s.applyURL(raw)
+}
+
+// newLakeProvider 构造数据湖行情源，并挂上「按股票」日线派生缓存。
+//
+// 缓存放在**配置目录**下（与 portfolio.db 同级）而不是写进用户的数据湖：
+// 它是 freeStock 自己的缓存、可以随时删掉；按数据湖根目录分子目录，
+// 换数据源不会互相串味。
+func (s *StockService) newLakeProvider(lake *cnlake.Lake) Provider {
+	provider := NewLakeProvider(lake)
+	lakeProvider, ok := provider.(*lakeProvider)
+	if !ok {
+		return provider
+	}
+	lakeProvider.SetSymbolBarsCache(cnlake.NewSymbolBarsCache(s.symbolBarsCacheRoot(lake.Root())))
+	return provider
+}
+
+// InvalidateDerivedCaches 让"由数据湖派生出来的缓存"立刻失效重建。
+//
+// 数据更新（cne）结束后由 CneUpdateService 回调到这里 —— 这样"缓存里永远是
+// 最新的"不依赖"下一次查询时自己发现源分区指纹变了"。
+//
+// 只动派生缓存，不动全量行情快照（那个有自己的 10 分钟 TTL，且重建很贵）。
+func (s *StockService) InvalidateDerivedCaches() {
+	provider, _ := s.snapshot()
+	if lake, ok := provider.(*lakeProvider); ok {
+		lake.InvalidateSymbolBars()
+	}
+}
+
+// symbolBarsCacheRoot 返回「按股票」日线缓存的目录；拿不到配置目录时返回空（禁用缓存）。
+func (s *StockService) symbolBarsCacheRoot(lakeRoot string) string {
+	if s.cfg == nil || lakeRoot == "" {
+		return ""
+	}
+	configPath := s.cfg.Path()
+	if configPath == "" {
+		return ""
+	}
+	// 目录名带一个根目录指纹：同一台机器上换数据湖不会读到对方的缓存
+	sum := sha256.Sum256([]byte(strings.ToLower(filepath.ToSlash(filepath.Clean(lakeRoot)))))
+	name := fmt.Sprintf("%s-%x", filepath.Base(filepath.Clean(lakeRoot)), sum[:4])
+	return filepath.Join(filepath.Dir(configPath), "cache", "bars-by-symbol", name)
 }
 
 func (s *StockService) applyURL(raw string) {
@@ -461,7 +506,7 @@ func (s *StockService) SetDataSource(kind, rawURL string) (SourceStatus, error) 
 		s.lakeMu.Unlock()
 
 		lake := probe
-		s.switchProvider(NewLakeProvider(lake), config.DataSource{
+		s.switchProvider(s.newLakeProvider(lake), config.DataSource{
 			Key:  "cnlake",
 			Name: "本地数据湖（cnequity）",
 			URL:  lake.Root(),
@@ -992,10 +1037,50 @@ func (s *StockService) loadBoards() ([]stockdb.Board, error) {
 	if err != nil {
 		return nil, fmt.Errorf("读取板块数据失败：%w", err)
 	}
+	// 兜一层去重：数据源可能给出重复成分（本机数据湖曾把按 as_of_date 分区的
+	// 多份快照当成并集，同一只股票在一个板块里出现 3 次）。重复成分不只是
+	// 界面上重复几行 —— 它会让板块成分数被放大、板块成交额/流通市值被重复累加。
+	boards, removed := dedupeBoardSymbols(boards)
+	if removed > 0 {
+		slog.Warn("板块成分里有重复代码，已去重", "removed", removed, "boards", len(boards))
+	}
 	s.boards = boards
 	s.boardsAt = time.Now()
 	slog.Info("板块数据就绪", "boards", len(boards))
 	return boards, nil
+}
+
+// dedupeBoardSymbols 去掉每个板块成分里的重复代码（保留首次出现的顺序），
+// 同时丢掉空代码；返回去掉的成分个数。
+func dedupeBoardSymbols(boards []stockdb.Board) ([]stockdb.Board, int) {
+	removed := 0
+	for i := range boards {
+		symbols := boards[i].Symbols
+		if len(symbols) == 0 {
+			continue
+		}
+
+		seen := make(map[string]struct{}, len(symbols))
+		unique := make([]string, 0, len(symbols))
+		for _, code := range symbols {
+			if code == "" {
+				continue
+			}
+			if _, dup := seen[code]; dup {
+				continue
+			}
+			seen[code] = struct{}{}
+			unique = append(unique, code)
+		}
+		if len(unique) == len(symbols) {
+			continue
+		}
+
+		// 换一块新内存，不动 provider 缓存的那份切片
+		removed += len(symbols) - len(unique)
+		boards[i].Symbols = unique
+	}
+	return boards, removed
 }
 
 // ---------------------------------------------------------------------------

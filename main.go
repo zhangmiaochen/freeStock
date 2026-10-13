@@ -127,6 +127,14 @@ func main() {
 	defer portfolioService.Close()
 	// cne 数据更新（手动更新闭环；自动更新见 docs/cne数据更新方案.md 第 3 阶段）
 	cneUpdateService := service.NewCneUpdateService(store)
+	// 更新一结束就让派生缓存失效重建：数据湖刚落了新数据，
+	// 「按股票」日线缓存（cache/bars-by-symbol）必须在用户查询之前跟上。
+	// 否则要等下一次查询自己发现源分区指纹变了才发现。
+	cneUpdateService.SetOnDataChanged(stockService.InvalidateDerivedCaches)
+
+	// 数据预热（全量行情快照、板块区间基准价）由 stockService 的 ServiceStartup 钩子
+	// 在后台发起 —— 数据湖上第一次要 4~6 秒，提前取好可以让首次进页面不用等。
+	// 口径与"为什么"见 internal/service/warmup.go。
 
 	app := application.New(application.Options{
 		Name:        "FreeStock",

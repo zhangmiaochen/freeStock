@@ -63,6 +63,14 @@ type Lake struct {
 	instruments []InstrumentRow
 	industries  []IndustryMemberRow
 	sectors     []SectorMemberRow
+
+	// 复权因子缓存（`meta/adj_factors_cache`），见 adjfactor.go。
+	// adjMu 同时保护下面的公司行为缓存（两者都是一次性惰性载入）。
+	adjMu sync.Mutex
+	adj   *adjFactorCache
+
+	// 公司行为缓存（`curated/corporate_actions`），见 corporateaction.go。
+	corp *corporateActionCache
 }
 
 // Open 打开指定根目录的数据湖；root 为空时自动探测。

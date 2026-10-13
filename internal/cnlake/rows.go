@@ -1,6 +1,8 @@
 package cnlake
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -62,21 +64,6 @@ type InstrumentRow struct {
 	ListDate   int32  `parquet:"list_date,date"`
 	DelistDate int32  `parquet:"delist_date,date"`
 }
-
-// CorporateActionRow 是 corporate_actions 的一行（分红送转配股）。
-type CorporateActionRow struct {
-	Symbol        string  `parquet:"symbol"`
-	ExDate        int32   `parquet:"ex_date,date"`
-	PaymentDate   int32   `parquet:"payment_date,date"`
-	ActionType    string  `parquet:"action_type"`
-	CashDividend  float64 `parquet:"cash_dividend"`  // 每股税前派现（元）
-	BonusRatio    float64 `parquet:"bonus_ratio"`    // 每股送股
-	TransferRatio float64 `parquet:"transfer_ratio"` // 每股转增
-	SplitFactor   float64 `parquet:"split_factor"`   // 拆并股比例，1 为中性
-}
-
-// Date 返回除权日 YYYYMMDD。
-func (r CorporateActionRow) Date() int64 { return daysToDate(r.ExDate) }
 
 // AdjFactorRow 是 adj_factors 的一行（复权因子）。
 type AdjFactorRow struct {
@@ -237,6 +224,50 @@ func (l *Lake) FilesForYears(name string, startYear, endYear int) []string {
 		if !partitioned || (year >= startYear && year <= endYear) {
 			out = append(out, path)
 		}
+	}
+	return out
+}
+
+// ---------------------------------------------------------------------------
+// 快照裁剪
+// ---------------------------------------------------------------------------
+
+// latestSnapshot 是「一个数据集 = 一批**快照**」时通用的裁剪：
+// 每个实体只保留它自己最新一份快照里的成员，并去掉同一份快照内的重复成员。
+//
+// 为什么必须有它：`industry_members` / `sector_members` 在数据湖里是
+// **按 as_of_date 分区的每日全量快照**（本机是 2026-10-08 / 10-09 / 10-12 三份），
+// 而 `readTyped(DatasetFiles(...), nil)` 读的是**三份快照的并集** —— 同一只股票
+// 于是出现在同一个板块里 3 次。表现就是股票列表里每只票重复 3 行、
+// 板块成分数被放大 3 倍（融资融券 3877 → 11610）、板块成交额/流通市值被重复累加。
+//
+// 关键点是**按实体（板块）各取各的最新快照**，而不是取全局最新日期：
+// 概念板块会新增/下线，某个板块在最新分区里缺席时，全局最大值会让它整块消失。
+// 成员的代码先用 BareSymbol 归一化，避免 "000001" 与 "000001.SZ" 被当成两个人。
+//
+// 参数：entity 取板块身份，asOf 取快照日期，member 取成分代码。
+func latestSnapshot[T any](rows []T, entity func(T) string, asOf func(T) int32, member func(T) string) []T {
+	newest := make(map[string]int32, 256)
+	for _, row := range rows {
+		key := entity(row)
+		if date := asOf(row); date > newest[key] {
+			newest[key] = date
+		}
+	}
+
+	seen := make(map[string]struct{}, len(rows))
+	out := make([]T, 0, len(rows))
+	for _, row := range rows {
+		key := entity(row)
+		if asOf(row) != newest[key] {
+			continue
+		}
+		slot := key + "\x00" + member(row)
+		if _, dup := seen[slot]; dup {
+			continue
+		}
+		seen[slot] = struct{}{}
+		out = append(out, row)
 	}
 	return out
 }
@@ -573,6 +604,85 @@ func (l *Lake) filesForDateRange(startDate, endDate int64) ([]string, error) {
 	return out, nil
 }
 
+// ---------------------------------------------------------------------------
+// 源分区指纹（判断"派生缓存还能不能用"）
+// ---------------------------------------------------------------------------
+
+// DailyPartitionDate 从 daily_bars 的文件路径里取出它所属分区的日期（YYYYMMDD）。
+//
+// 分区名不是日期（例如合成湖按年分区 `trade_date=2024`）时返回 0，
+// 表示"这个文件不属于任何具体交易日" —— 指纹计算会把它**始终计入**，
+// 构建时与查询时的取法一致，所以不会因此产生误判。
+func (l *Lake) DailyPartitionDate(path string) int64 {
+	rel, err := filepath.Rel(l.DatasetDir("daily_bars"), path)
+	if err != nil {
+		return 0
+	}
+	for _, segment := range strings.Split(filepath.ToSlash(rel), "/") {
+		_, value, found := strings.Cut(segment, "=")
+		if !found {
+			continue
+		}
+		raw := strings.ReplaceAll(value, "-", "")
+		if len(raw) != 8 {
+			return 0
+		}
+		date, convErr := strconv.ParseInt(raw, 10, 64)
+		if convErr != nil {
+			return 0
+		}
+		return date
+	}
+	return 0
+}
+
+// SourceSignature 返回"截至 through（含）的日分区"的内容指纹。
+//
+// 用途：判断「按股票」派生缓存里那段**冻结历史**是否还等于源头。
+// 缓存是复制品，复制品唯一能保证正确的办法就是"证明源头没变" ——
+// 指纹取每个分区文件的 (路径, 大小, mtime)，任何一次落盘变化
+// （补跑历史、重算某天、盘中追加、删了重写）都会改变它。
+//
+// through<=0 表示"全部分区都算进来"。
+//
+// ⚠ 构建缓存时必须**在读数据之前**算一次并存进清单：如果算在之后，
+// 构建期间被改写的文件会被记成"新指纹"，而缓存里存的还是旧内容 ——
+// 那就正好把"不一致"记成了"一致"。
+//
+// 代价：每个分区文件一次 stat（本机 2614 个）。
+func (l *Lake) SourceSignature(through int64) (string, error) {
+	files := l.DatasetFiles("daily_bars")
+	hash := sha256.New()
+	var buffer []byte
+	for _, path := range files {
+		if date := l.DailyPartitionDate(path); date > 0 && through > 0 && date > through {
+			continue
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			// 文件不见了也算"源头变了"：让调用方回退直读
+			return "", fmt.Errorf("cnlake: 统计分区文件失败：%w", err)
+		}
+		buffer = append(buffer[:0], path...)
+		buffer = append(buffer, 0)
+		buffer = strconv.AppendInt(buffer, info.Size(), 10)
+		buffer = append(buffer, 0)
+		buffer = strconv.AppendInt(buffer, info.ModTime().UnixNano(), 10)
+		buffer = append(buffer, '\n')
+		hash.Write(buffer)
+	}
+	return hex.EncodeToString(hash.Sum(nil)[:16]), nil
+}
+
+// LatestPartitionDate 返回 daily_bars 最后一个分区日期（没有分区时 0）。
+func (l *Lake) LatestPartitionDate() int64 {
+	dates, err := l.BarPartitionDates()
+	if err != nil || len(dates) == 0 {
+		return 0
+	}
+	return dates[len(dates)-1]
+}
+
 // AllValuations 一次读出全部估值行。
 //
 // `Valuations(code, ...)` 是**每只股票读一遍整个数据集再按代码过滤** ——
@@ -763,14 +873,6 @@ func (l *Lake) NetProfitsByPeriod() (map[string]map[string]float64, error) {
 	}
 	return out, nil
 }
-func (l *Lake) CorporateActions(code string) ([]CorporateActionRow, error) {
-	bare := BareSymbol(code)
-	rows, err := readTyped(l.DatasetFiles("corporate_actions"), func(row *CorporateActionRow) bool {
-		return BareSymbol(row.Symbol) == bare
-	})
-	sort.Slice(rows, func(i, j int) bool { return rows[i].ExDate < rows[j].ExDate })
-	return rows, err
-}
 
 // AdjFactors 读取某只股票的复权因子，按日期升序。
 func (l *Lake) AdjFactors(code string) ([]AdjFactorRow, error) {
@@ -793,6 +895,9 @@ func (l *Lake) FundFlows(code string, startYear, endYear int) ([]FundFlowRow, er
 }
 
 // IndustryMembers 返回全部行业成分（静态数据，缓存）。
+//
+// 数据集是按 as_of_date 分区的每日快照，这里只保留**每个行业自己最新一份
+// 快照**的成分（见 latestSnapshot）—— 否则同一只股票会在行业里重复多行。
 func (l *Lake) IndustryMembers() ([]IndustryMemberRow, error) {
 	l.mu.Lock()
 	if l.industries != nil {
@@ -806,6 +911,15 @@ func (l *Lake) IndustryMembers() ([]IndustryMemberRow, error) {
 	if err != nil {
 		return nil, err
 	}
+	// 板块身份要带分类体系与行业名：同名/同代码的行业可以存在于不同分类体系。
+	rows = latestSnapshot(rows,
+		func(row IndustryMemberRow) string {
+			return row.ClassificationSystem + "\x00" + row.IndustryCode + "\x00" + row.IndustryName
+		},
+		func(row IndustryMemberRow) int32 { return row.AsOfDate },
+		func(row IndustryMemberRow) string { return BareSymbol(row.Symbol) },
+	)
+
 	l.mu.Lock()
 	l.industries = rows
 	l.mu.Unlock()
@@ -813,6 +927,8 @@ func (l *Lake) IndustryMembers() ([]IndustryMemberRow, error) {
 }
 
 // SectorMembers 返回全部板块成分（静态数据，缓存）。
+//
+// 与 IndustryMembers 同理：只取每个板块最新一份 as_of_date 快照的成分。
 func (l *Lake) SectorMembers() ([]SectorMemberRow, error) {
 	l.mu.Lock()
 	if l.sectors != nil {
@@ -826,6 +942,12 @@ func (l *Lake) SectorMembers() ([]SectorMemberRow, error) {
 	if err != nil {
 		return nil, err
 	}
+	rows = latestSnapshot(rows,
+		func(row SectorMemberRow) string { return row.SectorCode + "\x00" + row.SectorName },
+		func(row SectorMemberRow) int32 { return row.AsOfDate },
+		func(row SectorMemberRow) string { return BareSymbol(row.Symbol) },
+	)
+
 	l.mu.Lock()
 	l.sectors = rows
 	l.mu.Unlock()

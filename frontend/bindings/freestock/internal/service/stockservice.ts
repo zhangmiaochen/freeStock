@@ -202,6 +202,18 @@ export function GetStockUniverse(refresh: boolean): $CancellablePromise<$models.
 }
 
 /**
+ * InvalidateDerivedCaches 让"由数据湖派生出来的缓存"立刻失效重建。
+ * 
+ * 数据更新（cne）结束后由 CneUpdateService 回调到这里 —— 这样"缓存里永远是
+ * 最新的"不依赖"下一次查询时自己发现源分区指纹变了"。
+ * 
+ * 只动派生缓存，不动全量行情快照（那个有自己的 10 分钟 TTL，且重建很贵）。
+ */
+export function InvalidateDerivedCaches(): $CancellablePromise<void> {
+    return $Call.ByID(2934000231);
+}
+
+/**
  * SaveKlinePrefs 把 K 线页偏好写入配置文件，并回传落盘后的结果。
  */
 export function SaveKlinePrefs(prefs: config$0.KlinePrefs): $CancellablePromise<$models.KlinePrefsInfo> {

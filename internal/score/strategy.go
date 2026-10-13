@@ -315,6 +315,33 @@ const (
 	LowBuyDefaultScopeKey = "main_gem"
 )
 
+// LowBuyBreadthAdjScale 是**复权口径修正系数**。
+//
+// 数据湖的行情是不复权的（见 internal/cnlake/adjfactor.go）。除权跳空会把
+// "广度就绪数"(ready) 系统性压低：实测复权口径下中位 +4.5%（1,625 → 1,698），
+// 分红季更多（2023-07-19 +344 只）。指标一旦切到复权口径，广度整体上移，
+// 若不同步抬高阈值，等于把 900/1000/1500/2000/2600 全部悄悄调小了一档 ——
+// 那是**参数改动**，不是数据修正。
+//
+// 1.04 = 按分位匹配测得的值（在复权序列上取与原始序列同分位的阈值，
+// 五档一致落在 1.035~1.04 之间）。
+//
+// 默认 1.0：保持既有行为、且 golden/parity 测试不受影响；
+// 由服务层在**启用复权**时置为实测值。⚠ 只在启动时赋值一次，运行期只读。
+var LowBuyBreadthAdjScale = 1.0
+
+// scaledLowBuyThreshold 按复权修正系数折算一个阈值（系数为 1 时原样返回）。
+func scaledLowBuyThreshold(v int) int {
+	if LowBuyBreadthAdjScale <= 0 || LowBuyBreadthAdjScale == 1 {
+		return v
+	}
+	return int(float64(v)*LowBuyBreadthAdjScale + 0.5)
+}
+
+// LowBuyClearReadyCountScaled 返回复权口径下的"广度不足强制清仓"阈值
+// （默认口径下就是 900）。
+func LowBuyClearReadyCountScaled() int { return scaledLowBuyThreshold(LowBuyClearReadyCount) }
+
 // desiredCountFor 按市场状态折算"目标只数"或"目标层数"。
 //
 // 原实现 `policy_from_strategy_config`（portfolio_rotation_logic.py:248-262）：
@@ -440,7 +467,7 @@ func BuildStrategyConfig(strategyID, marketState string, targetCount, totalLayer
 		cfg.LowBuySortMode = profile.SortMode
 		cfg.LowBuyPositionMode = profile.PositionMode
 		cfg.LowBuyExitMa30Ratio = profile.ExitMa30Ratio
-		cfg.LowBuyClearReadyCount = LowBuyClearReadyCount
+		cfg.LowBuyClearReadyCount = LowBuyClearReadyCountScaled()
 		cfg.LowBuyDailyMaxNewAdds = LowBuyDailyMaxNewAdds
 		cfg.LowBuyProfitProtectStartPct = profile.ProtectStartPct
 		cfg.LowBuyProfitProtectRetracePct = profile.ProtectRetrace
@@ -514,14 +541,26 @@ func BuildRotationPolicy(marketState string, targetCount int) RotationPolicy {
 
 // lowBuyPositionThresholds 返回某仓位档的阈值表（阈值, 目标数）。
 //
+// 阈值会按 LowBuyBreadthAdjScale 折算：启用复权口径时广度整体上移，
+// 阈值必须同步抬高，否则档位分布会整体下滑（= 把阈值调小了一档）。
+//
 // 原实现 `_low_buy_position_thresholds`。
 func lowBuyPositionThresholds(mode string) [][2]int {
+	var base [][2]int
 	switch mode {
 	case "conservative1200":
-		return [][2]int{{1200, 1}, {1800, 2}, {2400, 3}, {3200, 5}}
+		base = [][2]int{{1200, 1}, {1800, 2}, {2400, 3}, {3200, 5}}
 	default: // slow1000
-		return [][2]int{{1000, 1}, {1500, 2}, {2000, 3}, {2600, 5}}
+		base = [][2]int{{1000, 1}, {1500, 2}, {2000, 3}, {2600, 5}}
 	}
+	if LowBuyBreadthAdjScale <= 0 || LowBuyBreadthAdjScale == 1 {
+		return base
+	}
+	out := make([][2]int, len(base))
+	for i, step := range base {
+		out[i] = [2]int{scaledLowBuyThreshold(step[0]), step[1]}
+	}
+	return out
 }
 
 // LowBuyPositionLayers 按低吸的仓位档把"广度就绪数"映射成建仓层数。

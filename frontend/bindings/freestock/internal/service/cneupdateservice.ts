@@ -244,6 +244,16 @@ export function SetAutoUpdate(enabled: boolean): $CancellablePromise<$models.Aut
 }
 
 /**
+ * SetOnDataChanged 注册"数据湖变了"的回调（由 main 接到行情服务上）。
+ * 
+ * 为什么由外部注入而不是本服务直接依赖 StockService：本服务只负责跑 cne，
+ * 不该知道行情层有哪些缓存；调用方（main）把两边接起来最清楚。
+ */
+export function SetOnDataChanged(fn: any): $CancellablePromise<void> {
+    return $Call.ByID(3799533034, fn);
+}
+
+/**
  * SetUpdatePrefs 保存设置（写入前自动 Sanitize）。
  * 
  * ⚠ **不只写配置**：同时校验 cne 可执行文件与工程目录能不能用，

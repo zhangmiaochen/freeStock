@@ -438,7 +438,9 @@ func (s *StockService) GetKline(code, adjust string, startYear int) (*KlineBundl
 	}
 
 	started := time.Now()
-	quotes, err := provider.DailyHistory(ctx, code, startYear*10000+101, tradeDate)
+	// ⚠ 用 KlineHistory 而不是 DailyHistory：这里要的是"一只股票 × 全历史"
+	//（startYear 默认 1990），走批量缓存会为了这一只把全市场灌进内存。
+	quotes, err := provider.KlineHistory(ctx, code, startYear*10000+101, tradeDate)
 	if err != nil {
 		return nil, fmt.Errorf("读取日K失败：%w", err)
 	}

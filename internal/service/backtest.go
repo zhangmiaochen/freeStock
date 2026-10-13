@@ -246,6 +246,11 @@ func (s *PortfolioService) CreateBacktest(req BacktestRequest) (runResult *Backt
 	}
 
 	engine := backtest.New(cfg, days, bars, benchmark)
+	// 公司行为（送转/现金分红）：只复权价格、不复权股数会让跨除权日的**名义金额**算错。
+	// 未注入（或数据湖没有 corporate_actions）时账本行为与既有实现完全一致。
+	if lk := s.stock.lakeHandle(); lk != nil && lk.HasCorporateActions() {
+		engine.SetCorporateActions(buildBacktestActions(lk, req.StartDate, req.EndDate))
+	}
 	// ★ 低吸的两道闸门必须**逐日**喂进去（广度就绪数 + 指数闸门）。
 	//
 	// 不喂的后果（此前就是这样）：`score.BuildRotationPlan` 拿到

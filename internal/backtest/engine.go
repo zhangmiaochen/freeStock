@@ -85,6 +85,18 @@ type Position struct {
 	HighestPrice float64
 }
 
+// CorporateAction 是一次除权除息（每股口径），由服务层从数据湖注入。
+//
+// 为什么需要：复权只解决**指标**的正确性（价格序列连续）。若只复权价格、不复权股数，
+// 跨越除权日的持仓在**名义金额**上会算错（收益率仍正确，因为复权序列本身是总收益序列）。
+// 结算后名义金额/手续费才与券商一致。
+type CorporateAction struct {
+	Code         string
+	ExDate       string  // YYYYMMDD
+	CashDividend float64 // 每股现金分红（税前）
+	ShareRatio   float64 // 送转/拆股后的股数乘数（1 = 无变化）
+}
+
 // PriceBar 是某只股票某日的价格。
 type PriceBar struct {
 	Date  string
@@ -162,6 +174,43 @@ type Engine struct {
 
 	trades    []Trade
 	snapshots []Snapshot
+
+	// actions 是按**除权日**索引的公司行为（key = YYYYMMDD），见 SetCorporateActions。
+	// nil 时账本不做任何调整 —— 既有测试因此不受影响。
+	actions map[string][]CorporateAction
+}
+
+// SetCorporateActions 注入公司行为（按除权日索引）；必须在 Run 之前调用。
+//
+// 未注入（或数据湖没有 corporate_actions）时行为与既有实现完全一致。
+func (e *Engine) SetCorporateActions(byDate map[string][]CorporateAction) {
+	e.actions = byDate
+}
+
+// applyCorporateActions 在当日**开盘前**结算公司行为：
+//
+//	送股/转增/拆股：Shares *= ShareRatio，CostPrice /= ShareRatio（成本摊薄）
+//	现金分红：      Cash  += Shares × CashDividend（按**除权前**股数计）
+//
+// ⚠ 顺序必须是"先分红、后送转"：红利按除权前股数发放。
+func (e *Engine) applyCorporateActions(date string, positions map[string]*Position, cash *float64) {
+	if len(e.actions) == 0 || cash == nil {
+		return
+	}
+	list := e.actions[date]
+	for _, a := range list {
+		pos, ok := positions[a.Code]
+		if !ok || pos == nil || pos.Shares <= 0 {
+			continue
+		}
+		if a.CashDividend > 0 {
+			*cash += float64(pos.Shares) * a.CashDividend
+		}
+		if a.ShareRatio > 0 && a.ShareRatio != 1 {
+			pos.Shares = int(float64(pos.Shares)*a.ShareRatio + 0.5)
+			pos.CostPrice /= a.ShareRatio
+		}
+	}
 }
 
 // New 构造引擎。

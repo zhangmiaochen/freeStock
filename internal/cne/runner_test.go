@@ -74,6 +74,52 @@ func TestRunnerReturnsImmediately(t *testing.T) {
 	}
 }
 
+// OnFinish 必须在任务结束后被回调：派生缓存（按股票日线缓存）靠它
+// 在"数据湖刚落盘"的那一刻立刻失效，而不是等下一次查询去发现。
+func TestRunnerOnFinishFiresAfterJob(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "configs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "configs", "cnequity.toml"), []byte("# test\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan struct{}, 1)
+	r := NewRunner(Options{
+		CNEPath:    "powershell.exe",
+		ProjectDir: dir,
+		LogDir:     t.TempDir(),
+		OnFinish: func(job *Job, err error) {
+			select {
+			case done <- struct{}{}:
+			default:
+			}
+		},
+	})
+	r.buildArgs = func(kind string, extra []string) ([]string, error) {
+		return []string{"-NoProfile", "-NonInteractive", "-Command", "exit 0"}, nil
+	}
+	r.foreignRunning = func() (int, bool) { return 0, false }
+
+	job, err := r.Start(KindFull, "")
+	if err != nil {
+		t.Fatalf("启动失败：%v", err)
+	}
+	select {
+	case <-done:
+	case <-job.done:
+		// 进程结束了但回调还没打上，给它一点时间（回调在 close(done) 之后调用）
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("任务已结束，但 OnFinish 没有被回调")
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("任务没有结束")
+	}
+}
+
 // 验收清单第 2 条：**运行中再次点更新被拒**，提示明确（不静默排队）。
 func TestRunnerRejectsConcurrentStart(t *testing.T) {
 	r := newTestRunner(t, "Start-Sleep -Seconds 8")

@@ -309,3 +309,35 @@ func TestGetBoardMembersUnknownCode(t *testing.T) {
 		t.Error("不存在的板块代码应报错，便于界面区分")
 	}
 }
+
+// 数据源给出重复成分时，板块成分必须去重 —— 否则不止是列表里重复几行，
+// 板块的成交额 / 流通市值会被同一只股票重复累加。
+func TestDedupeBoardSymbols(t *testing.T) {
+	boards := []stockdb.Board{
+		// 本机数据湖曾经的样子：三份 as_of_date 快照被当成并集
+		{Code: "BK0477", Name: "融资融券", Symbols: []string{"000001", "000002", "000001", "000002", "000001"}},
+		// 空代码要丢掉（不该进成分数）
+		{Code: "BK1", Name: "带空代码", Symbols: []string{"", "600519", ""}},
+		// 干净的不动，尤其是顺序不变
+		{Code: "BK2", Name: "干净", Symbols: []string{"600519", "000001"}},
+	}
+
+	got, removed := dedupeBoardSymbols(boards)
+	if removed != 5 {
+		t.Errorf("去掉的成分数应为 5（重复 3 + 空 2），实际 %d", removed)
+	}
+	if len(got[0].Symbols) != 2 || got[0].Symbols[0] != "000001" || got[0].Symbols[1] != "000002" {
+		t.Errorf("去重后成分错误: %v", got[0].Symbols)
+	}
+	if len(got[1].Symbols) != 1 || got[1].Symbols[0] != "600519" {
+		t.Errorf("空代码未丢掉: %v", got[1].Symbols)
+	}
+	if len(got[2].Symbols) != 2 || got[2].Symbols[0] != "600519" {
+		t.Errorf("干净的板块不该被动过: %v", got[2].Symbols)
+	}
+
+	// 去重只影响成分列表：板块的其它字段和板块数量都不变
+	if len(got) != 3 || got[0].Name != "融资融券" || got[0].Code != "BK0477" {
+		t.Errorf("板块元数据被改动: %+v", got)
+	}
+}

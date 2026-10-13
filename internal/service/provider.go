@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -49,6 +50,15 @@ type Provider interface {
 	LatestQuotes(ctx context.Context, codes []string, date int) (map[string]*stockdb.Quote, error)
 	QuoteRangeDesc(ctx context.Context, code string, start, end int) ([]*stockdb.Quote, error)
 	DailyHistory(ctx context.Context, code string, start, end int) ([]*stockdb.Quote, error)
+	// KlineHistory 取**单只股票的全历史**日线（K 线页专用）。
+	//
+	// **为什么要与 DailyHistory 分开**：数据湖上 `DailyHistory` 是给批量流程
+	// （回填 / 评分 / 筛选 / 回测，形态都是"一批代码 × 一段区间"）用的，
+	// 内部走"一段区间 × 全市场"的批量缓存；而 K 线是"一只股票 × 全历史"，
+	// 走那条路会为了 1396 行把全市场 726 万行灌进内存 ——
+	// 实测第一次打开 K 线 11.9 秒、堆峰值 1.5GB。
+	// 单只全历史另有"按股票"派生缓存，实测 ~2ms 且不占常驻内存。
+	KlineHistory(ctx context.Context, code string, start, end int) ([]*stockdb.Quote, error)
 	// DailyBars 只取 OHLCV（评分算指标只需要这些）。
 	//
 	// **为什么要单独一条路径**：`DailyHistory` 会为**每一根 K 线**组装完整的
@@ -197,6 +207,12 @@ func (p *stockdbProvider) QuoteRangeDesc(ctx context.Context, code string, start
 }
 
 func (p *stockdbProvider) DailyHistory(ctx context.Context, code string, start, end int) ([]*stockdb.Quote, error) {
+	return p.client.DailyHistory(ctx, code, start, end)
+}
+
+// KlineHistory 在 free-stockdb 上与 DailyHistory 是同一条路：
+// 它是服务端按代码查的键查询，本来就不存在"扫全表"的问题。
+func (p *stockdbProvider) KlineHistory(ctx context.Context, code string, start, end int) ([]*stockdb.Quote, error) {
 	return p.client.DailyHistory(ctx, code, start, end)
 }
 
@@ -372,7 +388,36 @@ type lakeProvider struct {
 	valMu      sync.Mutex
 	valuations map[string]map[int64]cnlake.ValuationRow
 	valLoaded  bool
+
+	// retryCache 是"没有近期行情的代码 → 历史最后几根 K 线"的缓存。
+	//
+	// 见 retryQuotes：这一步要扫整个 daily_bars（本机 2614 个日分区、约 4s），
+	// 而它 10 分钟后就会被全量列表重建再问一次。缓存按交易日失效，
+	// 切换数据源时整个 provider 会被换掉，所以不需要额外清理。
+	retryMu    sync.Mutex
+	retryCache *retryQuoteCache
+
+	// symbolBars 是「一个文件 = 一只股票」的派生缓存（可选，见 cnlake.SymbolBarsCache）。
+	//
+	// 它解决的是**单只股票全历史**这类查询：daily_bars 按交易日分区，
+	// 直读要打开全部 2614 个分区（实测 3.97s），走全市场批量缓存又会灌进
+	// 1.5GB 内存（实测 11.9s）——而 K 线只需要一只股票的 1396 行。
+	symbolMu   sync.Mutex
+	symbolBars *cnlake.SymbolBarsCache
+	// 数据湖当前水位（最后一个有日线的交易日）缓存
+	symbolLatest   int64
+	symbolLatestAt time.Time
+	// 重建失败后的退避时刻（零值表示没失败过）
+	symbolBuildRetryAt time.Time
+	// 下一次允许重建的最早时刻（重建限流，见 symbolBuildCooldown）
+	symbolBuildNextAt time.Time
 }
+
+// retryCacheTTL 是"不限起点补抓"结果的存活时间。
+//
+// 取 6 小时：它是**历史** K 线（不会再变），交易日一变（cache.date 不等）立刻失效，
+// 所以长一点只赚不赔。
+const retryCacheTTL = 6 * time.Hour
 
 // ⚠ **数据缺口（不是代码问题，也不补假数据）**：
 //
@@ -444,6 +489,270 @@ const bulkChunkDays = 250
 // NewLakeProvider 用数据湖构造行情来源。
 func NewLakeProvider(lake *cnlake.Lake) Provider {
 	return &lakeProvider{lake: lake}
+}
+
+// ---------------------------------------------------------------------------
+// 「按股票」日线派生缓存
+// ---------------------------------------------------------------------------
+
+// symbolLatestTTL 是"数据湖当前分区水位"的缓存时间。
+//
+// 取它要列 daily_bars 的 2614 个分区目录（实测 26~350ms，取决于文件系统冷热）。
+// 取 1 分钟：它决定"缓存是不是已经见到全部分区"（股票列表快路的前提），
+// 短一点只会多几次目录列举，不会让结果变旧 —— 数据本身的新旧由指纹与现读保证。
+const symbolLatestTTL = time.Minute
+
+// symbolBuildRetryDelay 是重建失败后的退避时间（见 EnsureSymbolBars）。
+const symbolBuildRetryDelay = 10 * time.Minute
+
+// symbolBuildCooldown 是两次重建之间的最小间隔。
+//
+// 数据湖盘中是**边写边变**的：指纹随时可能变。没有这个限流，"发现指纹变了
+// 就重建"会退化成一直重建。冷却期内查询走直读（慢但对），数据不会因此变旧。
+const symbolBuildCooldown = 2 * time.Minute
+
+// symbolCacheState 判断缓存当前能不能用、以及是不是已经覆盖到最新。
+//
+// 返回：
+//   - manifest：缓存清单（可能为零值）；
+//   - trusted：**正确性** —— 缓存里那段"冻结历史"的源文件指纹没变，
+//     可以拿它当源头用；
+//   - covered：**完整性** —— 缓存已经见到数据湖当前全部分区。
+//     "缓存里没有某只股票的文件 = 它整段历史都没有 K 线"这个推断需要它。
+func (p *lakeProvider) symbolCacheState() (cnlake.SymbolBarsManifest, bool, bool) {
+	cache := p.symbolCache()
+	if cache == nil {
+		return cnlake.SymbolBarsManifest{}, false, false
+	}
+	manifest, ok := cache.Manifest()
+	if !ok {
+		return manifest, false, false
+	}
+	covered := manifest.LakeRoot == p.lake.Root() && manifest.SourceThrough >= p.lakeLatestDate()
+
+	// ⚠ **每次读之前都重算指纹**：补跑历史、重算某一天、盘中追加、
+	// 甚至删了重写，都会让文件的 size/mtime 变化。指纹不一致就说明缓存里
+	// 那份复制品可能已经不是源头的样子 —— 这次直读，并挂后台重建。
+	//
+	// 代价实测：2614 个分区文件一次 (路径,大小,mtime) 哈希 —— 冷启动首次
+	// 约 238ms（文件系统元数据还没进缓存），之后约 20~45ms。
+	// 这是"缓存里永远是最新的"所付的钱：K 线首开因此从 25ms 变成 ~70ms。
+	signature, err := p.lake.SourceSignature(manifest.SourceThrough)
+	if err != nil {
+		slog.Warn("计算数据湖源分区指纹失败，本次不用缓存", "err", err)
+		return manifest, false, covered
+	}
+	return manifest, signature == manifest.Signature, covered
+}
+
+// SetSymbolBarsCache 挂上「按股票」派生缓存（nil = 禁用，退回直读）。
+func (p *lakeProvider) SetSymbolBarsCache(cache *cnlake.SymbolBarsCache) {
+	p.symbolMu.Lock()
+	p.symbolBars = cache
+	p.symbolMu.Unlock()
+}
+
+// symbolCache 返回当前挂着的缓存（可能为 nil）。
+func (p *lakeProvider) symbolCache() *cnlake.SymbolBarsCache {
+	p.symbolMu.Lock()
+	defer p.symbolMu.Unlock()
+	return p.symbolBars
+}
+
+// lakeLatestDate 返回数据湖最后一个**有日线**的交易日（YYYYMMDD，带缓存）。
+func (p *lakeProvider) lakeLatestDate() int64 {
+	p.symbolMu.Lock()
+	cached, at := p.symbolLatest, p.symbolLatestAt
+	p.symbolMu.Unlock()
+	if cached > 0 && time.Since(at) < symbolLatestTTL {
+		return cached
+	}
+
+	dates, err := p.lake.BarPartitionDates()
+	if err != nil || len(dates) == 0 {
+		return cached
+	}
+	latest := dates[len(dates)-1]
+	p.symbolMu.Lock()
+	p.symbolLatest, p.symbolLatestAt = latest, time.Now()
+	p.symbolMu.Unlock()
+	return latest
+}
+
+// EnsureSymbolBars 在缓存缺失/不可信/没覆盖到最新时**后台**重建一次。
+//
+// 返回 true 表示缓存现在**既可信又已覆盖到数据湖最新分区**；
+// 返回 false 表示还没好 —— 调用方要么走直读、要么用"缓存 + 补尾"。
+func (p *lakeProvider) EnsureSymbolBars() bool {
+	_, ok := p.symbolCacheReady()
+	return ok
+}
+
+// symbolCacheReady 返回"可信且已覆盖到最新"的缓存清单；不满足时挂后台重建。
+func (p *lakeProvider) symbolCacheReady() (cnlake.SymbolBarsManifest, bool) {
+	manifest, trusted, covered := p.symbolCacheState()
+	if trusted && covered {
+		return manifest, true
+	}
+	p.triggerSymbolBuild()
+	return manifest, false
+}
+
+// triggerSymbolBuild 启动一次后台重建（限流 + 失败退避）。
+func (p *lakeProvider) triggerSymbolBuild() {
+	cache := p.symbolCache()
+	if cache == nil {
+		return
+	}
+
+	p.symbolMu.Lock()
+	retryAt := p.symbolBuildRetryAt
+	nextAllowed := p.symbolBuildNextAt
+	p.symbolMu.Unlock()
+	now := time.Now()
+	// 失败退避（磁盘满、权限…）与"刚重建完又立刻过期"的限流。
+	//
+	// 限流是必需的：数据湖在盘中是**边写边变**的，若每次查询都发现指纹变了
+	// 就重跑一次 30 秒的重建，会变成一直重建。所以一次重建之后至少隔
+	// symbolBuildCooldown 才允许下一次 —— 这段时间查询走直读（慢但对）。
+	if now.Before(retryAt) || now.Before(nextAllowed) {
+		return
+	}
+
+	// "同一个缓存目录只重建一次"这道闸在 cnlake 里：一个进程可能有多个
+	// provider（切换数据源、测试里每个用例一个服务），不能让它们同时开跑
+	// 几十秒的重建、一起抢磁盘、一起写 staging。
+	if !cache.AcquireBuild() {
+		return
+	}
+	go func() {
+		defer cache.ReleaseBuild()
+		began := time.Now()
+		manifest, err := cache.Build(p.lake)
+		p.symbolMu.Lock()
+		p.symbolBuildNextAt = time.Now().Add(symbolBuildCooldown)
+		if err != nil {
+			// 重建失败不影响取数：查询会走直读，只是慢
+			p.symbolBuildRetryAt = time.Now().Add(symbolBuildRetryDelay)
+		} else {
+			p.symbolBuildRetryAt = time.Time{}
+		}
+		p.symbolMu.Unlock()
+		if err != nil {
+			slog.Warn("按股票日线缓存重建失败（查询会退回直读）", "err", err, "retryAfter", symbolBuildRetryDelay)
+			return
+		}
+		// 数据湖在构建期间又长了也不要紧：水位记的是构建时那个分区水位，
+		// 读取时会把水位之后的交易日补上
+		slog.Info("按股票日线缓存就绪",
+			"symbols", manifest.Symbols, "rows", manifest.Rows,
+			"latest", manifest.LatestDate, "sourceThrough", manifest.SourceThrough,
+			"sourceFiles", manifest.SourceFiles,
+			"elapsed", time.Since(began).Round(time.Millisecond).String())
+	}()
+}
+
+// InvalidateSymbolBars 让缓存立刻失效并触发一次重建。
+//
+// 数据更新完成后调用它，省掉"等下一次查询才发现源头变了"的空窗期。
+func (p *lakeProvider) InvalidateSymbolBars() {
+	p.symbolMu.Lock()
+	// 清掉退避与限流：更新刚结束，现在重建正是时候
+	p.symbolBuildRetryAt = time.Time{}
+	p.symbolBuildNextAt = time.Time{}
+	p.symbolMu.Unlock()
+	p.triggerSymbolBuild()
+}
+
+// symbolBarsFromCache 从**已经校验过指纹**的缓存里取一只股票的日线。
+//
+// 规则：冻结段（<= manifest.LatestDate）用缓存，之后**一律从日分区现读**。
+// 于是"盘中追加、当天被重算、新交易日"都不需要等重建就能看到最新数据。
+func (p *lakeProvider) symbolBarsFromCache(manifest cnlake.SymbolBarsManifest, code string, end int) ([]cnlake.BarRow, bool, error) {
+	rows, ok, err := p.symbolCache().Read(code)
+	if err != nil {
+		return nil, false, err
+	}
+	if !ok {
+		return nil, false, nil
+	}
+	if end > 0 && manifest.LatestDate < int64(end) {
+		tail, err := p.lake.DailyBarsInRange([]string{code}, manifest.LatestDate+1, int64(end))
+		if err != nil {
+			return nil, false, err
+		}
+		for _, row := range tail {
+			if row.Date() > manifest.LatestDate {
+				rows = append(rows, row)
+			}
+		}
+	}
+	return rows, true, nil
+}
+
+// symbolBarsFor 取一只股票的**全部**日线：缓存里那段冻结历史 + 水位之后现读。
+//
+// 返回 ok=false 表示缓存这次不能用（没启用、没建过、这只票在缓存里没有、
+// 或者**源头指纹已经变了**），调用方需要走直读 —— 那是"慢但正确"的路。
+func (p *lakeProvider) symbolBarsFor(code string, end int) ([]cnlake.BarRow, bool, error) {
+	if p.symbolCache() == nil {
+		return nil, false, nil
+	}
+	manifest, trusted, covered := p.symbolCacheState()
+	if !trusted || !covered {
+		// 源头变了 / 缓存没跟上：挂后台重建；这次不信任复制品
+		p.triggerSymbolBuild()
+	}
+	if !trusted {
+		return nil, false, nil
+	}
+	return p.symbolBarsFromCache(manifest, code, end)
+}
+
+// symbolQuotesFromCache 用「按股票」缓存回答"这些代码不晚于 end 的最后一根行情"。
+//
+// 与 `bulkQuotes` 的语义完全一致（都是取区间内最后一根、前收取倒数第二根、
+// 估值按最后一根的日期查），区别只是日线从缓存来 —— 于是不再需要扫全表。
+//
+// 调用方必须先把"可信且已覆盖到最新"这份清单传进来（见 symbolCacheReady）：
+// 指纹校验每次查询只做一次，不能在这 2000+ 个代码的循环里反复做。
+func (p *lakeProvider) symbolQuotesFromCache(manifest cnlake.SymbolBarsManifest, codes []string, end int) (map[string]*stockdb.Quote, []string, error) {
+	// 一次要问两千多个代码，用"目录索引"而不是逐个 stat（Windows 上差一个数量级）
+	known := p.symbolCache().Codes()
+	if known == nil {
+		return nil, nil, fmt.Errorf("按股票缓存的代码索引不可用")
+	}
+
+	out := make(map[string]*stockdb.Quote, len(codes))
+	missed := make([]string, 0, 16)
+	for _, code := range codes {
+		bare := cnlake.BareSymbol(code)
+		if _, ok := known[bare]; !ok {
+			// 缓存里没有这个文件 = **整段历史里一根 K 线都没有**
+			//（这个推断要求缓存覆盖到最新，调用方已经保证）
+			missed = append(missed, bare)
+			continue
+		}
+		rows, ok, err := p.symbolBarsFromCache(manifest, bare, end)
+		if err != nil {
+			return nil, nil, err
+		}
+		if !ok || len(rows) == 0 {
+			missed = append(missed, bare)
+			continue
+		}
+		last := rows[len(rows)-1]
+		var prevClose float64
+		if len(rows) >= 2 {
+			prevClose = rows[len(rows)-2].Close
+		}
+		var valuation *cnlake.ValuationRow
+		if found, ok := p.valuationFor(bare, 0, end)[last.Date()]; ok {
+			valuation = &found
+		}
+		out[bare] = p.buildQuote(bare, p.name(bare), last, prevClose, valuation, p.shareHistory(bare))
+	}
+	return out, missed, nil
 }
 
 func (p *lakeProvider) Kind() string  { return SourceKindCnLake }
@@ -540,6 +849,22 @@ func (p *lakeProvider) TradeDateAt(ctx context.Context, date int) (int, error) {
 const quoteLookbackDays = 120
 
 func (p *lakeProvider) QuotePoint(ctx context.Context, code string, date int) (*stockdb.Quote, error) {
+	// 单只股票的点查询优先走「按股票」派生缓存：它给的是整条序列，
+	// 最后一根天然就是"不晚于 date 的最近一根"。
+	//
+	// 为什么值得单开一条：窗口读（下面那条路）会触发"**全市场 × 120 天**"
+	// 的批量灌入 —— 实测 0.5~6 秒，而调用方只是想知道"这只票最后收在哪"。
+	// 只有 `000001/000016/000905/000688` 这类"股票与指数同名"的裸码会走到
+	// 这里（每次进程只算一次），但它们都是常用代码（平安银行就是 000001）。
+	if bars, ok, err := p.symbolBarsFor(code, date); err == nil && ok {
+		quotes := p.assembleQuotes(code, bars, 0, date, false)
+		if len(quotes) == 0 {
+			return nil, nil
+		}
+		// 最后一根带着正确的昨收
+		return quotes[len(quotes)-1], nil
+	}
+
 	quotes, err := p.quoteRange(code, shiftBack(date, quoteLookbackDays), date, false)
 	if err != nil {
 		return nil, err
@@ -563,8 +888,47 @@ func (p *lakeProvider) QuoteRangeDesc(ctx context.Context, code string, start, e
 	return p.quoteRange(code, start, end, true)
 }
 
+// DailyHistory 取一只股票的日线区间（**批量流程共用**：回填 / 评分 / 筛选 / 回测）。
+//
+// ⚠ 它走的是"一段区间 × 全市场"的批量缓存（`barsFor`），因为调用方总是
+// "一批代码 × 一段区间"。**K 线页不要用它** —— 那是"一只股票 × 全历史"，
+// 用批量缓存会为了 1396 行把 726 万行灌进内存（实测 11.9s / 堆 1.5GB）。
+// 单只全历史请用 `KlineHistory`。
 func (p *lakeProvider) DailyHistory(ctx context.Context, code string, start, end int) ([]*stockdb.Quote, error) {
 	return p.quoteRange(code, start, end, false)
+}
+
+// KlineHistory 取**单只股票的全历史**日线（K 线页专用）。
+//
+// 走「按股票」派生缓存：一个文件就是一只股票的全部日线，实测 ~2ms，
+// 且不占常驻内存。缓存没建好时退化成"只读这一只股票"的区间读
+// （3.97s，比灌全市场的 11.9s 快 3 倍且不吃内存），同时把它挂到后台去建。
+func (p *lakeProvider) KlineHistory(ctx context.Context, code string, start, end int) ([]*stockdb.Quote, error) {
+	if err := p.ensureMeta(); err != nil {
+		return nil, err
+	}
+	if end <= 0 {
+		end = 20991231
+	}
+	if start <= 0 {
+		start = 19900101
+	}
+
+	// 缓存过期/缺失时把重建挂到后台（非阻塞）
+	p.EnsureSymbolBars()
+
+	bars, ok, err := p.symbolBarsFor(code, end)
+	if err != nil {
+		slog.Warn("按股票日线缓存读取失败，退回直读", "code", code, "err", err)
+		ok = false
+	}
+	if !ok {
+		bars, err = p.lake.DailyBarsInRange([]string{code}, int64(start), int64(end))
+		if err != nil {
+			return nil, fmt.Errorf("读取数据湖 daily_bars 失败：%w", err)
+		}
+	}
+	return p.assembleQuotes(code, p.adjustBars(cnlake.BareSymbol(code), bars), start, end, false), nil
 }
 
 // TradingDates 直接读数据湖的日分区目录名（`trade_date=2026-10-09`）。
@@ -1044,7 +1408,7 @@ func (p *lakeProvider) fillBulk(start, end int) error {
 			p.bulkBars[bare] = mergeSortedBars(p.bulkBars[bare], bars)
 			// **同步增量组装 score.Bar**：只组装这一块（1 天或 1 个分块），
 			// 而不是每天把整个窗口重组装一遍。
-			scored := scoredBarsFrom(bars, p.shareHistory(bare))
+			scored := scoredBarsFrom(p.adjustBars(bare, bars), p.shareHistory(bare))
 			p.bulkScored[bare] = mergeSortedScored(p.bulkScored[bare], scored)
 		}
 		totalRows += len(rows)
@@ -1103,7 +1467,18 @@ func (p *lakeProvider) quoteRange(code string, start, end int, desc bool) ([]*st
 	if err != nil {
 		return nil, fmt.Errorf("读取数据湖 daily_bars 失败：%w", err)
 	}
+	// 与指标路径用**同一个复权口径**：行情(Quote)与评分(score.Bar)必须同源，
+	// 否则 `DailyBars` 与 `DailyHistory` 的等价性测试会失败，K 线与指标也会互相打架。
+	// 只复权价格；成交量/成交额保持原始（真实成交口径）。
+	bars = p.adjustBars(cnlake.BareSymbol(code), bars)
+	return p.assembleQuotes(code, bars, start, end, desc), nil
+}
 
+// assembleQuotes 把（已按日期升序的）日线组装成对外行情。
+//
+// 抽出来是为了让"按股票缓存"和"全市场批量缓存"两条取数路线**共用同一段组装**：
+// 估值、股本、前收、过滤、排序只要有一处不同，两条路就会给出不一样的 K 线。
+func (p *lakeProvider) assembleQuotes(code string, bars []cnlake.BarRow, start, end int, desc bool) []*stockdb.Quote {
 	// 估值表可能缺失（或只有部分年份），缺失时行情照样出，只是没有 PE/PB
 	// ⚠ 改成走**一次建好的索引**：原来每只股票都把这个数据集读一遍再过滤，
 	// parquet 的固定开销乘以股票数（实测约 99ms/只），比日线还慢。
@@ -1133,7 +1508,7 @@ func (p *lakeProvider) quoteRange(code string, start, end int, desc bool) ([]*st
 			out[i], out[j] = out[j], out[i]
 		}
 	}
-	return out, nil
+	return out
 }
 
 // LatestQuotes 批量取某个交易日的行情。
@@ -1158,9 +1533,23 @@ func (p *lakeProvider) LatestQuotes(ctx context.Context, codes []string, date in
 		out[code] = quote
 	}
 
-	// 回看窗口内一根都没有的（日历远超 K 线进度、长期停牌等），不限起点重取
+	// 回看窗口内一根都没有的（日历远超 K 线进度、长期停牌 / 退市的历史遗留标的），
+	// 不限起点重取一次。
+	//
+	// ⚠ **这一步是本机全量列表最贵的一段**：它要把 daily_bars 的**每一个**日分区
+	//（本机 2614 个）的 7 列全解码再按代码过滤，实测约 4s，而 2479 个待查代码里
+	// 只有 237 个真有历史（其余 2242 个在湖里根本就没有 K 线）。
+	//
+	// 试过两条加速路都没成：
+	//   - 先只读 symbol 列定位"最后两个交易日"再回读命中分区：两遍加起来只快 7%
+	//    （列裁剪省下的时间被第二遍的文件打开吃掉）；
+	//   - trading_status 能当"这个代码有没有 K 线"的索引（实测"无 status 但有 K 线"
+	//     为 0），但它给不出最后交易日，省不掉扫描。
+	//
+	// 所以改用**结果缓存**：同一天里"历史最后几根 K 线"不会变，
+	// 缓住之后 10 分钟后重建全量列表（universeTTL）不必再扫一遍。
 	if len(missed) > 0 {
-		filled, _, retryErr := p.bulkQuotes(missed, 0, date)
+		filled, retryErr := p.retryQuotes(missed, date)
 		if retryErr != nil {
 			return out, retryErr
 		}
@@ -1169,6 +1558,103 @@ func (p *lakeProvider) LatestQuotes(ctx context.Context, codes []string, date in
 		}
 	}
 	return out, nil
+}
+
+// retryQuoteCache 是"不限起点重取"的结果缓存。
+//
+// key 是交易日：同一天里每只票的历史最后几根 K 线是固定的，
+// 而这一步要扫整个 daily_bars（本机约 4s）——缓存之后，10 分钟后重建全量列表
+// （`universeTTL`）以及"刷新"都不会再付这笔钱。
+//
+// ⚠ 缓存里只有**日期 ≤ 该交易日**的 K 线，所以换交易日时旧条目自然失效；
+// 同一天内湖里补进历史（罕见）最坏情况是复用一份稍旧的报价，与
+// `bulkQuotes` 本来就有的一分钟级缓存同级风险。
+type retryQuoteCache struct {
+	date   int
+	at     time.Time
+	quotes map[string]*stockdb.Quote
+	empty  map[string]struct{} // 确认"整段历史里一根都没有"的代码
+}
+
+// retryQuotes 取"没有近期行情的代码"的历史最后几根 K 线（带缓存）。
+func (p *lakeProvider) retryQuotes(codes []string, date int) (map[string]*stockdb.Quote, error) {
+	p.retryMu.Lock()
+	cached := p.retryCache
+	p.retryMu.Unlock()
+
+	out := make(map[string]*stockdb.Quote, len(codes))
+	todo := make([]string, 0, len(codes))
+	if cached != nil && cached.date == date && time.Since(cached.at) < retryCacheTTL {
+		for _, code := range codes {
+			bare := cnlake.BareSymbol(code)
+			if quote, ok := cached.quotes[bare]; ok {
+				out[bare] = quote
+				continue
+			}
+			if _, ok := cached.empty[bare]; ok {
+				continue // 已知整段历史都没数据
+			}
+			todo = append(todo, code)
+		}
+	} else {
+		todo = codes
+	}
+
+	if len(todo) > 0 || cached == nil || cached.date != date {
+		filled, still, err := p.retryFill(todo, date)
+		if err != nil {
+			return out, err
+		}
+		next := &retryQuoteCache{
+			date:   date,
+			at:     time.Now(),
+			quotes: map[string]*stockdb.Quote{},
+			empty:  map[string]struct{}{},
+		}
+		if cached != nil && cached.date == date && time.Since(cached.at) < retryCacheTTL {
+			next = cached
+			next.at = time.Now()
+		}
+		for code, quote := range filled {
+			out[code] = quote
+			next.quotes[code] = quote
+		}
+		for _, code := range still {
+			next.empty[cnlake.BareSymbol(code)] = struct{}{}
+		}
+
+		p.retryMu.Lock()
+		p.retryCache = next
+		p.retryMu.Unlock()
+	}
+
+	slog.Info("数据湖不限起点补抓就绪",
+		"请求", len(codes), "本次实际扫描", len(todo), "命中", len(out))
+	return out, nil
+}
+
+// retryFill 取"没有近期行情的代码"各自的最后一根行情。
+//
+// 优先走「按股票」缓存：这批代码要的是"整段历史里最后一根"，而全表扫描
+// （`bulkQuotes(codes, 0, date)` → 区间从 1990 年开始 = 2614 个分区）实测约 3.5 秒，
+// 是股票列表冷启动里最贵的一段。缓存里 2242/2479 个代码**连文件都没有**
+// （它们本来就没有任何 K 线），一次目录索引就能答完（实测 2ms）。
+//
+// ⚠ 只在缓存**新鲜**时才走快路。"水位旧的缓存里没有文件"还有另一种解释：
+// 这只票是在水位之后才上市/入库的 —— 那样直接判成"没有历史"就会漏掉它
+// 最后几根 K 线。所以不新鲜时退回全表扫描（同时后台重建，几十秒后下一次就快）。
+func (p *lakeProvider) retryFill(codes []string, date int) (map[string]*stockdb.Quote, []string, error) {
+	if len(codes) == 0 {
+		return map[string]*stockdb.Quote{}, nil, nil
+	}
+	if manifest, ok := p.symbolCacheReady(); ok {
+		filled, still, err := p.symbolQuotesFromCache(manifest, codes, date)
+		if err == nil {
+			return filled, still, nil
+		}
+		slog.Warn("按股票日线缓存读失败，退回全表扫描", "err", err)
+	}
+	return p.bulkQuotes(codes, 0, date)
 }
 
 // bulkQuotes 一次读完区间内所有相关股票，返回每只（不晚于 end 的）最新一根行情，
@@ -1304,26 +1790,21 @@ func (p *lakeProvider) DividendFactors(ctx context.Context, code string) ([]stoc
 	//
 	// 不能反过来优先用 adj_factors：那张表只有因子、没有每股派息，
 	// 一旦优先，股息率会静默变成 0。
-	actions, err := p.lake.CorporateActions(code)
-	if err != nil {
-		return nil, fmt.Errorf("读取数据湖 corporate_actions 失败：%w", err)
-	}
+	//
+	// ⚠ 走 `CorporateActions`（整表一次载入 + 按代码索引）而不是按代码扫分区：
+	// 换算规则统一由 `CorporateAction.ShareMultiplier / CashPerShare` 提供，
+	// 避免"这里和别处各算一套"。
+	actions := p.lake.CorporateActions(code)
 	if len(actions) > 0 {
 		out := make([]stockdb.Factor, 0, len(actions))
 		cum := 1.0
 		for _, action := range actions {
 			// 与 free-stockdb「复权」表对齐：mult 是本次除权的股数放大倍数
-			mult := 1 + action.BonusRatio + action.TransferRatio
-			if action.SplitFactor > 0 {
-				mult *= action.SplitFactor
-			}
-			if mult <= 0 {
-				mult = 1
-			}
+			mult := action.ShareMultiplier()
 			cum *= mult
 			out = append(out, stockdb.Factor{
-				Date:  action.Date(),
-				Div:   action.CashDividend,
+				Date:  action.ExDate(),
+				Div:   action.CashPerShare(),
 				Give:  action.BonusRatio,
 				Trans: action.TransferRatio,
 				Mult:  round(mult, 4),
@@ -1604,8 +2085,41 @@ func (p *lakeProvider) DailyBars(ctx context.Context, code string, start, end in
 		return bars, nil
 	}
 	// 股本结构与 quoteRange 走同一份缓存（shareHistory 内部只读一次数据集）
-	shares := p.shareHistory(cnlake.BareSymbol(code))
-	return scoredBarsFrom(rows, shares), nil
+	bare := cnlake.BareSymbol(code)
+	shares := p.shareHistory(bare)
+	return scoredBarsFrom(p.adjustBars(bare, rows), shares), nil
+}
+
+// AdjMode 返回当前生效的复权口径（数据湖行情只存不复权，指标必须复权后再算）。
+//
+// 可用环境变量 `FREESTOCK_ADJUST` 覆盖：`none` / `qfq` / `hfq`，默认 **hfq**（后复权）。
+// 为什么默认后复权：`F(t)` 只随时间前进、历史值永不变 → 增量入库安全、回测可复现；
+// 前复权锚定"最新因子"，历史行分批入库会出现尺度锚点不一致，MA250 跨锚点会失真。
+// 两者信号等价（均线/比值/涨跌幅都是尺度不变的），只差价格水平。
+// 为什么必须复权：不复权会让除权日产生假破位（实测 `close < MA30×0.96` 的发生率
+// 除权日 44.4% vs 平时 29.8%），送转股更会在其后一年内通不过任何 `close > MA` 条件。
+var adjustMode = cnlake.ParseAdjMode(os.Getenv("FREESTOCK_ADJUST"))
+
+// adjustBars 按当前口径复权行情。因子文件缺失时原样返回（合成测试湖即如此）。
+//
+// ⚠ 只复权价格（OHLC）；成交量/成交额保持原始，因为 F 是**逐股票**的常数，
+// 跨股票放大成交额会让"按成交额排序"的候选顺序失真。
+func (p *lakeProvider) adjustBars(bare string, bars []cnlake.BarRow) []cnlake.BarRow {
+	if adjustMode == cnlake.AdjNone || p.lake == nil || len(bars) == 0 {
+		return bars
+	}
+	return p.lake.AdjustBars(bare, bars, adjustMode)
+}
+
+// 启用复权后广度整体上移（复权口径下中位 +4.5%），必须同步抬高低吸的档位阈值，
+// 否则等于把 900/1000/1500/2000/2600 悄悄调小一档 —— 那是参数改动而非数据修正。
+//
+// 1.04 是按分位匹配实测的修正系数（见 docs/复权改造实施记录.md）。
+// 关闭复权（FREESTOCK_ADJUST=none）时保持 1.0，行为与既有 golden/parity 测试一致。
+func init() {
+	if adjustMode != cnlake.AdjNone {
+		score.LowBuyBreadthAdjScale = 1.04
+	}
 }
 
 // DailyBars 对 free-stockdb 走原路径再剥字段。

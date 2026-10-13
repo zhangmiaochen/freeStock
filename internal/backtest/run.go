@@ -56,6 +56,10 @@ func (e *Engine) Run(buildPlan PlanBuilder) (*Result, error) {
 	pendingSignalDate := ""
 
 	for _, tradeDate := range dates {
+		// 除权除息结算：必须早于「执行计划」与「盯市」—— 股数/现金/成本都要先调整，
+		// 否则跨除权日的持仓在名义金额上会算错（见 Engine.applyCorporateActions）。
+		e.applyCorporateActions(tradeDate, positions, &cash)
+
 		day, hasStrength := e.strengthByDate[tradeDate]
 		tradeCountBefore := len(e.trades)
 		executionNAV := totalValue

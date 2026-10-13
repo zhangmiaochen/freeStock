@@ -84,10 +84,10 @@ func Build(root string) error {
 		return err
 	}
 
-	// 分红送转
-	if err := write(filepath.Join(curated, "corporate_actions", "ex_date=2025", "part-merged.parquet"), []cnlake.CorporateActionRow{
-		{Symbol: "600519.SH", ExDate: day(2025, 6, 19), PaymentDate: day(2025, 6, 20), ActionType: "dividend", CashDividend: 23.882},
-		{Symbol: "000001.SZ", ExDate: day(2025, 5, 20), ActionType: "dividend", CashDividend: 0.5},
+	// 分红送转（结构体与生产读取侧共用 cnlake.CorporateAction）
+	if err := write(filepath.Join(curated, "corporate_actions", "ex_date=2025", "part-merged.parquet"), []cnlake.CorporateAction{
+		{Symbol: "600519.SH", ExDateRaw: day(2025, 6, 19), ActionType: "cash_dividend", CashDividend: 23.882},
+		{Symbol: "000001.SZ", ExDateRaw: day(2025, 5, 20), ActionType: "cash_dividend", CashDividend: 0.5},
 	}); err != nil {
 		return err
 	}
@@ -110,14 +110,34 @@ func Build(root string) error {
 	}
 
 	// 行业 / 板块成分
-	if err := write(filepath.Join(curated, "industry_members", "part-merged.parquet"), []cnlake.IndustryMemberRow{
+	//
+	// 与真实数据湖一样**按 as_of_date 分区**，而且故意造两份快照：
+	// 阅读方必须只取每个板块自己最新的一份（否则同一只股票会出现多行：
+	// 界面重复 3 行、成分数与成交额被放大）。旧快照里的 300750 是"已被调出"
+	// 的成分，用来验证取的是**最新**快照而不是并集。
+	if err := write(filepath.Join(curated, "industry_members", "as_of_date=2026-01-01", "part-merged.parquet"), []cnlake.IndustryMemberRow{
 		{Symbol: "600519.SH", ClassificationSystem: "sw_l1", IndustryCode: "340000", IndustryName: "食品饮料", AsOfDate: day(2026, 1, 1)},
 		{Symbol: "000001.SZ", ClassificationSystem: "sw_l1", IndustryCode: "480000", IndustryName: "银行", AsOfDate: day(2026, 1, 1)},
+		{Symbol: "300750.SZ", ClassificationSystem: "sw_l1", IndustryCode: "340000", IndustryName: "食品饮料", AsOfDate: day(2026, 1, 1)},
 	}); err != nil {
 		return err
 	}
-	if err := write(filepath.Join(curated, "sector_members", "part-merged.parquet"), []cnlake.SectorMemberRow{
+	if err := write(filepath.Join(curated, "industry_members", "as_of_date=2026-02-01", "part-merged.parquet"), []cnlake.IndustryMemberRow{
+		{Symbol: "600519.SH", ClassificationSystem: "sw_l1", IndustryCode: "340000", IndustryName: "食品饮料", AsOfDate: day(2026, 2, 1)},
+		{Symbol: "000001.SZ", ClassificationSystem: "sw_l1", IndustryCode: "480000", IndustryName: "银行", AsOfDate: day(2026, 2, 1)},
+		// 同一份快照里的重复行：即使快照本身有重，也不该把成分数放大
+		{Symbol: "000001.SZ", ClassificationSystem: "sw_l1", IndustryCode: "480000", IndustryName: "银行", AsOfDate: day(2026, 2, 1)},
+	}); err != nil {
+		return err
+	}
+	if err := write(filepath.Join(curated, "sector_members", "as_of_date=2026-01-01", "part-merged.parquet"), []cnlake.SectorMemberRow{
 		{Symbol: "600519.SH", SectorCode: "BK0477", SectorName: "酿酒行业", AsOfDate: day(2026, 1, 1)},
+		{Symbol: "300750.SZ", SectorCode: "BK0477", SectorName: "酿酒行业", AsOfDate: day(2026, 1, 1)},
+	}); err != nil {
+		return err
+	}
+	if err := write(filepath.Join(curated, "sector_members", "as_of_date=2026-02-01", "part-merged.parquet"), []cnlake.SectorMemberRow{
+		{Symbol: "600519.SH", SectorCode: "BK0477", SectorName: "酿酒行业", AsOfDate: day(2026, 2, 1)},
 	}); err != nil {
 		return err
 	}

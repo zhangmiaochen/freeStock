@@ -146,17 +146,14 @@ func TestSyntheticLakeValuationsAndFlow(t *testing.T) {
 func TestSyntheticLakeCorporateActionsAndAdjFactors(t *testing.T) {
 	lake := cnlake.Open(buildSyntheticLake(t))
 
-	actions, err := lake.CorporateActions("600519")
-	if err != nil {
-		t.Fatalf("CorporateActions 失败: %v", err)
-	}
+	actions := lake.CorporateActions("600519")
 	if len(actions) != 1 {
 		t.Fatalf("期望 1 条分红，实际 %d", len(actions))
 	}
 	if actions[0].CashDividend != 23.882 {
 		t.Errorf("每股派息错误: %v", actions[0].CashDividend)
 	}
-	if got := actions[0].Date(); got != 20250619 {
+	if got := actions[0].ExDate(); got != 20250619 {
 		t.Errorf("除权日错误: %d", got)
 	}
 
@@ -243,8 +240,22 @@ func TestSyntheticLakeIndustryAndCalendar(t *testing.T) {
 	if err != nil {
 		t.Fatalf("IndustryMembers 失败: %v", err)
 	}
+	// 合成湖里 industry_members 有 2026-01-01 / 2026-02-01 两份快照，
+	// 旧快照里的 300750（食品饮料）已经被调出，新快照里 000001 还有一条重复行 ——
+	// 结果必须只剩「新快照的 2 条」：多一行就是快照并集/未去重，
+	// 少一行就是最新快照被整份丢掉。
 	if len(industries) != 2 {
-		t.Fatalf("期望 2 条行业成分，实际 %d", len(industries))
+		t.Fatalf("期望 2 条行业成分（最新快照去重后），实际 %d: %+v", len(industries), industries)
+	}
+	bySymbol := map[string]string{}
+	for _, row := range industries {
+		bySymbol[cnlake.BareSymbol(row.Symbol)] = row.IndustryName
+	}
+	if bySymbol["600519"] != "食品饮料" || bySymbol["000001"] != "银行" {
+		t.Errorf("最新快照的行业归属错误: %+v", bySymbol)
+	}
+	if _, stale := bySymbol["300750"]; stale {
+		t.Error("300750 已从旧快照的行业里调出，不该出现")
 	}
 
 	sectors, err := lake.SectorMembers()
