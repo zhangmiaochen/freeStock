@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -195,6 +196,8 @@ type fileData struct {
 	ScreenPrefs json.RawMessage `json:"screenPrefs,omitempty"`
 	// UpdatePrefs 是 cne 数据更新的设置（手动/自动）。
 	UpdatePrefs *UpdatePrefs `json:"updatePrefs,omitempty"`
+	// EmailPrefs 是组合调仓日报的邮件设置。
+	EmailPrefs *EmailPrefs `json:"emailPrefs,omitempty"`
 }
 
 // Store 管理配置文件。
@@ -537,6 +540,211 @@ func (s *Store) SetUpdatePrefs(prefs UpdatePrefs) UpdatePrefs {
 	sanitized := prefs.Sanitize()
 	s.mu.Lock()
 	s.data.UpdatePrefs = &sanitized
+	path := s.path
+	payload, err := json.MarshalIndent(s.data, "", "  ")
+	s.mu.Unlock()
+	s.write(path, payload, err)
+	return sanitized
+}
+
+// ---------------------------------------------------------------------------
+// 组合调仓日报的邮件设置
+// ---------------------------------------------------------------------------
+
+// 邮件传输加密方式。
+//
+// 三种都要支持，因为它们对应的是**服务商端口约定**，不是口味问题：
+//   - 465（QQ/163 的 SMTP 默认）是**连上就握手**的隐式 TLS，不能发 STARTTLS；
+//   - 587/25 是明文连接再用 STARTTLS 升级；
+//   - 少数内网 relay 什么都不加密。
+//
+// auto 按端口猜（465 → ssl，其余 → starttls），猜错时的现象是连接超时或
+// "first record does not look like a TLS handshake"，所以界面上可以显式覆盖。
+const (
+	EmailEncryptAuto     = "auto"
+	EmailEncryptSSL      = "ssl"
+	EmailEncryptSTARTTLS = "starttls"
+	EmailEncryptNone     = "none"
+)
+
+// 发送范围。
+const (
+	EmailScopeActive = "active" // 全部非归档组合（默认）
+	EmailScopeOne    = "one"    // 指定一个组合
+)
+
+// EmailPrefs 是「每日调仓日报」的邮件设置。
+//
+// ⚠ **授权码是明文存在 config.json 里的**，没有做加密。这是有意的取舍：
+// 加密密钥只能存在同一台机器的同一个目录里，挡不住能读到该目录的人，
+// 却会让"备份/迁移配置"变成一件需要解释的事。界面上把这件事写出来
+// （见 EmailPrefsInfo.PasswordNote），而不是让用户以为它被加密了。
+type EmailPrefs struct {
+	Enabled bool `json:"enabled"`
+
+	// ---- SMTP ----
+	Host       string `json:"host"` // 如 smtp.qq.com
+	Port       int    `json:"port"` // 465 / 587 / 25
+	Username   string `json:"username"`
+	Password   string `json:"password"`   // 授权码（明文，见上面的说明）
+	Encryption string `json:"encryption"` // auto / ssl / starttls / none
+	From       string `json:"from"`       // 发件人；留空用 Username
+	FromName   string `json:"fromName"`   // 发件人显示名
+	// TimeoutSeconds 是单次发送的超时（含建连与握手）。
+	TimeoutSeconds int `json:"timeoutSeconds"`
+
+	// ---- 收件 ----
+	Recipients string `json:"recipients"` // 多个地址用换行/逗号/分号分隔
+	Subject    string `json:"subject"`    // 允许 {date} / {portfolio} / {count} 占位
+
+	// ---- 定时 ----
+	SendTime string `json:"sendTime"` // "17:00"
+	// Weekdays 是发送的星期（time.Weekday 的 0=周日 … 6=周六）。
+	// 留空 = 每天都发；只勾周一~周五 = 只发交易日（节假日仍会发，见 README）。
+	Weekdays []int `json:"weekdays"`
+
+	// ---- 内容 ----
+	Scope       string `json:"scope"`       // active / one
+	PortfolioID string `json:"portfolioId"` // Scope=one 时用
+	// IncludeHoldings 附当前持仓明细（成本 / 现价 / 浮动盈亏）
+	IncludeHoldings bool `json:"includeHoldings"`
+	// IncludeCandidates 附候选池 Top N。默认关：候选池会让邮件长很多，
+	// 而"今天要做什么"由调仓动作表回答。
+	IncludeCandidates bool `json:"includeCandidates"`
+	CandidateLimit    int  `json:"candidateLimit"`
+}
+
+// DefaultEmailPrefs 返回默认设置。
+//
+// **Enabled 默认关**：发邮件会真的把持仓数据发出去，必须由用户显式打开。
+func DefaultEmailPrefs() EmailPrefs {
+	return EmailPrefs{
+		Enabled:           false,
+		Host:              "",
+		Port:              465,
+		Encryption:        EmailEncryptAuto,
+		Subject:           "【FreeStock】{date} 调仓日报 · {portfolio}",
+		SendTime:          "17:00",
+		Weekdays:          []int{1, 2, 3, 4, 5},
+		Scope:             EmailScopeActive,
+		IncludeHoldings:   true,
+		IncludeCandidates: false,
+		CandidateLimit:    10,
+		TimeoutSeconds:    30,
+	}
+}
+
+// Sanitize 收敛非法值 —— 与 KlinePrefs / UpdatePrefs 一样"永不报错，只纠正"。
+//
+// ⚠ 收件人这里**只做格式归一**（去空白、统一成换行分隔），
+// **不做地址合法性判定** —— 判定在 internal/email 里做，
+// 那里能把非法地址原样报给用户看（"以下地址不合法：…"）而不是静默丢掉。
+func (p EmailPrefs) Sanitize() EmailPrefs {
+	def := DefaultEmailPrefs()
+
+	p.Host = strings.TrimSpace(p.Host)
+	p.Username = strings.TrimSpace(p.Username)
+	p.From = strings.TrimSpace(p.From)
+	p.FromName = strings.TrimSpace(p.FromName)
+	p.PortfolioID = strings.TrimSpace(p.PortfolioID)
+
+	// 端口：0 或越界都回落（0 是"没填"的常见形态）
+	if p.Port <= 0 || p.Port > 65535 {
+		p.Port = def.Port
+	}
+
+	switch p.Encryption {
+	case EmailEncryptAuto, EmailEncryptSSL, EmailEncryptSTARTTLS, EmailEncryptNone:
+	default:
+		p.Encryption = def.Encryption
+	}
+	switch p.Scope {
+	case EmailScopeActive, EmailScopeOne:
+	default:
+		p.Scope = def.Scope
+	}
+
+	p.SendTime = sanitizeClock(p.SendTime, def.SendTime)
+
+	// 星期去重 + 收敛到 0~6；**空数组保留为空**（空 = 每天发，
+	// 不能用默认值把它填回工作日 —— 那是两件不同的事）
+	p.Weekdays = sanitizeWeekdays(p.Weekdays)
+
+	if strings.TrimSpace(p.Subject) == "" {
+		p.Subject = def.Subject
+	}
+	p.CandidateLimit = clampInt(p.CandidateLimit, 1, 50, def.CandidateLimit)
+	p.TimeoutSeconds = clampInt(p.TimeoutSeconds, 5, 300, def.TimeoutSeconds)
+
+	// 收件人：把逗号/分号/空白混写的输入统一成"一行一个"
+	p.Recipients = NormalizeRecipients(p.Recipients)
+
+	return p
+}
+
+// NormalizeRecipients 把各种分隔符混写的收件人统一成换行分隔。
+//
+// 支持换行、逗号（中英文）、分号（中英文）与空白分隔 —— 用户从
+// Excel / 邮件客户端里粘出来的列表常常是这几种混在一起的。
+func NormalizeRecipients(raw string) string {
+	fields := strings.FieldsFunc(raw, func(r rune) bool {
+		switch r {
+		case '\n', '\r', ',', '，', ';', '；', '\t', ' ':
+			return true
+		}
+		return false
+	})
+	out := make([]string, 0, len(fields))
+	seen := make(map[string]bool, len(fields))
+	for _, field := range fields {
+		addr := strings.TrimSpace(field)
+		if addr == "" {
+			continue
+		}
+		key := strings.ToLower(addr)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, addr)
+	}
+	return strings.Join(out, "\n")
+}
+
+// sanitizeWeekdays 收敛星期集合。
+func sanitizeWeekdays(values []int) []int {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := make(map[int]bool, len(values))
+	out := make([]int, 0, len(values))
+	for _, day := range values {
+		if day < 0 || day > 6 || seen[day] {
+			continue
+		}
+		seen[day] = true
+		out = append(out, day)
+	}
+	// 排序保证可比性（0=周日 排在最后更符合中文习惯，但这里统一升序即可）
+	sort.Ints(out)
+	return out
+}
+
+// EmailPrefs 返回已保存的邮件设置；第二个返回值表示是否保存过。
+func (s *Store) EmailPrefs() (EmailPrefs, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.data.EmailPrefs == nil {
+		return DefaultEmailPrefs(), false
+	}
+	return s.data.EmailPrefs.Sanitize(), true
+}
+
+// SetEmailPrefs 保存邮件设置。写入失败会被忽略（内存中仍生效）。
+func (s *Store) SetEmailPrefs(prefs EmailPrefs) EmailPrefs {
+	sanitized := prefs.Sanitize()
+	s.mu.Lock()
+	s.data.EmailPrefs = &sanitized
 	path := s.path
 	payload, err := json.MarshalIndent(s.data, "", "  ")
 	s.mu.Unlock()

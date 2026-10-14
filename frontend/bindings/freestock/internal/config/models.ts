@@ -34,6 +34,173 @@ export class BollPrefs {
 }
 
 /**
+ * EmailPrefs 是「每日调仓日报」的邮件设置。
+ * 
+ * ⚠ **授权码是明文存在 config.json 里的**，没有做加密。这是有意的取舍：
+ * 加密密钥只能存在同一台机器的同一个目录里，挡不住能读到该目录的人，
+ * 却会让"备份/迁移配置"变成一件需要解释的事。界面上把这件事写出来
+ * （见 EmailPrefsInfo.PasswordNote），而不是让用户以为它被加密了。
+ */
+export class EmailPrefs {
+    "enabled": boolean;
+
+    /**
+     * ---- SMTP ----
+     * 如 smtp.qq.com
+     */
+    "host": string;
+
+    /**
+     * 465 / 587 / 25
+     */
+    "port": number;
+    "username": string;
+
+    /**
+     * 授权码（明文，见上面的说明）
+     */
+    "password": string;
+
+    /**
+     * auto / ssl / starttls / none
+     */
+    "encryption": string;
+
+    /**
+     * 发件人；留空用 Username
+     */
+    "from": string;
+
+    /**
+     * 发件人显示名
+     */
+    "fromName": string;
+
+    /**
+     * TimeoutSeconds 是单次发送的超时（含建连与握手）。
+     */
+    "timeoutSeconds": number;
+
+    /**
+     * ---- 收件 ----
+     * 多个地址用换行/逗号/分号分隔
+     */
+    "recipients": string;
+
+    /**
+     * 允许 {date} / {portfolio} / {count} 占位
+     */
+    "subject": string;
+
+    /**
+     * ---- 定时 ----
+     * "17:00"
+     */
+    "sendTime": string;
+
+    /**
+     * Weekdays 是发送的星期（time.Weekday 的 0=周日 … 6=周六）。
+     * 留空 = 每天都发；只勾周一~周五 = 只发交易日（节假日仍会发，见 README）。
+     */
+    "weekdays": number[];
+
+    /**
+     * ---- 内容 ----
+     * active / one
+     */
+    "scope": string;
+
+    /**
+     * Scope=one 时用
+     */
+    "portfolioId": string;
+
+    /**
+     * IncludeHoldings 附当前持仓明细（成本 / 现价 / 浮动盈亏）
+     */
+    "includeHoldings": boolean;
+
+    /**
+     * IncludeCandidates 附候选池 Top N。默认关：候选池会让邮件长很多，
+     * 而"今天要做什么"由调仓动作表回答。
+     */
+    "includeCandidates": boolean;
+    "candidateLimit": number;
+
+    /** Creates a new EmailPrefs instance. */
+    constructor($$source: Partial<EmailPrefs> = {}) {
+        if (!("enabled" in $$source)) {
+            this["enabled"] = false;
+        }
+        if (!("host" in $$source)) {
+            this["host"] = "";
+        }
+        if (!("port" in $$source)) {
+            this["port"] = 0;
+        }
+        if (!("username" in $$source)) {
+            this["username"] = "";
+        }
+        if (!("password" in $$source)) {
+            this["password"] = "";
+        }
+        if (!("encryption" in $$source)) {
+            this["encryption"] = "";
+        }
+        if (!("from" in $$source)) {
+            this["from"] = "";
+        }
+        if (!("fromName" in $$source)) {
+            this["fromName"] = "";
+        }
+        if (!("timeoutSeconds" in $$source)) {
+            this["timeoutSeconds"] = 0;
+        }
+        if (!("recipients" in $$source)) {
+            this["recipients"] = "";
+        }
+        if (!("subject" in $$source)) {
+            this["subject"] = "";
+        }
+        if (!("sendTime" in $$source)) {
+            this["sendTime"] = "";
+        }
+        if (!("weekdays" in $$source)) {
+            this["weekdays"] = [];
+        }
+        if (!("scope" in $$source)) {
+            this["scope"] = "";
+        }
+        if (!("portfolioId" in $$source)) {
+            this["portfolioId"] = "";
+        }
+        if (!("includeHoldings" in $$source)) {
+            this["includeHoldings"] = false;
+        }
+        if (!("includeCandidates" in $$source)) {
+            this["includeCandidates"] = false;
+        }
+        if (!("candidateLimit" in $$source)) {
+            this["candidateLimit"] = 0;
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new EmailPrefs instance from a string or object.
+     */
+    static createFrom($$source: any = {}): EmailPrefs {
+        const $$createField12_0 = $$createType0;
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        if ("weekdays" in $$parsedSource) {
+            $$parsedSource["weekdays"] = $$createField12_0($$parsedSource["weekdays"]);
+        }
+        return new EmailPrefs($$parsedSource as Partial<EmailPrefs>);
+    }
+}
+
+/**
  * KlinePrefs 是 K 线页的偏好设置，由前端整份读写。
  */
 export class KlinePrefs {
@@ -102,9 +269,9 @@ export class KlinePrefs {
      * Creates a new KlinePrefs instance from a string or object.
      */
     static createFrom($$source: any = {}): KlinePrefs {
-        const $$createField7_0 = $$createType0;
-        const $$createField8_0 = $$createType1;
-        const $$createField9_0 = $$createType3;
+        const $$createField7_0 = $$createType1;
+        const $$createField8_0 = $$createType2;
+        const $$createField9_0 = $$createType4;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("boll" in $$parsedSource) {
             $$parsedSource["boll"] = $$createField7_0($$parsedSource["boll"]);
@@ -255,7 +422,7 @@ export class UpdatePrefs {
      * Creates a new UpdatePrefs instance from a string or object.
      */
     static createFrom($$source: any = {}): UpdatePrefs {
-        const $$createField5_0 = $$createType4;
+        const $$createField5_0 = $$createType5;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("groups" in $$parsedSource) {
             $$parsedSource["groups"] = $$createField5_0($$parsedSource["groups"]);
@@ -265,8 +432,9 @@ export class UpdatePrefs {
 }
 
 // Private type creation functions
-const $$createType0 = BollPrefs.createFrom;
-const $$createType1 = MacdPrefs.createFrom;
-const $$createType2 = MaPrefs.createFrom;
-const $$createType3 = $Create.Array($$createType2);
-const $$createType4 = $Create.Array($Create.Any);
+const $$createType0 = $Create.Array($Create.Any);
+const $$createType1 = BollPrefs.createFrom;
+const $$createType2 = MacdPrefs.createFrom;
+const $$createType3 = MaPrefs.createFrom;
+const $$createType4 = $Create.Array($$createType3);
+const $$createType5 = $Create.Array($Create.Any);

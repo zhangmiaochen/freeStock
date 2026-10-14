@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"runtime"
 	"sync"
+	"time"
 
 	"freestock/internal/portfolio"
 )
@@ -36,6 +37,12 @@ type PortfolioService struct {
 	cacheMu       sync.Mutex
 	backfillCache *rangeCachingProvider
 	cacheProvider Provider
+
+	// emailSched 是"每日调仓日报"的后台调度器。
+	//
+	// 它的锁与上面的 mu **分开**：发送要跑 BuildPlan（可能几秒），
+	// 不能占着 db() 的互斥锁。见 internal/service/email.go。
+	emailSched *emailScheduler
 }
 
 // setBackfillCache 记下本次回填用的日线缓存，供紧随其后的回测复用。
@@ -63,7 +70,10 @@ func (s *PortfolioService) backfillCacheFor(provider Provider, start, end int) *
 
 // NewPortfolioService 构造组合服务。
 func NewPortfolioService(stock *StockService) *PortfolioService {
-	return &PortfolioService{stock: stock}
+	service := &PortfolioService{stock: stock, emailSched: newEmailScheduler()}
+	// 调度器每次醒来只调这一个方法 —— 到点判定、当天去重、构建与投递都在里面
+	service.emailSched.bindTick(func() { service.maybeSendScheduledEmail(time.Now()) })
+	return service
 }
 
 // NewPortfolioServiceAt 在指定路径创建组合服务。
@@ -73,11 +83,15 @@ func NewPortfolioService(stock *StockService) *PortfolioService {
 // 而那样会让路径推导拿不到配置目录，最终落到**相对路径**（当前工作目录），
 // 于是同一个测试进程里的多个用例串用同一个库。
 func NewPortfolioServiceAt(stock *StockService, dbPath string) *PortfolioService {
-	return &PortfolioService{stock: stock, dbPathOverride: dbPath}
+	service := &PortfolioService{stock: stock, dbPathOverride: dbPath, emailSched: newEmailScheduler()}
+	service.emailSched.bindTick(func() { service.maybeSendScheduledEmail(time.Now()) })
+	return service
 }
 
 // Close 关闭组合库。
 func (s *PortfolioService) Close() {
+	// 调度器要先停：否则库关掉之后它还在跑，会拿到一个已关闭的 store
+	s.stopEmailScheduler()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.store != nil {

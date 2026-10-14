@@ -30,6 +30,7 @@ import {
 
 import PortfolioForm from "@/components/portfolio/PortfolioForm.vue";
 import PlanPanel from "@/components/portfolio/PlanPanel.vue";
+import EmailScheduleCard from "@/components/portfolio/EmailScheduleCard.vue";
 import StockSearchBox from "@/components/kline/StockSearchBox.vue";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -582,6 +583,14 @@ onMounted(async () => {
 
       <!-- ============ 右侧：详情 ============ -->
       <div class="min-h-0 flex-1 overflow-auto p-4">
+        <!-- 邮件订阅是**全局**设置（一套 SMTP、一套收件人、一个发送时间），
+             所以放在"还没选组合"也能看到的位置，而不是塞进某个组合的详情里 -->
+        <EmailScheduleCard
+          class="mb-4"
+          :portfolios="list"
+          :current-id="currentId"
+        />
+
         <p v-if="!current" class="text-muted-foreground py-20 text-center text-sm">
           从左侧选择一个组合，或新建一个
         </p>

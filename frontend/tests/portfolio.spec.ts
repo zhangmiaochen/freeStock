@@ -19,6 +19,13 @@ const mocks = vi.hoisted(() => ({
   getStrengthSummary: vi.fn(),
   buildPlan: vi.fn(),
   applyRotation: vi.fn(),
+  // 邮件订阅卡片在页面挂载时就会读设置
+  getEmailPrefs: vi.fn(),
+  saveEmailPrefs: vi.fn(),
+  clearEmailPassword: vi.fn(),
+  previewEmail: vi.fn(),
+  sendTestEmail: vi.fn(),
+  sendDailyEmailNow: vi.fn(),
 }));
 
 vi.mock("@/lib/backend", () => ({
@@ -145,6 +152,99 @@ function detail(overrides: Record<string, unknown> = {}) {
   };
 }
 
+/**
+ * 邮件订阅设置的默认桩数据。
+ *
+ * 形状与 Go 侧 `EmailPrefsInfo` 一一对应（`prefs` 是脱敏后的设置：
+ * **没有授权码原文**，只有 `passwordSet`）。
+ */
+function emailPrefs(overrides: Record<string, unknown> = {}) {
+  return {
+    enabled: false,
+    host: "smtp.qq.com",
+    port: 465,
+    username: "me@qq.com",
+    password: "",
+    encryption: "auto",
+    from: "",
+    fromName: "",
+    timeoutSeconds: 30,
+    recipients: "a@example.com\nb@example.com",
+    subject: "【FreeStock】{date} 调仓日报 · {portfolio}",
+    sendTime: "17:00",
+    weekdays: [1, 2, 3, 4, 5],
+    scope: "active",
+    portfolioId: "",
+    includeHoldings: true,
+    includeCandidates: false,
+    candidateLimit: 10,
+    ...overrides,
+  };
+}
+
+function emailInfo(overrides: Record<string, unknown> = {}) {
+  return {
+    prefs: emailPrefs(),
+    passwordSet: true,
+    passwordNote: "授权码以明文保存在 config.json 里（没有加密）。",
+    configPath: "D:\\FreeStock\\config.json",
+    recipients: ["a@example.com", "b@example.com"],
+    invalidRecipients: [],
+    schedule: {
+      enabled: false,
+      sendTime: "17:00",
+      weekdays: [1, 2, 3, 4, 5],
+      nextRun: "",
+      nextRunHint: "定时发送已关闭",
+      lastSentAt: "",
+      lastStatus: "",
+      lastError: "",
+      lastRecipients: [],
+      running: false,
+    },
+    ready: true,
+    readyError: "",
+    ...overrides,
+  };
+}
+
+function resetEmailMocks() {
+  mocks.getEmailPrefs.mockResolvedValue(emailInfo());
+  mocks.saveEmailPrefs.mockImplementation((prefs: Record<string, unknown>) =>
+    Promise.resolve(emailInfo({ prefs: { ...emailPrefs(), ...prefs } })),
+  );
+  mocks.clearEmailPassword.mockResolvedValue(
+    emailInfo({ passwordSet: false, prefs: emailPrefs({ password: "" }) }),
+  );
+  mocks.previewEmail.mockResolvedValue({
+    subject: "【FreeStock】2026-10-13 调仓日报 · 我的组合",
+    html: "<html><body><b>调仓动作</b></body></html>",
+    text: "调仓动作",
+    portfolios: ["我的组合"],
+    warnings: [],
+  });
+  mocks.sendTestEmail.mockResolvedValue({
+    sent: true,
+    recipients: ["a@example.com", "b@example.com"],
+    subject: "【FreeStock】SMTP 测试邮件",
+    portfolios: [],
+    html: "",
+    elapsed: "312ms",
+    sentAt: "2026-10-13 17:00:00",
+    warnings: [],
+  });
+  mocks.sendDailyEmailNow.mockResolvedValue({
+    sent: true,
+    recipients: ["a@example.com"],
+    subject: "【FreeStock】2026-10-13 调仓日报",
+    portfolios: ["我的组合"],
+    html: "",
+    elapsed: "450ms",
+    sentAt: "2026-10-13 17:00:00",
+    warnings: [],
+  });
+}
+
 async function mountPage() {
   const router = createRouter({
     history: createMemoryHistory(),
@@ -201,6 +301,7 @@ beforeEach(() => {
   mocks.getStrengthSummary.mockResolvedValue({
     strategyId: "trend_growth", latestDate: 20261008, count: 302, dates: [20261008],
   });
+  resetEmailMocks();
   mocks.refreshStrengthAll.mockResolvedValue({
     tradeDate: 20261008, limit: 800, elapsed: "10s",
     saved: 302, reused: 0, total: 302,
@@ -593,5 +694,249 @@ describe("组合管理页面", () => {
     expect(applyButton).toBeTruthy();
     expect(applyButton!.attributes("disabled")).toBeDefined();
     expect(applyButton!.attributes("title")).toContain("不支持一键应用");
+  });
+});
+
+/**
+ * 每日调仓日报的邮件订阅卡片。
+ *
+ * 这里钉住的是几处**容易做错、且错了用户看不出来**的行为：
+ *   - 授权码不回显（界面只能显示"已保存"）
+ *   - 留空提交不能把已存的授权码清掉
+ *   - 预览用 iframe 隔离，且能看到正文
+ */
+describe("组合页 · 调仓日报邮件", () => {
+  async function openCard() {
+    const { wrapper } = await mountPage();
+    await vi.waitFor(() => expect(mocks.getEmailPrefs).toHaveBeenCalled());
+    await nextTick();
+    await button(wrapper, "设置")!.trigger("click");
+    await nextTick();
+    return wrapper;
+  }
+
+  it("挂载时就读取邮件设置，并显示收件人数量", async () => {
+    const { wrapper } = await mountPage();
+    await vi.waitFor(() => expect(mocks.getEmailPrefs).toHaveBeenCalledTimes(1));
+    await nextTick();
+    expect(wrapper.text()).toContain("调仓日报邮件");
+    expect(wrapper.text()).toContain("2 个收件人");
+    expect(wrapper.text()).toContain("未开启");
+  });
+
+  it("展开后显示定时摘要与下次发送提示", async () => {
+    mocks.getEmailPrefs.mockResolvedValue(
+      emailInfo({
+        prefs: emailPrefs({ enabled: true }),
+        schedule: {
+          enabled: true, sendTime: "17:00", weekdays: [1, 2, 3, 4, 5],
+          nextRun: "2026-10-14T17:00:00+08:00", nextRunHint: "明天 17:00 发送",
+          lastSentAt: "2026-10-13 17:00:05", lastStatus: "成功", lastError: "",
+          lastRecipients: ["a@example.com"], running: false,
+        },
+      }),
+    );
+    const { wrapper } = await mountPage();
+    await vi.waitFor(() => expect(mocks.getEmailPrefs).toHaveBeenCalled());
+    await nextTick();
+    expect(wrapper.text()).toContain("定时已开启");
+    expect(wrapper.text()).toContain("明天 17:00 发送");
+    expect(wrapper.text()).toContain("上次：成功");
+
+    // 展开后摘要里的发送日读法也要对（"工作日"而不是"周一、周二…"）
+    await button(wrapper, "设置")!.trigger("click");
+    await nextTick();
+    expect(wrapper.text()).toContain("工作日");
+  });
+
+  it("授权码不回显：只提示已保存，输入框保持为空", async () => {
+    const wrapper = await openCard();
+    const password = wrapper.find('input[type="password"]');
+
+    expect(password.exists()).toBe(true);
+    expect((password.element as HTMLInputElement).value).toBe("");
+    expect(wrapper.text()).toContain("已保存，留空表示不改");
+  });
+
+  it("保存时把输入框里的授权码一起提交", async () => {
+    const wrapper = await openCard();
+    await wrapper.find('input[type="password"]').setValue("new-auth-code");
+
+    await button(wrapper, "保存设置")!.trigger("click");
+    await vi.waitFor(() => expect(mocks.saveEmailPrefs).toHaveBeenCalled());
+
+    const payload = mocks.saveEmailPrefs.mock.calls[0][0];
+    expect(payload.password).toBe("new-auth-code");
+    expect(payload.host).toBe("smtp.qq.com");
+  });
+
+  it("授权码留空提交 = 不改（不能把已存的清掉）", async () => {
+    const wrapper = await openCard();
+
+    await button(wrapper, "保存设置")!.trigger("click");
+    await vi.waitFor(() => expect(mocks.saveEmailPrefs).toHaveBeenCalled());
+
+    // 空串交给后端保留原值 —— 见 Go 侧 SaveEmailPrefs 的注释
+    expect(mocks.saveEmailPrefs.mock.calls[0][0].password).toBe("");
+  });
+
+  it("改动未保存时会提示，避免以为已经生效", async () => {
+    const wrapper = await openCard();
+    expect(wrapper.text()).not.toContain("有未保存的修改");
+
+    await wrapper.find('input[placeholder="smtp.qq.com"]').setValue("smtp.163.com");
+    await nextTick();
+    expect(wrapper.text()).toContain("有未保存的修改");
+
+    await button(wrapper, "保存设置")!.trigger("click");
+    await vi.waitFor(() => expect(mocks.saveEmailPrefs).toHaveBeenCalled());
+    await nextTick();
+    expect(wrapper.text()).not.toContain("有未保存的修改");
+  });
+
+  it("说明测试邮件发的是已保存的收件人", async () => {
+    const wrapper = await openCard();
+    // 用户容易以为"测试通过 = 我新填的地址也没问题"，所以这句话必须在
+    expect(wrapper.text()).toContain("测试邮件会发给「已保存」的收件人");
+    expect(wrapper.text()).toContain("a@example.com");
+  });
+
+  it("保存后显示下次发送时间", async () => {
+    mocks.saveEmailPrefs.mockResolvedValue(
+      emailInfo({
+        prefs: emailPrefs({ enabled: true }),
+        schedule: {
+          enabled: true, sendTime: "17:00", weekdays: [1, 2, 3, 4, 5],
+          nextRun: "", nextRunHint: "今天 17:00 发送",
+          lastSentAt: "", lastStatus: "", lastError: "", lastRecipients: [], running: false,
+        },
+      }),
+    );
+    const wrapper = await openCard();
+    await button(wrapper, "保存设置")!.trigger("click");
+    await vi.waitFor(() => expect(wrapper.text()).toContain("今天 17:00 发送"));
+  });
+
+  it("保存失败时把后端的原因显示出来", async () => {
+    mocks.saveEmailPrefs.mockRejectedValue(new Error("以下收件人地址不合法：bad-address"));
+    const wrapper = await openCard();
+    await button(wrapper, "保存设置")!.trigger("click");
+    await vi.waitFor(() => expect(wrapper.text()).toContain("bad-address"));
+  });
+
+  it("非法收件人在展开后能被点名", async () => {
+    mocks.getEmailPrefs.mockResolvedValue(
+      emailInfo({
+        recipients: ["a@example.com"],
+        invalidRecipients: ["bad-address", "x@"],
+      }),
+    );
+    const wrapper = await openCard();
+    expect(wrapper.text()).toContain("以下地址不合法");
+    expect(wrapper.text()).toContain("bad-address");
+  });
+
+  it("发送测试邮件走 sendTestEmail 并显示结果", async () => {
+    const wrapper = await openCard();
+    await button(wrapper, "发送测试邮件")!.trigger("click");
+    await vi.waitFor(() => expect(mocks.sendTestEmail).toHaveBeenCalled());
+    await vi.waitFor(() => expect(wrapper.text()).toContain("测试邮件已发送给"));
+    expect(wrapper.text()).toContain("312ms");
+  });
+
+  it("测试失败时显示原因", async () => {
+    mocks.sendTestEmail.mockRejectedValue(new Error("SMTP 认证失败：请确认填的是授权码"));
+    const wrapper = await openCard();
+    await button(wrapper, "发送测试邮件")!.trigger("click");
+    await vi.waitFor(() => expect(wrapper.text()).toContain("测试发送失败"));
+    expect(wrapper.text()).toContain("授权码");
+  });
+
+  it("预览用 iframe 隔离，并渲染出邮件正文", async () => {
+    const wrapper = await openCard();
+    await button(wrapper, "预览邮件")!.trigger("click");
+    await vi.waitFor(() => expect(mocks.previewEmail).toHaveBeenCalled());
+
+    const iframe = wrapper.find("iframe");
+    expect(iframe.exists()).toBe(true);
+    // 用 srcdoc 而不是 v-html：邮件自带表格样式，内联进页面会污染应用样式
+    expect(iframe.attributes("srcdoc")).toContain("调仓动作");
+    expect(wrapper.text()).toContain("主题：【FreeStock】2026-10-13");
+  });
+
+  it("立即发送日报会先确认，并展示发送范围", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const wrapper = await openCard();
+    await button(wrapper, "立即发送日报")!.trigger("click");
+    await vi.waitFor(() => expect(mocks.sendDailyEmailNow).toHaveBeenCalled());
+    await vi.waitFor(() => expect(wrapper.text()).toContain("日报已发送给"));
+    expect(wrapper.text()).toContain("我的组合");
+    confirmSpy.mockRestore();
+  });
+
+  it("取消确认时不发送", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const wrapper = await openCard();
+    await button(wrapper, "立即发送日报")!.trigger("click");
+    await nextTick();
+    expect(mocks.sendDailyEmailNow).not.toHaveBeenCalled();
+    confirmSpy.mockRestore();
+  });
+
+  it("配置不完整时给出不能发送的原因", async () => {
+    mocks.getEmailPrefs.mockResolvedValue(
+      emailInfo({ ready: false, readyError: "SMTP 服务器地址为空" }),
+    );
+    const wrapper = await openCard();
+    expect(wrapper.text()).toContain("当前设置还不能发送");
+    expect(wrapper.text()).toContain("SMTP 服务器地址为空");
+  });
+
+  it("上次失败的原因在收起状态也可见", async () => {
+    mocks.getEmailPrefs.mockResolvedValue(
+      emailInfo({
+        schedule: {
+          enabled: true, sendTime: "17:00", weekdays: [1],
+          nextRun: "", nextRunHint: "明天 17:00 发送",
+          lastSentAt: "2026-10-13 17:00:05", lastStatus: "失败",
+          lastError: "SMTP 认证失败：请确认填的是授权码",
+          lastRecipients: [], running: false,
+        },
+      }),
+    );
+    const { wrapper } = await mountPage();
+    await vi.waitFor(() => expect(wrapper.text()).toContain("上次：失败"));
+    // 没有展开也应该看得到失败原因，否则用户不知道为什么没收到
+    expect(wrapper.text()).toContain("上次失败原因");
+    expect(wrapper.text()).toContain("授权码");
+  });
+
+  it("明确写出应用没运行时不会发送", async () => {
+    const wrapper = await openCard();
+    expect(wrapper.text()).toContain("应用没运行时不会发送");
+  });
+
+  it("明文存储的提示来自后端而不是前端编的", async () => {
+    const wrapper = await openCard();
+    expect(wrapper.text()).toContain("授权码以明文保存在 config.json 里");
+  });
+
+  it("工作日快捷键把星期重置为周一至周五", async () => {
+    mocks.getEmailPrefs.mockResolvedValue(
+      emailInfo({ prefs: emailPrefs({ weekdays: [] }) }),
+    );
+    const wrapper = await openCard();
+    expect(wrapper.text()).toContain("每天");
+
+    // 逐个点亮周一~周五
+    for (const label of ["一", "二", "三", "四", "五"]) {
+      const dayButton = wrapper
+        .findAll("button")
+        .find((b) => b.text().trim() === label);
+      expect(dayButton, `找不到周${label}的按钮`).toBeTruthy();
+      await dayButton!.trigger("click");
+    }
+    await nextTick();
+    expect(wrapper.text()).toContain("工作日");
   });
 });

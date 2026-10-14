@@ -71,6 +71,10 @@ import type {
   RefreshAllResult,
 } from "../../bindings/freestock/internal/service/models";
 import type {
+  EmailPrefsInfo,
+  EmailPreview,
+  EmailScheduleInfo,
+  EmailSendResult,
   AppliedChange,
   ApplyResult,
   PlanResult,
@@ -97,7 +101,9 @@ import type { Status as CneUpdateStatus, FreshnessReport, CatchUpState } from ".
 import type { CatchUpInfo, AutoUpdateStatus } from "../../bindings/freestock/internal/service/models";
 import type { ScheduleState, RunDetail, RunSummary, SchedulePlan } from "../../bindings/freestock/internal/cne/models";
 import type { UpdatePrefs } from "../../bindings/freestock/internal/config/models";
+import type { EmailPrefs } from "../../bindings/freestock/internal/config/models";
 export type { JobInfo, UpdatePrefsInfo, CneUpdateStatus, UpdatePrefs, FreshnessReport, CatchUpState, CatchUpInfo, AutoUpdateStatus, ScheduleState, RunDetail, RunSummary, SchedulePlan };
+export type { EmailPrefs, EmailPrefsInfo, EmailPreview, EmailScheduleInfo, EmailSendResult };
 export type {
   AppliedChange,
   ApplyResult,
@@ -462,5 +468,35 @@ export const api = {
     /** 创建自动组合并落库 */
     createAutoPortfolio: (req: AutoPortfolioRequest) =>
       PortfolioService.CreateAutoPortfolio(req) as Promise<AutoPortfolioResult>,
+
+    // ---- 每日调仓日报邮件 ----
+    //
+    // 定时发送由**应用内**的调度器负责（Go 侧协程，每 30 秒看一次是否到点）。
+    // 所以应用没在运行时不会发送 —— 界面上把这一点写出来了。
+    /** 读邮件设置与调度状态（**不含授权码原文**，只有「有没有存过」） */
+    getEmailPrefs: () => PortfolioService.GetEmailPrefs() as Promise<EmailPrefsInfo>,
+    /**
+     * 保存邮件设置。
+     *
+     * ⚠ `prefs.password` 留空表示**不改**（界面拿到的是脱敏设置，
+     * 直接整份回写会把已存的授权码清掉）。要清空请用 `clearEmailPassword`。
+     */
+    saveEmailPrefs: (prefs: EmailPrefs) =>
+      PortfolioService.SaveEmailPrefs(prefs) as Promise<EmailPrefsInfo>,
+    /** 清掉已保存的授权码 */
+    clearEmailPassword: () =>
+      PortfolioService.ClearEmailPassword() as Promise<EmailPrefsInfo>,
+    /** 渲染一封"当前设置下的日报"，**不发送**（发出去就收不回来，必须先能看） */
+    previewEmail: () => PortfolioService.PreviewEmail() as Promise<EmailPreview>,
+    /**
+     * 发一封 SMTP 测试邮件。不依赖评分数据，随时可用。
+     *
+     * `to` 留空时用设置里的收件人列表；填了就先只发给它（便于逐个排查）。
+     */
+    sendTestEmail: (to = "") =>
+      PortfolioService.SendTestEmail(to) as Promise<EmailSendResult>,
+    /** 立刻发送一次日报（与定时发送走同一条路径） */
+    sendDailyEmailNow: () =>
+      PortfolioService.SendDailyEmailNow() as Promise<EmailSendResult>,
   },
 };

@@ -3,6 +3,7 @@
 
 export {
     BollPrefs,
+    EmailPrefs,
     KlinePrefs,
     MaPrefs,
     MacdPrefs,
