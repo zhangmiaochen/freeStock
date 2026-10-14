@@ -91,10 +91,17 @@ type KlinePrefs struct {
 	//
 	// 分割位由前端按**当前可见区间**的最高/最低价动态计算（缩放、平移都会重算），
 	// 所以后端只需要记住这个开关。
-	ShowFibonacci bool      `json:"showFibonacci"`
-	Boll          BollPrefs `json:"boll"`
-	Macd          MacdPrefs `json:"macd"`
-	MaConfigs     []MaPrefs `json:"maConfigs"`
+	ShowFibonacci bool `json:"showFibonacci"`
+	// ShowRangeSelect 是「框选统计」的开关：在图上拖一个矩形，
+	// 统计这一段区间的涨跌幅、最高/最低、最大回撤等。
+	//
+	// 与 ShowFibonacci 是**两套不同的区间读法**（那个跟着缩放走、这个由用户划），
+	// 所以是两个独立的开关，可以同时开。统计全部在前端算（见 lib/rangeStats），
+	// 后端同样只需要记住这个开关。
+	ShowRangeSelect bool      `json:"showRangeSelect"`
+	Boll            BollPrefs `json:"boll"`
+	Macd            MacdPrefs `json:"macd"`
+	MaConfigs       []MaPrefs `json:"maConfigs"`
 }
 
 // DefaultKlinePrefs 返回首次使用时的默认值（与界面默认一致）。
@@ -117,9 +124,12 @@ func DefaultKlinePrefs() KlinePrefs {
 		ShowFlow:   true,
 		// 斐波那契默认关闭：它是一条"读位置"的辅助线，不是每个人都要看
 		ShowFibonacci: false,
-		Boll:          BollPrefs{Period: 20, Mult: 2},
-		Macd:          MacdPrefs{Fast: 12, Slow: 26, Signal: 9},
-		MaConfigs:     mas,
+		// 框选统计默认关闭：开启后左键拖拽变成框选（不再平移），
+		// 会改变默认操作手感，必须由用户显式打开
+		ShowRangeSelect: false,
+		Boll:            BollPrefs{Period: 20, Mult: 2},
+		Macd:            MacdPrefs{Fast: 12, Slow: 26, Signal: 9},
+		MaConfigs:       mas,
 	}
 }
 

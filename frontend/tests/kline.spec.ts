@@ -196,11 +196,15 @@ const KlineChartStub = defineComponent({
     showVolume: Boolean,
     showFlow: Boolean,
     showFibonacci: Boolean,
+    // 框选统计：开关与当前选中区间
+    showRangeSelect: Boolean,
+    rangeSelection: { type: Object, default: null },
     moneyFlows: { type: Array, default: () => [] },
     bollConfig: { type: Object, default: () => ({}) },
     macdConfig: { type: Object, default: () => ({}) },
     resetKey: String,
   },
+  emits: ["rangeSelected", "rangeCleared"],
   template: '<div class="kline-chart-stub" />',
 });
 
@@ -509,6 +513,158 @@ describe("K 线页面", () => {
     const { wrapper } = await mountPage({ code: "600519" });
     await vi.waitFor(() => expect(wrapper.findComponent(KlineChartStub).exists()).toBe(true));
     expect(wrapper.findComponent(KlineChartStub).props("showFibonacci")).toBe(true);
+  });
+
+  it("框选统计：默认关闭，打开后传给图表并落盘", async () => {
+    const { wrapper } = await mountPage({ code: "600519" });
+    await vi.waitFor(() => expect(wrapper.findComponent(KlineChartStub).exists()).toBe(true));
+
+    // 默认关闭 —— 开启后左键拖拽会从"平移"变成"框选"，改变默认手感必须由用户显式打开
+    expect(wrapper.findComponent(KlineChartStub).props("showRangeSelect")).toBe(false);
+
+    const button = wrapper.findAll("button").find((b) => b.text().includes("框选统计"));
+    expect(button, "工具栏里没有框选统计开关").toBeTruthy();
+    await button!.trigger("click");
+    await nextTick();
+
+    expect(wrapper.findComponent(KlineChartStub).props("showRangeSelect")).toBe(true);
+    // 口径说明必须写出来：区间是用户划的、不随缩放变化、双击可取消
+    const text = wrapper.text();
+    expect(text).toContain("按住左键拖一个矩形");
+    expect(text).toContain("不随缩放变化");
+    expect(text).toContain("双击");
+
+    await waitForSave();
+    expect(lastSavedPrefs().showRangeSelect).toBe(true);
+  });
+
+  it("框选开关能从配置文件读回", async () => {
+    mocks.getKlinePrefs.mockResolvedValue({
+      prefs: {
+        period: "day",
+        adjust: "qfq",
+        showBoll: false,
+        showMacd: true,
+        showVolume: true,
+        showFlow: true,
+        showFibonacci: false,
+        showRangeSelect: true,
+        boll: { period: 20, mult: 2 },
+        macd: { fast: 12, slow: 26, signal: 9 },
+        maConfigs: [{ period: 5, color: "#f5c542", visible: true }],
+      },
+      saved: true,
+      configPath: "C:\\Users\\x\\AppData\\Roaming\\FreeStock\\config.json",
+    });
+
+    const { wrapper } = await mountPage({ code: "600519" });
+    await vi.waitFor(() => expect(wrapper.findComponent(KlineChartStub).exists()).toBe(true));
+    expect(wrapper.findComponent(KlineChartStub).props("showRangeSelect")).toBe(true);
+  });
+
+  it("框选之后显示区间统计，并给出各指标的口径", async () => {
+    const { wrapper } = await mountPage({ code: "600519" });
+    await vi.waitFor(() => expect(wrapper.findComponent(KlineChartStub).exists()).toBe(true));
+    const chart = wrapper.findComponent(KlineChartStub);
+
+    // 没框之前不该有统计面板
+    expect(wrapper.text()).not.toContain("框选区间");
+
+    // 模拟图表上报一次框选（日线，取第 10~40 根）
+    chart.vm.$emit("rangeSelected", { from: 10, to: 40 });
+    await nextTick();
+
+    // 面板出现，并把选中区间回传给图表用于高亮
+    expect(wrapper.text()).toContain("框选区间");
+    expect(wrapper.text()).toContain("区间涨跌幅");
+    expect(wrapper.text()).toContain("最大回撤");
+    expect(wrapper.text()).toContain("振幅");
+    expect(wrapper.text()).toContain("日均波动");
+    expect(wrapper.text()).toContain("区间最高");
+    expect(wrapper.text()).toContain("区间最低");
+    // 30 根（下标 10..39）
+    expect(wrapper.text()).toContain("30 个交易日");
+    expect(chart.props("rangeSelection")).toEqual({ from: 10, to: 40 });
+
+    // 口径必须能查到（这是用户判断数字含义的唯一依据）
+    expect(wrapper.text()).toContain("首根开盘价 → 末根收盘价");
+    expect(wrapper.text()).toContain("不包含区间外的价格跳空");
+  });
+
+  it("指数框选时不显示成交额（数据源没有这个字段）", async () => {
+    mocks.getKline.mockResolvedValue(INDEX_BUNDLE);
+    const { wrapper } = await mountPage({ code: "000001.SH" });
+    await vi.waitFor(() => expect(wrapper.findComponent(KlineChartStub).exists()).toBe(true));
+
+    wrapper.findComponent(KlineChartStub).vm.$emit("rangeSelected", { from: 0, to: 20 });
+    await nextTick();
+
+    // 指数 K 线里 amount 是 0，显示"0 亿"会让人以为真的没有成交
+    expect(wrapper.text()).toContain("框选区间");
+    expect(wrapper.text()).not.toContain("区间成交额");
+  });
+
+  it("清空框选会收起统计面板", async () => {
+    const { wrapper } = await mountPage({ code: "600519" });
+    await vi.waitFor(() => expect(wrapper.findComponent(KlineChartStub).exists()).toBe(true));
+    const chart = wrapper.findComponent(KlineChartStub);
+
+    chart.vm.$emit("rangeSelected", { from: 5, to: 25 });
+    await nextTick();
+    expect(wrapper.text()).toContain("框选区间");
+
+    // 面板上的「清除」
+    const clearButton = wrapper.findAll("button").find((b) => b.text().includes("清除"));
+    expect(clearButton, "统计面板上没有清除按钮").toBeTruthy();
+    await clearButton!.trigger("click");
+    await nextTick();
+
+    expect(wrapper.text()).not.toContain("框选区间");
+    expect(chart.props("rangeSelection")).toBeNull();
+  });
+
+  it("图表上报 rangeCleared（双击）时也会收起面板", async () => {
+    const { wrapper } = await mountPage({ code: "600519" });
+    await vi.waitFor(() => expect(wrapper.findComponent(KlineChartStub).exists()).toBe(true));
+    const chart = wrapper.findComponent(KlineChartStub);
+
+    chart.vm.$emit("rangeSelected", { from: 5, to: 25 });
+    await nextTick();
+    expect(wrapper.text()).toContain("框选区间");
+
+    chart.vm.$emit("rangeCleared");
+    await nextTick();
+    expect(wrapper.text()).not.toContain("框选区间");
+  });
+
+  it("只框到一根 K 线时不显示统计（单根不构成区间涨跌）", async () => {
+    const { wrapper } = await mountPage({ code: "600519" });
+    await vi.waitFor(() => expect(wrapper.findComponent(KlineChartStub).exists()).toBe(true));
+
+    wrapper.findComponent(KlineChartStub).vm.$emit("rangeSelected", { from: 10, to: 11 });
+    await nextTick();
+
+    expect(wrapper.text()).not.toContain("框选区间");
+  });
+
+  it("切周期后清掉框选（日线的下标 ≠ 周线的下标）", async () => {
+    const { wrapper } = await mountPage({ code: "600519" });
+    await vi.waitFor(() => expect(wrapper.findComponent(KlineChartStub).exists()).toBe(true));
+    const chart = wrapper.findComponent(KlineChartStub);
+
+    chart.vm.$emit("rangeSelected", { from: 10, to: 40 });
+    await nextTick();
+    expect(chart.props("rangeSelection")).toEqual({ from: 10, to: 40 });
+
+    // 切到周线
+    const weekButton = wrapper.findAll("button").find((b) => b.text().trim() === "周");
+    expect(weekButton, "找不到周期切换按钮").toBeTruthy();
+    await weekButton!.trigger("click");
+    await nextTick();
+
+    // 留着旧下标只会给出与眼前图表对不上的数字
+    expect(wrapper.findComponent(KlineChartStub).props("rangeSelection")).toBeNull();
+    expect(wrapper.text()).not.toContain("框选区间");
   });
 
   it("可以开关布林线 / MACD / 能量辅助线", async () => {

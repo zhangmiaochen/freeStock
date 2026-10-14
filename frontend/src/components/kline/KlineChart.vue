@@ -11,16 +11,27 @@
  *   - 不会重建 dataZoom（否则平移会被自己重置，甚至来回触发事件）；
  *   - 不闪、不打断十字光标；
  *   - 最多每帧一次，平移时不会掉帧。
+ *
+ * 框选统计（`showRangeSelect`）用的是 ECharts 的 brush 组件，是另一套交互：
+ *   - 开启时**创建一个只盖住 K 线面板的透明层**接管指针事件，
+ *     否则框选会与 dataZoom 的拖拽平移打架；
+ *   - brush 的 y 范围按**落在哪个面板**折算，所以从成交量面板里框一段也算数
+ *     （见 rangeFromBrushArea）；
+ *   - 统计与口径在 lib/rangeStats，这里只负责把像素区间换成下标区间。
  */
 import { BarChart, CandlestickChart, LineChart } from "echarts/charts";
 import {
   AxisPointerComponent,
+  BrushComponent,
   DataZoomComponent,
   GridComponent,
   LegendComponent,
   // ⚠ 少了这个：markLine（斐波那契辅助线）不会画出来，而且**不报错**，
   // 只是图上什么都没有 —— 由 tests/fibonacci.spec.ts 的 SSR 用例盯着
   MarkLineComponent,
+  // ⚠ 同理：少了它，框选后的区间高亮（markArea）会**静默消失**，
+  // 由 tests/rangeSelectChart.spec.ts 的 SSR 用例盯着
+  MarkAreaComponent,
   TooltipComponent,
 } from "echarts/components";
 import * as echarts from "echarts/core";
@@ -44,6 +55,7 @@ import {
 } from "@/lib/indicators";
 import { fibMarkLine } from "@/lib/fibonacci";
 import { formatAmount, formatDate } from "@/lib/format";
+import { selectionFromAxisValues, type RangeSelection } from "@/lib/rangeStats";
 
 echarts.use([
   CandlestickChart,
@@ -54,7 +66,9 @@ echarts.use([
   DataZoomComponent,
   AxisPointerComponent,
   LegendComponent,
+  MarkAreaComponent,
   MarkLineComponent,
+  BrushComponent,
   CanvasRenderer,
 ]);
 
@@ -70,6 +84,10 @@ const props = withDefaults(
     showFlow?: boolean;
     /** 是否显示斐波那契黄金分割辅助线 */
     showFibonacci?: boolean;
+    /** 是否开启「框选统计」：在图上拖一个矩形，统计这一段的涨跌信息 */
+    showRangeSelect?: boolean;
+    /** 已选中的区间（下标，半开区间）：画一层高亮，让用户知道统计的是哪一段 */
+    rangeSelection?: RangeSelection | null;
     /** 资金流序列（与后端 MoneyFlowPoint 对应） */
     moneyFlows?: MoneyFlowPoint[];
     bollConfig?: BollConfig;
@@ -85,6 +103,8 @@ const props = withDefaults(
     showVolume: true,
     showFlow: true,
     showFibonacci: false,
+    showRangeSelect: false,
+    rangeSelection: null,
     moneyFlows: () => [],
     bollConfig: () => ({ ...DEFAULT_BOLL }),
     macdConfig: () => ({ ...DEFAULT_MACD }),
@@ -92,6 +112,13 @@ const props = withDefaults(
     defaultVisibleBars: 160,
   },
 );
+
+const emit = defineEmits<{
+  /** 框选完成：给出下标区间（半开）与对应的日期区间 */
+  rangeSelected: [payload: { from: number; to: number }];
+  /** 框选被清掉（工具栏清空、双击、切换标的等） */
+  rangeCleared: [];
+}>();
 
 const UP = "#ef4444";
 const DOWN = "#22c55e";
@@ -128,6 +155,36 @@ let flowMean: (number | null)[] = [];
  */
 function fibonacciMarkLine(): Record<string, unknown> {
   return fibMarkLine(props.candles, zoom.value.start, zoom.value.end);
+}
+
+/**
+ * 选中区间的高亮（主图 series 的 markArea）。
+ *
+ * 用 markArea 而不是留着 brush 那层虚线框：brush 的选框横跨所有面板，
+ * 而统计只统计 K 线 —— 高亮也只盖主图，两者才对得上。
+ *
+ * ⚠ `silent: true`：markArea 会吃掉鼠标事件，不设的话它会挡住十字光标与
+ * 悬浮提示（与斐波那契 markLine 同一个坑）。
+ */
+function rangeHighlight(): Record<string, unknown> | null {
+  const selection = props.rangeSelection;
+  if (!selection) return null;
+  const candles = props.candles;
+  if (candles.length === 0) return null;
+
+  const from = Math.max(0, Math.min(selection.from, candles.length - 1));
+  const last = Math.max(from, Math.min(selection.to - 1, candles.length - 1));
+  const start = candles[from];
+  const end = candles[last];
+  if (!start || !end) return null;
+
+  return {
+    silent: true,
+    animation: false,
+    itemStyle: { color: "rgba(59,130,246,0.12)", borderColor: "#3b82f6", borderWidth: 1 },
+    label: { show: false },
+    data: [[{ xAxis: start.date }, { xAxis: end.date }]],
+  };
 }
 
 /** 按传入的周期格式化 X 轴标签 */
@@ -237,7 +294,7 @@ function buildOption(): echarts.EChartsCoreOption {
 
   const series: Record<string, unknown>[] = [];
 
-  // 主图：蜡烛（挂斐波那契辅助线）
+  // 主图：蜡烛（挂斐波那契辅助线 + 框选高亮）
   series.push({
     name: "K线",
     type: "candlestick",
@@ -251,6 +308,7 @@ function buildOption(): echarts.EChartsCoreOption {
       borderColor0: DOWN,
     },
     ...(props.showFibonacci ? { markLine: fibonacciMarkLine() } : {}),
+    ...(rangeHighlight() ? { markArea: rangeHighlight() } : {}),
   });
 
   // 均线（算一次，图例 / tooltip 共用）
@@ -416,6 +474,19 @@ function buildOption(): echarts.EChartsCoreOption {
     animation: false,
     backgroundColor: "transparent",
     textStyle: { color: "#e4e4e7" },
+    // 框选：brush 自己那层虚线框只在拖拽时出现（松手后由 clearBrushVisual 清掉），
+    // 常驻的高亮用主图 series 的 markArea 画 —— 只盖住 K 线面板，不会糊到成交量上。
+    // **不给它 toolbox**：清空与开关都在页面工具栏上，图上再放一排小图标是重复入口。
+    // `brushMode: 'single'`：拖一次就替换上一次的框，符合"框一段看看"的用法。
+    brush: {
+      xAxisIndex: 0,
+      brushType: "rect",
+      brushMode: "single",
+      transformable: false,
+      throttleType: "debounce",
+      throttleDelay: 120,
+      brushStyle: { borderWidth: 1, color: "rgba(59,130,246,0.10)", borderColor: "#3b82f6" },
+    },
     legend: {
       show: legendNames.length > 0,
       top: 2,
@@ -489,7 +560,17 @@ function buildOption(): echarts.EChartsCoreOption {
       },
     },
     dataZoom: [
-      { type: "inside", xAxisIndex: axisIndexes, start: zoom.value.start, end: zoom.value.end },
+      {
+        type: "inside",
+        xAxisIndex: axisIndexes,
+        start: zoom.value.start,
+        end: zoom.value.end,
+        // ⚠ **框选时必须禁用它**。两者都用"左键拖"：不禁用的话同一次拖拽会
+        // 既拉出选框、又把图平移走，而且平移会连带触发 Fibonacci 重算，
+        // 结果是框选过程中图一直在动。滑条（下面那个 slider）不受影响，
+        // 所以开着框选也还能缩放/平移。
+        disabled: props.showRangeSelect,
+      },
       {
         type: "slider",
         xAxisIndex: axisIndexes,
@@ -516,6 +597,12 @@ function render() {
 let fibUpdating = false;
 
 /**
+ * 重入保护：清 brush 选框时会派发一次 brush 动作，
+ * 那个动作不该再被当成"用户框选"处理。
+ */
+let brushUpdating = false;
+
+/**
  * 只更新斐波那契辅助线（缩放/平移时调用）。
  *
  * 用 `notMerge: false` 做**局部** setOption：只替换主图 series 的 markLine，
@@ -530,6 +617,94 @@ function updateFibonacciOnly() {
   } finally {
     fibUpdating = false;
   }
+}
+
+/**
+ * 把 brush 画的矩形折算成 K 线下标区间。
+ *
+ * 两个要点：
+ *  1. **y 只用来判断"框有没有落在图上"** —— 统计的始终是 K 线本身，
+ *     从成交量面板里框一段也应该得到那段时间的 K 线统计（用户是照着
+ *     时间轴框的，不会在意框在上半张还是下半张）。所以对每个面板求
+ *     y 方向交集，只要有交集就算命中；从图下方的滑条区域划过去则不算。
+ *  2. **像素到数据的换算必须交给 ECharts**（`convertFromPixel`），
+ *     自己按格子宽度除会漏掉 boundaryGap 与 dataZoom 的偏移。
+ */
+function rangeFromBrushArea(area: { x: number; y: number; width: number; height: number }): {
+  from: number;
+  to: number;
+} | null {
+  if (!chart) return null;
+  const total = props.candles.length;
+  if (total <= 0) return null;
+
+  const grid = (chart as unknown as { getModel?: () => unknown }).getModel?.() as
+    | { getComponent?: (type: string, index?: number) => { coordinateSystem?: { getBoundingRect?: () => unknown } } }
+    | undefined;
+  const rects: { x: number; y: number; width: number; height: number }[] = [];
+  if (grid?.getComponent) {
+    const grids = (chart.getOption() as { grid?: unknown[] } | undefined)?.grid ?? [];
+    for (let index = 0; index < Math.max(1, grids.length); index++) {
+      const component = grid.getComponent("grid", index);
+      const rect = component?.coordinateSystem?.getBoundingRect?.() as
+        | { x: number; y: number; width: number; height: number }
+        | undefined;
+      if (rect && Number.isFinite(rect.y) && rect.height > 0) rects.push(rect);
+    }
+  }
+  // 拿不到面板几何就不能可靠折算 —— 宁可不给结果，也别给一个错的下标区间
+  if (rects.length === 0) return null;
+
+  // ⚠ 先确认"这个矩形确实碰到了某个面板"：所有 x 轴共用同一份时间数据，
+  // 所以 x 的像素→数值换算只做一次；y 只用来判断框有没有落在图上
+  // （用户从图表下方空白处划过去时不该产出区间）。
+  const brushTop = area.y;
+  const brushBottom = area.y + area.height;
+  const hit = rects.some((rect) => {
+    const top = Math.max(brushTop, rect.y);
+    const bottom = Math.min(brushBottom, rect.y + rect.height);
+    return bottom > top;
+  });
+  if (!hit) return null;
+
+  const converted = chart.convertFromPixel({ xAxisIndex: 0 }, [
+    area.x,
+    area.x + area.width,
+  ]) as unknown;
+  if (!Array.isArray(converted) || converted.length < 2) return null;
+
+  return selectionFromAxisValues(total, Number(converted[0]), Number(converted[1]));
+}
+
+/** 清掉 brush 的选框（我们自己用 markArea 画高亮，不需要它那层虚线框）。 */
+function clearBrushVisual() {
+  if (!chart || brushUpdating) return;
+  brushUpdating = true;
+  try {
+    chart.dispatchAction({ type: "brush", areas: [] });
+  } finally {
+    brushUpdating = false;
+  }
+}
+
+/**
+ * 开关框选模式。
+ *
+ * 关掉时清掉 brush 的选框 —— 否则图上会留下一层看不懂的虚线框，
+ * 而那时已经不再响应框选操作了。
+ *
+ * 开/关都要同步 **inside 缩放的禁用状态**：它与框选都用左键拖，
+ * 不禁用就是"一边拉框一边把图拖走"。只派发 `disabled` 这一个字段
+ * （不带 start/end），否则会把用户当前的缩放窗口一起重置掉。
+ */
+function applyRangeSelectMode() {
+  if (!chart) return;
+  chart.dispatchAction({
+    type: "dataZoom",
+    dataZoomIndex: 0,
+    disabled: props.showRangeSelect,
+  });
+  if (!props.showRangeSelect) clearBrushVisual();
 }
 
 /** 数据变化时决定是否重置缩放窗口（换股票 / 换周期才重置） */
@@ -560,6 +735,36 @@ onMounted(() => {
     updateFibonacciOnly();
   });
 
+  // 框选完成（松手）。**只认 brushEnd**：brush 动作在拖拽过程中会连续触发，
+  // 在那里更新统计会让整页在拖动时反复重算。
+  chart.on("brushEnd", ((params: unknown) => {
+    if (brushUpdating) return;
+    const payload = params as {
+      areas?: { x: number; y: number; width: number; height: number }[];
+    };
+    const areas = payload?.areas ?? [];
+    if (areas.length === 0) {
+      // 内置清空把选框清掉了 → 通知父组件收起统计面板
+      emit("rangeCleared");
+      return;
+    }
+    const area = areas[0];
+    const range = rangeFromBrushArea(area);
+    // 框得太小 / 落在图外：不产生区间，也不清掉已有统计（用户可能只是手抖点了一下）
+    if (range) emit("rangeSelected", range);
+  }) as unknown as (params: unknown) => void);
+
+  // 双击取消框选。
+  //
+  // brush 自己**不带**这个行为：ECharts 源码里 `removeOnClick` 默认 false，
+  // 注释写明"单击不清是因为用户可能随手点一下，不希望框就这么没了"，
+  // 所以"点一下清掉"的直觉在这里并不成立，双击得我们自己接。
+  chart.getZr().on("dblclick", () => {
+    if (!props.showRangeSelect) return;
+    clearBrushVisual();
+    emit("rangeCleared");
+  });
+
   observer = new ResizeObserver(() => {
     chart?.resize();
     render();
@@ -568,6 +773,7 @@ onMounted(() => {
 
   applyResetIfNeeded();
   render();
+  applyRangeSelectMode();
 });
 
 onBeforeUnmount(() => {
@@ -588,6 +794,19 @@ watch(
 
 watch(
   () => [props.showBoll, props.showMacd, props.showVolume, props.showFlow, props.showFibonacci, props.period],
+  () => render(),
+);
+
+// 框选开关：开时把指针层打开并复位上一次选框，关时收起
+watch(
+  () => props.showRangeSelect,
+  () => applyRangeSelectMode(),
+);
+
+// 选中区间变化（含被清空）：整图重绘，但 dataZoom 用的是我们一直在同步的
+// `zoom.value`，所以缩放窗口不会被重置（这正是 start/end 一直写在 option 里的原因）
+watch(
+  () => props.rangeSelection,
   () => render(),
 );
 
@@ -617,6 +836,25 @@ const isEmpty = computed(() => props.candles.length === 0);
 <template>
   <div class="relative h-full w-full">
     <div ref="container" class="h-full w-full" />
+
+    <!--
+      框选模式的**装饰层**：`pointer-events: none`，不吃任何事件。
+
+      为什么不做成"拦住事件的透明层"：brush 走的是 zrender 在 canvas 上的
+      mousedown，拦掉指针事件就等于把框选本身也拦掉了。真正要解决的
+      "拖拽同时平移"是靠**禁用 inside 缩放**（见 buildOption 的 dataZoom 与
+      applyRangeSelectMode），而不是靠挡事件。
+
+      它只负责在鼠标移进图表区域时给出"可以拉框"的十字光标 ——
+      canvas 自己不会因为这个模式把光标换掉（那需要另外的 zrender 光标管理）。
+      双击取消框选绑在 zrender 上（见 onMounted），与这层无关。
+    -->
+    <div
+      v-if="showRangeSelect && !isEmpty"
+      class="pointer-events-none absolute inset-0 z-10 cursor-crosshair"
+      title="按住左键拖出一个矩形来统计这一段（双击取消）"
+    />
+
     <div
       v-if="isEmpty"
       class="text-muted-foreground absolute inset-0 flex items-center justify-center text-sm"

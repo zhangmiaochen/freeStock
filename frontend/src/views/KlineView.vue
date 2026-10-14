@@ -21,11 +21,13 @@ import {
   RefreshCw,
   Save,
   SlidersHorizontal,
+  SquareDashedMousePointer,
 } from "@lucide/vue";
 
 import KlineChart from "@/components/kline/KlineChart.vue";
 import IndicatorParams from "@/components/kline/IndicatorParams.vue";
 import MaSettings from "@/components/kline/MaSettings.vue";
+import RangeStatsPanel from "@/components/kline/RangeStatsPanel.vue";
 import StockSearchBox from "@/components/kline/StockSearchBox.vue";
 import StockSummaryBar from "@/components/kline/StockSummaryBar.vue";
 import { Badge } from "@/components/ui/badge";
@@ -48,6 +50,7 @@ import {
   type Period,
 } from "@/lib/indicators";
 import { formatDate } from "@/lib/format";
+import { rangeStats, type RangeSelection, type RangeStats } from "@/lib/rangeStats";
 import { cn } from "@/lib/utils";
 
 const route = useRoute();
@@ -80,6 +83,17 @@ const showVolume = ref(true);
 const showFlow = ref(true);
 /** 斐波那契黄金分割辅助线（区间随缩放/平移动态重算，见 lib/fibonacci） */
 const showFibonacci = ref(false);
+/**
+ * 框选统计开关：在图上拖一个矩形，统计这一段区间的涨跌信息。
+ *
+ * 与斐波那契是**两套不同的区间读法**，互不干扰：
+ *   - 斐波那契的区间是"当前可见窗口"，跟着缩放走；
+ *   - 框选的区间是用户手动划的，缩放不影响它。
+ * 所以两个可以同时开着。
+ */
+const showRangeSelect = ref(false);
+/** 当前框选的下标区间（半开）。null 表示没框 */
+const rangeSelection = ref<RangeSelection | null>(null);
 const bollConfig = ref<BollConfig>({ ...DEFAULT_BOLL });
 const macdConfig = ref<MacdConfig>({ ...DEFAULT_MACD });
 const showSummary = ref(true);
@@ -113,6 +127,7 @@ function currentPrefs(): KlinePrefs {
     showVolume: showVolume.value,
     showFlow: showFlow.value,
     showFibonacci: showFibonacci.value,
+    showRangeSelect: showRangeSelect.value,
     boll: { period: bollConfig.value.period, mult: bollConfig.value.mult },
     macd: {
       fast: macdConfig.value.fast,
@@ -135,6 +150,7 @@ function applyPrefs(stored: KlinePrefs) {
   showVolume.value = stored.showVolume ?? true;
   showFlow.value = stored.showFlow ?? true;
   showFibonacci.value = stored.showFibonacci ?? false;
+  showRangeSelect.value = stored.showRangeSelect ?? false;
   bollConfig.value = normalizeBoll(stored.boll ?? DEFAULT_BOLL);
   macdConfig.value = normalizeMacd(stored.macd ?? DEFAULT_MACD);
 
@@ -191,7 +207,10 @@ function scheduleSave() {
 }
 
 watch(
-  [period, adjust, showBoll, showMacd, showVolume, showFlow, showFibonacci, bollConfig, macdConfig, maConfigs],
+  [
+    period, adjust, showBoll, showMacd, showVolume, showFlow, showFibonacci,
+    showRangeSelect, bollConfig, macdConfig, maConfigs,
+  ],
   () => scheduleSave(),
   { deep: true },
 );
@@ -210,6 +229,28 @@ const displayCandles = computed<Candle[]>(() => {
 
 const visibleMaCount = computed(() => maConfigs.value.filter((item) => item.visible).length);
 
+/**
+ * 框选区间的涨跌信息。
+ *
+ * 每次都要**跟着 displayCandles 重算**：切周期（日→周）之后下标区间还是同一段
+ * 时间，但蜡烛变少了，统计必须按新的周期重算 —— 复用旧结果会给出日线的数字，
+ * 而用户看到的是周线。
+ */
+const selectedStats = computed<RangeStats | null>(() => {
+  const selection = rangeSelection.value;
+  if (!selection) return null;
+  return rangeStats(displayCandles.value, selection.from, selection.to);
+});
+
+/** 框选被清掉 / 数据换了，就收起统计面板 */
+function clearRange() {
+  rangeSelection.value = null;
+}
+
+function onRangeSelected(payload: { from: number; to: number }) {
+  rangeSelection.value = { from: payload.from, to: payload.to };
+}
+
 const periodTitle = computed(
   () => PERIODS.find((item) => item.key === period.value)?.title ?? "日线",
 );
@@ -218,6 +259,9 @@ async function load(targetCode?: string, force = false) {
   const next = (targetCode ?? code.value).trim();
   if (!next) return;
   code.value = next;
+
+  // 换了标的，之前框选的下标指向的是另一只股票的 K 线
+  clearRange();
 
   loading.value = true;
   error.value = "";
@@ -271,8 +315,14 @@ watch(
 );
 
 watch(adjust, () => {
+  // 复权方式换了，同一段区间的价格整体变了，旧统计不再成立
+  clearRange();
   if (code.value) void load();
 });
+
+// 切周期后下标区间与统计基准都变了（日线的第 10~20 根 ≠ 周线的第 10~20 根），
+// 留着旧框只会给出对不上的数字，所以直接清掉
+watch(period, () => clearRange());
 </script>
 
 <template>
@@ -355,6 +405,18 @@ watch(adjust, () => {
           @click="showFibonacci = !showFibonacci"
         >
           斐波那契
+        </Button>
+        <Button
+          size="xs"
+          :variant="showRangeSelect ? 'default' : 'outline'"
+          title="开启后在图上按住左键拖一个矩形，统计这一段的涨跌幅、最高/最低、回撤等（双击或点面板上的「清除」取消）"
+          @click="showRangeSelect = !showRangeSelect"
+        >
+          <SquareDashedMousePointer />
+          框选统计
+          <Badge v-if="selectedStats" variant="secondary" class="ml-1 px-1 py-0 text-[10px]">
+            {{ selectedStats.count }} 根
+          </Badge>
         </Button>
         <Button
           size="xs"
@@ -479,11 +541,34 @@ watch(adjust, () => {
             两者互为镜像，所以一条线标两个数就够，画两遍只会得到重叠的线。
           </span>
         </p>
+
+        <!-- 框选口径：区间是用户划的，与斐波那契的"可见窗口"是两回事。
+             ⚠ 放在 showSummary 里面（与另外两条口径说明一起），
+             但**统计面板放在外面** —— 「收起信息」只是不看公司资料，
+             不该把刚框出来的数字一起藏掉。 -->
+        <p
+          v-if="showRangeSelect"
+          class="text-muted-foreground mt-2 flex items-start gap-1.5 text-[11px]"
+        >
+          <Info class="mt-0.5 size-3 shrink-0" />
+          <span>
+            框选统计：在图上<b class="text-foreground">按住左键拖一个矩形</b>，
+            统计这一段的涨跌幅、最高/最低、最大回撤、振幅与日均波动。
+            区间由你划定，<b class="text-foreground">不随缩放变化</b>（与斐波那契的"可见窗口"口径不同，两者可以同时开）。
+            开启期间<b class="text-foreground">左键拖拽用于框选</b>，
+            缩放/平移请用图表下方的滑条；在图上<b class="text-foreground">双击</b>或点统计面板上的「清除」可以取消框选。
+          </span>
+        </p>
       </div>
 
-      <div class="min-h-0 flex-1 px-5 py-3">
+      <!-- 框选统计结果：放在图上方的正文流里，不遮挡 K 线 -->
+      <div v-if="selectedStats" class="shrink-0 px-5 pt-3">
+        <RangeStatsPanel :stats="selectedStats" :is-index="isIndex" @clear="clearRange" />
+      </div>
+
+      <div class="flex min-h-0 flex-1 flex-col px-5 py-3">
         <div
-          :class="cn('bg-card h-full w-full rounded-lg border p-2', loading && 'opacity-60')"
+          :class="cn('bg-card min-h-0 flex-1 rounded-lg border p-2', loading && 'opacity-60')"
         >
           <KlineChart
             :candles="displayCandles"
@@ -494,10 +579,14 @@ watch(adjust, () => {
             :show-volume="showVolume"
             :show-flow="showFlow"
             :show-fibonacci="showFibonacci"
+            :show-range-select="showRangeSelect"
+            :range-selection="rangeSelection"
             :money-flows="bundle.moneyFlows"
             :boll-config="bollConfig"
             :macd-config="macdConfig"
             :reset-key="`${code}-${period}-${adjust}`"
+            @range-selected="onRangeSelected"
+            @range-cleared="clearRange"
           />
         </div>
       </div>

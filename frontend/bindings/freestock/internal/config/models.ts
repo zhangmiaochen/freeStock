@@ -225,6 +225,16 @@ export class KlinePrefs {
      * 所以后端只需要记住这个开关。
      */
     "showFibonacci": boolean;
+
+    /**
+     * ShowRangeSelect 是「框选统计」的开关：在图上拖一个矩形，
+     * 统计这一段区间的涨跌幅、最高/最低、最大回撤等。
+     * 
+     * 与 ShowFibonacci 是**两套不同的区间读法**（那个跟着缩放走、这个由用户划），
+     * 所以是两个独立的开关，可以同时开。统计全部在前端算（见 lib/rangeStats），
+     * 后端同样只需要记住这个开关。
+     */
+    "showRangeSelect": boolean;
     "boll": BollPrefs;
     "macd": MacdPrefs;
     "maConfigs": MaPrefs[];
@@ -252,6 +262,9 @@ export class KlinePrefs {
         if (!("showFibonacci" in $$source)) {
             this["showFibonacci"] = false;
         }
+        if (!("showRangeSelect" in $$source)) {
+            this["showRangeSelect"] = false;
+        }
         if (!("boll" in $$source)) {
             this["boll"] = (new BollPrefs());
         }
@@ -269,18 +282,18 @@ export class KlinePrefs {
      * Creates a new KlinePrefs instance from a string or object.
      */
     static createFrom($$source: any = {}): KlinePrefs {
-        const $$createField7_0 = $$createType1;
-        const $$createField8_0 = $$createType2;
-        const $$createField9_0 = $$createType4;
+        const $$createField8_0 = $$createType1;
+        const $$createField9_0 = $$createType2;
+        const $$createField10_0 = $$createType4;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("boll" in $$parsedSource) {
-            $$parsedSource["boll"] = $$createField7_0($$parsedSource["boll"]);
+            $$parsedSource["boll"] = $$createField8_0($$parsedSource["boll"]);
         }
         if ("macd" in $$parsedSource) {
-            $$parsedSource["macd"] = $$createField8_0($$parsedSource["macd"]);
+            $$parsedSource["macd"] = $$createField9_0($$parsedSource["macd"]);
         }
         if ("maConfigs" in $$parsedSource) {
-            $$parsedSource["maConfigs"] = $$createField9_0($$parsedSource["maConfigs"]);
+            $$parsedSource["maConfigs"] = $$createField10_0($$parsedSource["maConfigs"]);
         }
         return new KlinePrefs($$parsedSource as Partial<KlinePrefs>);
     }
