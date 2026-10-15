@@ -63,6 +63,10 @@ type Lake struct {
 	instruments []InstrumentRow
 	industries  []IndustryMemberRow
 	sectors     []SectorMemberRow
+	// industryIdx 是 industry_members 的**按体系/按快照**索引（见 industryasof.go）。
+	// 与上面的 industries（"每只票最新一条"）是两个用途：
+	// 那个服务"看当下"，这个服务"某一天它属于哪个行业"。
+	industryIdx *industryIndex
 
 	// 复权因子缓存（`meta/adj_factors_cache`），见 adjfactor.go。
 	// adjMu 同时保护下面的公司行为缓存（两者都是一次性惰性载入）。

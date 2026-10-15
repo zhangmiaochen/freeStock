@@ -286,6 +286,10 @@ export function PreviewAutoPortfolio(req: $models.AutoPortfolioRequest): $Cancel
  * 
  * 预览是这套功能唯一的"所见即所得"入口：邮件发出去就收不回来，
  * 所以必须能在发之前看到正文。
+ * 
+ * ⚠ 预览**也会先刷新评分**（与真正发送同一条路径）：否则预览显示的是
+ * 上一帧评分的建议，而真正发出去的是刷过之后的 —— 两者对不上，
+ * 预览就失去了"所见即所得"的意义。代价是点预览可能等几十秒（首刷）。
  */
 export function PreviewEmail(): $CancellablePromise<$models.EmailPreview | null> {
     return $Call.ByID(4004031860).then(($result: any) => {

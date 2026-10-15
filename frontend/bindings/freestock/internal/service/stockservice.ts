@@ -140,6 +140,24 @@ export function GetFinancialStatements(code: string, limit: number): $Cancellabl
 }
 
 /**
+ * GetIndexValuation 返回指数性价比评估（独立模型）。
+ */
+export function GetIndexValuation(code: string): $CancellablePromise<$models.IndexValuationResult | null> {
+    return $Call.ByID(2872662045, code).then(($result: any) => {
+        return $$createType17($result);
+    });
+}
+
+/**
+ * GetIndustryValuation 返回某个行业的估值环境与行业内排名。
+ */
+export function GetIndustryValuation(codeOrName: string): $CancellablePromise<$models.IndustryValuationDetail | null> {
+    return $Call.ByID(2372833115, codeOrName).then(($result: any) => {
+        return $$createType19($result);
+    });
+}
+
+/**
  * GetKline 返回某只股票（或大盘指数）的完整日 K 与简要信息。
  * adjust 取值：none（不复权）/ qfq（前复权，默认）/ hfq（后复权）。
  * 
@@ -148,7 +166,7 @@ export function GetFinancialStatements(code: string, limit: number): $Cancellabl
  */
 export function GetKline(code: string, adjust: string, startYear: number): $CancellablePromise<$models.KlineBundle | null> {
     return $Call.ByID(4230615817, code, adjust, startYear).then(($result: any) => {
-        return $$createType17($result);
+        return $$createType21($result);
     });
 }
 
@@ -157,7 +175,7 @@ export function GetKline(code: string, adjust: string, startYear: number): $Canc
  */
 export function GetKlinePrefs(): $CancellablePromise<$models.KlinePrefsInfo> {
     return $Call.ByID(3219711925).then(($result: any) => {
-        return $$createType18($result);
+        return $$createType22($result);
     });
 }
 
@@ -170,7 +188,7 @@ export function GetKlinePrefs(): $CancellablePromise<$models.KlinePrefsInfo> {
  */
 export function GetMarketTemperature(periodDays: number): $CancellablePromise<$models.MarketTemperatureResult | null> {
     return $Call.ByID(2090856712, periodDays).then(($result: any) => {
-        return $$createType20($result);
+        return $$createType24($result);
     });
 }
 
@@ -179,7 +197,7 @@ export function GetMarketTemperature(periodDays: number): $CancellablePromise<$m
  */
 export function GetScreenCondition(): $CancellablePromise<$models.ScreenConditionInfo> {
     return $Call.ByID(3333010147).then(($result: any) => {
-        return $$createType21($result);
+        return $$createType25($result);
     });
 }
 
@@ -188,7 +206,7 @@ export function GetScreenCondition(): $CancellablePromise<$models.ScreenConditio
  */
 export function GetScreenOptions(): $CancellablePromise<$models.ScreenOptions | null> {
     return $Call.ByID(2659327240).then(($result: any) => {
-        return $$createType23($result);
+        return $$createType27($result);
     });
 }
 
@@ -197,7 +215,44 @@ export function GetScreenOptions(): $CancellablePromise<$models.ScreenOptions | 
  */
 export function GetStockUniverse(refresh: boolean): $CancellablePromise<$models.StockUniverse | null> {
     return $Call.ByID(2542377399, refresh).then(($result: any) => {
-        return $$createType25($result);
+        return $$createType29($result);
+    });
+}
+
+/**
+ * GetStockValuation 返回单只标的的完整评估（按需计算，不等全市场评估）。
+ * 
+ * 代价是**拿不到排名**：排名需要横截面。行业与同行的比较则是完整的 ——
+ * 虽然只评估这一只，但行情/财报/股本都是整段读进来的，行业成分不缺
+ * （见 loadValuationDataset 的说明）。
+ */
+export function GetStockValuation(code: string): $CancellablePromise<$models.StockValuation | null> {
+    return $Call.ByID(1676028323, code).then(($result: any) => {
+        return $$createType31($result);
+    });
+}
+
+/**
+ * GetValuationParams 返回当前生效的模型参数。
+ */
+export function GetValuationParams(): $CancellablePromise<$models.ValuationParamsInfo> {
+    return $Call.ByID(1866242423).then(($result: any) => {
+        return $$createType32($result);
+    });
+}
+
+/**
+ * GetValuationReport 返回全市场多期限性价比评估。
+ * 
+ * limit > 0 时只评估市值最大的前 limit 只（首刷用），0 表示全市场。
+ * 结果按 (评估日, 数据源代次, limit) 缓存 30 分钟；refresh=true 强制重算。
+ * 
+ * ⚠ limit **只影响"评估多少只"**，不影响"行业基准怎么算"：
+ * 行业基准永远用全市场候选算（见 buildValuationReport）。
+ */
+export function GetValuationReport(limit: number, refresh: boolean): $CancellablePromise<$models.ValuationReport | null> {
+    return $Call.ByID(2806814735, limit, refresh).then(($result: any) => {
+        return $$createType34($result);
     });
 }
 
@@ -214,11 +269,20 @@ export function InvalidateDerivedCaches(): $CancellablePromise<void> {
 }
 
 /**
+ * ListValuationIndices 返回可用于评估的指数清单（供界面下拉）。
+ */
+export function ListValuationIndices(): $CancellablePromise<$models.ValuationIndexOption[]> {
+    return $Call.ByID(189550398).then(($result: any) => {
+        return $$createType36($result);
+    });
+}
+
+/**
  * SaveKlinePrefs 把 K 线页偏好写入配置文件，并回传落盘后的结果。
  */
 export function SaveKlinePrefs(prefs: config$0.KlinePrefs): $CancellablePromise<$models.KlinePrefsInfo> {
     return $Call.ByID(4212647476, prefs).then(($result: any) => {
-        return $$createType18($result);
+        return $$createType22($result);
     });
 }
 
@@ -243,7 +307,7 @@ export function ScreenCategories(): $CancellablePromise<$models.BoardCategoryInf
  */
 export function ScreenStocks(cond: $models.ScreenCondition): $CancellablePromise<$models.ScreenResult | null> {
     return $Call.ByID(2366312837, cond).then(($result: any) => {
-        return $$createType27($result);
+        return $$createType38($result);
     });
 }
 
@@ -256,7 +320,7 @@ export function ScreenStocks(cond: $models.ScreenCondition): $CancellablePromise
  */
 export function SearchStocks(keyword: string, limit: number): $CancellablePromise<$models.StockSearchItem[]> {
     return $Call.ByID(264754049, keyword, limit).then(($result: any) => {
-        return $$createType29($result);
+        return $$createType40($result);
     });
 }
 
@@ -274,7 +338,7 @@ export function SetDataLakeRoot(root: string): $CancellablePromise<$models.DataL
  */
 export function SetDataSource(kind: string, rawURL: string): $CancellablePromise<$models.SourceStatus> {
     return $Call.ByID(1745476251, kind, rawURL).then(($result: any) => {
-        return $$createType30($result);
+        return $$createType41($result);
     });
 }
 
@@ -284,7 +348,7 @@ export function SetDataSource(kind: string, rawURL: string): $CancellablePromise
  */
 export function TestDataSource(kind: string, rawURL: string): $CancellablePromise<$models.SourceStatus> {
     return $Call.ByID(2806700859, kind, rawURL).then(($result: any) => {
-        return $$createType30($result);
+        return $$createType41($result);
     });
 }
 
@@ -305,18 +369,29 @@ const $$createType12 = $models.FinanceSnapshot.createFrom;
 const $$createType13 = $Create.Nullable($$createType12);
 const $$createType14 = $models.FinancialStatements.createFrom;
 const $$createType15 = $Create.Nullable($$createType14);
-const $$createType16 = $models.KlineBundle.createFrom;
+const $$createType16 = $models.IndexValuationResult.createFrom;
 const $$createType17 = $Create.Nullable($$createType16);
-const $$createType18 = $models.KlinePrefsInfo.createFrom;
-const $$createType19 = $models.MarketTemperatureResult.createFrom;
-const $$createType20 = $Create.Nullable($$createType19);
-const $$createType21 = $models.ScreenConditionInfo.createFrom;
-const $$createType22 = $models.ScreenOptions.createFrom;
-const $$createType23 = $Create.Nullable($$createType22);
-const $$createType24 = $models.StockUniverse.createFrom;
-const $$createType25 = $Create.Nullable($$createType24);
-const $$createType26 = $models.ScreenResult.createFrom;
+const $$createType18 = $models.IndustryValuationDetail.createFrom;
+const $$createType19 = $Create.Nullable($$createType18);
+const $$createType20 = $models.KlineBundle.createFrom;
+const $$createType21 = $Create.Nullable($$createType20);
+const $$createType22 = $models.KlinePrefsInfo.createFrom;
+const $$createType23 = $models.MarketTemperatureResult.createFrom;
+const $$createType24 = $Create.Nullable($$createType23);
+const $$createType25 = $models.ScreenConditionInfo.createFrom;
+const $$createType26 = $models.ScreenOptions.createFrom;
 const $$createType27 = $Create.Nullable($$createType26);
-const $$createType28 = $models.StockSearchItem.createFrom;
-const $$createType29 = $Create.Array($$createType28);
-const $$createType30 = $models.SourceStatus.createFrom;
+const $$createType28 = $models.StockUniverse.createFrom;
+const $$createType29 = $Create.Nullable($$createType28);
+const $$createType30 = $models.StockValuation.createFrom;
+const $$createType31 = $Create.Nullable($$createType30);
+const $$createType32 = $models.ValuationParamsInfo.createFrom;
+const $$createType33 = $models.ValuationReport.createFrom;
+const $$createType34 = $Create.Nullable($$createType33);
+const $$createType35 = $models.ValuationIndexOption.createFrom;
+const $$createType36 = $Create.Array($$createType35);
+const $$createType37 = $models.ScreenResult.createFrom;
+const $$createType38 = $Create.Nullable($$createType37);
+const $$createType39 = $models.StockSearchItem.createFrom;
+const $$createType40 = $Create.Array($$createType39);
+const $$createType41 = $models.SourceStatus.createFrom;

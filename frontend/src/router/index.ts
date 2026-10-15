@@ -36,6 +36,15 @@ export const routes = [
     meta: { title: "财务数据", subtitle: "财报科目、股本结构、股东户数与十大股东" },
   },
   {
+    path: "/valuation",
+    name: "valuation",
+    component: () => import("@/views/ValuationView.vue"),
+    meta: {
+      title: "多期限性价比",
+      subtitle: "1/3/6/12/36 个月独立评估：估值四层、成长质量、安全边际与风险约束",
+    },
+  },
+  {
     path: "/indicators",
     name: "indicators",
     component: () => import("@/views/ComingSoonView.vue"),

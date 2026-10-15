@@ -43,6 +43,9 @@ export {
     FinanceSnapshot,
     FinanceSourceStatus,
     FinancialStatements,
+    IndexValuationResult,
+    IndustryDistributionRow,
+    IndustryValuationDetail,
     JobInfo,
     KlineBundle,
     KlineCandle,
@@ -55,6 +58,7 @@ export {
     MarketTemperatureResult,
     MoneyFlowPoint,
     MoneyFlowSummary,
+    PhaseTiming,
     PlanResult,
     PortfolioOption,
     PortfolioOptions,
@@ -75,9 +79,13 @@ export {
     StockProfile,
     StockSearchItem,
     StockUniverse,
+    StockValuation,
     StrategyRefresh,
     StrengthSummary,
     TemperatureFactor,
     TopHolderItem,
-    UpdatePrefsInfo
+    UpdatePrefsInfo,
+    ValuationIndexOption,
+    ValuationParamsInfo,
+    ValuationReport
 } from "./models.js";

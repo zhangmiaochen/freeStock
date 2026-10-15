@@ -750,7 +750,11 @@ func (p *lakeProvider) symbolQuotesFromCache(manifest cnlake.SymbolBarsManifest,
 		if found, ok := p.valuationFor(bare, 0, end)[last.Date()]; ok {
 			valuation = &found
 		}
-		out[bare] = p.buildQuote(bare, p.name(bare), last, prevClose, valuation, p.shareHistory(bare))
+		// rows 是"不晚于 end 的全部日线"（升序），末根就是当日，
+		// 前面那些正好是量比分母要的前 N 日
+		out[bare] = p.buildQuote(
+			bare, p.name(bare), last, prevClose, valuation,
+			p.shareHistory(bare), priorVolumes(rows))
 	}
 	return out, missed, nil
 }
@@ -1027,9 +1031,50 @@ func (p *lakeProvider) dailyBarsMulti(codes []string, start, end int) (map[strin
 	return out, nil
 }
 
+// volumeRatioDays 是量比的回看窗口：**前 5 个交易日**。
+//
+// 与行情软件（同花顺 / 通达信）的日线量比口径一致。
+//
+// ⚠ 分母**不含当日**。量比的定义是"当日每分钟成交量 ÷ 过去 5 个交易日每分钟成交量"，
+// 其中"过去 5 日"按行业惯例**不含当日** —— 含进去等于把今天算进自己的基准，
+// 会把倍数系统性压低（放量日尤其明显）。
+const volumeRatioDays = 5
+
+// volumeRatio 算量比：`当日成交量 ÷ 前 N 个交易日的平均成交量`。
+//
+// 两个刻意的边界：
+//
+//   - 分母**不含当日**（只取 `prior` 里的那几根），理由见 volumeRatioDays；
+//   - 前 N 日不足（次新股、长期停牌、刚入库）时返回 **0**，而不是拿不足的样本
+//     硬算。界面把 0 渲染成「—」，那是"算不出来"，与"量比是 0 倍"是两件事
+//     —— 后者在真实行情里不可能出现（成交量为 0 的股票本来就不会有量比）。
+//
+// 纯函数，方便单测；三个调用点（按股票缓存 / 全市场批量 / 区间）共用它，
+// 这样三条取数路径给出的量比不会互相打架。
+func volumeRatio(latestVolume float64, prior []float64) float64 {
+	if len(prior) < volumeRatioDays || latestVolume <= 0 {
+		return 0
+	}
+	// 取**紧邻当日**的 N 个（prior 按日期升序，末尾就是昨天）
+	start := len(prior) - volumeRatioDays
+	sum := 0.0
+	for _, v := range prior[start:] {
+		sum += v
+	}
+	avg := sum / float64(volumeRatioDays)
+	if avg <= 0 {
+		return 0
+	}
+	return round(latestVolume/avg, 4)
+}
+
 // buildQuote 把一根 K 线 + 估值 + 股本组装成行情。
 // 数据湖的 daily_bars 只有 OHLCV，其余字段都在别处或需要推导。
-func (p *lakeProvider) buildQuote(bare, name string, bar cnlake.BarRow, prevClose float64, valuation *cnlake.ValuationRow, shares []cnlake.ShareStructureRow) *stockdb.Quote {
+//
+// `priorVolumes` 是**该日期之前**的成交量（按日期升序），用来算量比；
+// 传 nil 表示调用方没有历史，量比记 0（界面显示「—」）。
+func (p *lakeProvider) buildQuote(bare, name string, bar cnlake.BarRow, prevClose float64, valuation *cnlake.ValuationRow, shares []cnlake.ShareStructureRow, priorVolumes []float64) *stockdb.Quote {
+	volume := float64(bar.Volume)
 	quote := &stockdb.Quote{
 		Date:     bar.Date(),
 		Code:     bare,
@@ -1038,10 +1083,14 @@ func (p *lakeProvider) buildQuote(bare, name string, bar cnlake.BarRow, prevClos
 		High:     bar.High,
 		Low:      bar.Low,
 		Close:    bar.Close,
-		Volume:   float64(bar.Volume),
+		Volume:   volume,
 		Amount:   bar.Amount,
 		IsST:     strings.Contains(strings.ToUpper(name), "ST"),
 		PreClose: prevClose,
+		// ⚠ 数据湖的 daily_bars **没有 vol_ratio 列**，必须自己按前 5 日均量推导。
+		// 早先这里漏了，于是"本地数据湖"模式下 K 线页的量比恒为空 ——
+		// 而换回 free-stockdb 就正常，很容易被当成"数据缺失"而不是"没算"。
+		VolRatio: volumeRatio(volume, priorVolumes),
 	}
 	if valuation != nil {
 		quote.PeTTM = valuation.PeTTM
@@ -1474,6 +1523,21 @@ func (p *lakeProvider) quoteRange(code string, start, end int, desc bool) ([]*st
 	return p.assembleQuotes(code, bars, start, end, desc), nil
 }
 
+// priorVolumes 把"最后一根之前"的成交量取出来（升序），供量比使用。
+//
+// 三条取数路径手里都有完整的一段日线，末根是当日、前面是历史；
+// 抽成一个小函数是为了让三处口径完全一致。
+func priorVolumes(bars []cnlake.BarRow) []float64 {
+	if len(bars) < 2 {
+		return nil
+	}
+	out := make([]float64, 0, len(bars)-1)
+	for _, bar := range bars[:len(bars)-1] {
+		out = append(out, float64(bar.Volume))
+	}
+	return out
+}
+
 // assembleQuotes 把（已按日期升序的）日线组装成对外行情。
 //
 // 抽出来是为了让"按股票缓存"和"全市场批量缓存"两条取数路线**共用同一段组装**：
@@ -1490,17 +1554,24 @@ func (p *lakeProvider) assembleQuotes(code string, bars []cnlake.BarRow, start, 
 
 	out := make([]*stockdb.Quote, 0, len(bars))
 	var prevClose float64
+	// 量比的回看窗口跨过 start 边界：bars 里本来就带着 start 之前的日线
+	// （调用方多取了一段），所以这里按**全局下标**往前数，不能用 out 的下标。
+	volumes := make([]float64, 0, len(bars))
 	for _, bar := range bars {
 		date := bar.Date()
 		if date < int64(start) || date > int64(end) {
+			// ⚠ 区间外的行不进结果，但**要进量比的分母** ——
+			// 否则区间起点那几天的量比会因为"前面没有历史"而算不出来
+			volumes = append(volumes, float64(bar.Volume))
 			continue
 		}
 		var valuation *cnlake.ValuationRow
 		if found, ok := byDate[date]; ok {
 			valuation = &found
 		}
-		out = append(out, p.buildQuote(bare, name, bar, prevClose, valuation, shares))
+		out = append(out, p.buildQuote(bare, name, bar, prevClose, valuation, shares, volumes))
 		prevClose = bar.Close
+		volumes = append(volumes, float64(bar.Volume))
 	}
 
 	if desc {
@@ -1715,7 +1786,10 @@ func (p *lakeProvider) bulkQuotes(codes []string, start, end int) (map[string]*s
 		if found, ok := valuationIndex[bare][last.Date()]; ok {
 			valuation = &found
 		}
-		out[bare] = p.buildQuote(bare, p.name(bare), last, prevClose, valuation, p.shareHistory(bare))
+		// list 是升序的全部日线，末根当日 → 前面的是量比分母
+		out[bare] = p.buildQuote(
+			bare, p.name(bare), last, prevClose, valuation,
+			p.shareHistory(bare), priorVolumes(list))
 	}
 	return out, missed, nil
 }

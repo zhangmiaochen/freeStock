@@ -90,6 +90,44 @@ import type {
   StrategyConfig,
 } from "../../bindings/freestock/internal/score/models";
 import type { PortfolioOptions } from "../../bindings/freestock/internal/service/models";
+// 多期限性价比评估：服务层结果 + 引擎侧类型（valuation 包）
+import type {
+  IndustryValuationDetail,
+  IndustryDistributionRow,
+  IndexValuationResult,
+  StockValuation,
+  ValuationIndexOption,
+  ValuationParamsInfo,
+  ValuationReport,
+} from "../../bindings/freestock/internal/service/models";
+import type {
+  Confidence,
+  Evidence,
+  FairValue,
+  Growth,
+  Horizon,
+  HorizonRanking,
+  HorizonScore,
+  IndexEvaluation,
+  IndustryValuation,
+  MethodResult,
+  Outlook,
+  Quality,
+  QualityIssue,
+  RankRow,
+  Rating,
+  RatingThresholds,
+  RelativeValuation,
+  RiskFlag,
+  Scenario,
+  ScoreDimension,
+  ScoreDistribution,
+  SelfValuation,
+  Snapshot,
+  StockScore,
+  ValuationBand,
+  ValuationPoint,
+} from "../../bindings/freestock/internal/valuation/models";
 import * as StockService from "../../bindings/freestock/internal/service/stockservice";
 import * as CneUpdateService from "../../bindings/freestock/internal/service/cneupdateservice";
 import * as PortfolioService from "../../bindings/freestock/internal/service/portfolioservice";
@@ -104,6 +142,45 @@ import type { UpdatePrefs } from "../../bindings/freestock/internal/config/model
 import type { EmailPrefs } from "../../bindings/freestock/internal/config/models";
 export type { JobInfo, UpdatePrefsInfo, CneUpdateStatus, UpdatePrefs, FreshnessReport, CatchUpState, CatchUpInfo, AutoUpdateStatus, ScheduleState, RunDetail, RunSummary, SchedulePlan };
 export type { EmailPrefs, EmailPrefsInfo, EmailPreview, EmailScheduleInfo, EmailSendResult };
+// 多期限性价比评估相关类型（服务层结果 + 引擎侧结构）。
+//
+// ⚠ 引擎侧（valuation 包）的类型要逐个列出而不是整包 re-export：
+// 与其它域（score / portfolio / backtest）保持同一写法，便于查"这个字段谁在用"。
+export type {
+  Confidence,
+  Evidence,
+  FairValue,
+  Growth,
+  Horizon,
+  HorizonRanking,
+  HorizonScore,
+  IndexEvaluation,
+  IndexValuationResult,
+  IndustryDistributionRow,
+  IndustryValuation,
+  IndustryValuationDetail,
+  MethodResult,
+  Outlook,
+  Quality,
+  QualityIssue,
+  RankRow,
+  Rating,
+  RatingThresholds,
+  RelativeValuation,
+  RiskFlag,
+  Scenario,
+  ScoreDimension,
+  ScoreDistribution,
+  SelfValuation,
+  Snapshot,
+  StockScore,
+  StockValuation,
+  ValuationBand,
+  ValuationIndexOption,
+  ValuationParamsInfo,
+  ValuationPoint,
+  ValuationReport,
+};
 export type {
   AppliedChange,
   ApplyResult,
@@ -254,6 +331,37 @@ export const api = {
   saveKlinePrefs: (prefs: KlinePrefs) =>
     StockService.SaveKlinePrefs(prefs) as Promise<KlinePrefsInfo>,
   getConfigPath: () => StockService.GetConfigPath() as Promise<string>,
+
+  // ---- A 股多期限性价比评估（见 docs/A股多期限性价比评估方案.md）----
+  //
+  // 口径要点（与 Go 侧一致，界面必须能解释清楚）：
+  //  · 收益/波动/回撤用**后复权价**，市值与 PE/PB/PS 用**不复权价 × 当期股本**；
+  //  · 历史估值是自建重建的（数据湖 valuation_metrics 只有 5 个交易日）；
+  //  · 财务是年内累计口径、Q4 是全年值，TTM = 上年全年 + 本年至今 − 去年同期；
+  //  · 五档期限（1/3/6/12/36 个月）用不同权重、不同收敛速度、不同情景概率。
+  //
+  // 数据不可用时后端**不抛错**，返回 Available=false + Message，
+  // 界面据此显示可解释的空状态（与市场温度页同一约定）。
+  /**
+   * 全市场评估。limit > 0 时只评估市值前 limit 只（首刷用），0 = 全市场。
+   * 结果缓存 30 分钟；refresh=true 强制重算。
+   */
+  getValuationReport: (limit = 150, refresh = false) =>
+    StockService.GetValuationReport(limit, refresh) as Promise<ValuationReport | null>,
+  /** 单只标的的完整评估（按需计算，不等全市场评估；因此拿不到排名） */
+  getStockValuation: (code: string) =>
+    StockService.GetStockValuation(code) as Promise<StockValuation | null>,
+  /** 行业详情：估值环境（加权/中位/分位分列）+ 行业内排名 */
+  getIndustryValuation: (codeOrName: string) =>
+    StockService.GetIndustryValuation(codeOrName) as Promise<IndustryValuationDetail | null>,
+  /** 指数详情（独立于个股的评估模型） */
+  getIndexValuation: (code: string) =>
+    StockService.GetIndexValuation(code) as Promise<IndexValuationResult | null>,
+  /** 可评估的指数清单（8 个指数里只有 5 个有成分与权重） */
+  listValuationIndices: () =>
+    StockService.ListValuationIndices() as Promise<ValuationIndexOption[]>,
+  /** 当前生效的模型参数（五档权重、情景概率、评级分界），供界面解释口径 */
+  getValuationParams: () => StockService.GetValuationParams() as Promise<ValuationParamsInfo>,
 
   // ---- cne 数据更新（见 docs/cne数据更新方案.md）----
   //

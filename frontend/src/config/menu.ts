@@ -8,6 +8,7 @@ import {
   Funnel,
   LayoutGrid,
   List,
+  Scale,
   Thermometer,
 } from "@lucide/vue";
 
@@ -34,6 +35,7 @@ export const menuGroups: MenuGroup[] = [
     items: [
       { title: "股票列表", to: "/stocks", icon: List },
       { title: "财务数据", to: "/finance", icon: BarChart3 },
+      { title: "多期限性价比", to: "/valuation", icon: Scale },
       { title: "板块行情", to: "/boards", icon: LayoutGrid },
       { title: "市场温度", to: "/temperature", icon: Thermometer },
     ],

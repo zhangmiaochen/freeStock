@@ -200,6 +200,18 @@ type StockService struct {
 	// cnequity 数据湖（可选）：本地数据集没有财报，从这里补
 	lakeMu sync.Mutex
 	lake   *cnlake.Lake
+
+	// 多期限性价比评估的全市场结果缓存（见 valuation.go）。
+	//
+	// 与 periodCache 同理：**不在 ClearCache 里抢锁清空**，
+	// 由条目里的 `gen`（数据源代次）判断是否过期。
+	//
+	// valUniverse 是"全市场行业基准"（按行业分组的公司快照）。它与 valCache
+	// 分开缓存，因为它只依赖 (评估日, 数据源代次)、与 limit 无关：
+	// 用户在界面上切"前 80 只 / 前 150 只 / 全市场"时不该重算全市场那一遍。
+	valMu       sync.Mutex
+	valCache    *valuationCacheEntry
+	valUniverse *valuationUniverseEntry
 }
 
 // lake 返回 cnequity 数据湖句柄（惰性创建）。
@@ -292,6 +304,9 @@ func (s *StockService) InvalidateDerivedCaches() {
 	if lake, ok := provider.(*lakeProvider); ok {
 		lake.InvalidateSymbolBars()
 	}
+	// 估值评估的数据全部来自数据湖：刚落了新数据（新财报 / 新股本 / 新除权）
+	// 之后必须整体重算，否则详情页还会沿用旧财报算出来的分位。
+	s.invalidateValuationCache()
 }
 
 // symbolBarsCacheRoot 返回「按股票」日线缓存的目录；拿不到配置目录时返回空（禁用缓存）。
