@@ -222,9 +222,84 @@ func TestEmailPrefsJSONShape(t *testing.T) {
 		`"recipients"`, `"subject"`, `"sendTime"`, `"weekdays"`,
 		`"scope"`, `"portfolioId"`, `"includeHoldings"`, `"includeCandidates"`,
 		`"candidateLimit"`,
+		// 发送前刷新评分（不刷的话建议可能基于旧评分）
+		`"refreshScoresBeforeSend"`, `"scoreLimit"`,
 	} {
 		if !strings.Contains(string(raw), want) {
 			t.Errorf("序列化结果里缺少字段 %s", want)
 		}
+	}
+}
+
+// TestEmailScoreLimitZeroIsMeaningful ScoreLimit=0 表示"全市场"，
+// 是**合法值**，不能被 Sanitize 当成"没填"回落到别的值。
+//
+// ⚠ 这条容易写错：项目里通用的 clampInt 会把 0 当作"未设置"回落到默认值，
+// 而这里的默认值恰好也是 0 —— 一旦改用 clampInt，语义就反了。
+func TestEmailScoreLimitZeroIsMeaningful(t *testing.T) {
+	if def := DefaultEmailPrefs(); def.ScoreLimit != 0 {
+		t.Fatalf("默认 ScoreLimit 应当是 0（全市场），实际 %d", def.ScoreLimit)
+	}
+
+	cases := []struct {
+		in   int
+		want int
+	}{
+		{0, 0},     // 全市场：保持
+		{800, 800}, // 前 800 只：保持
+		{-1, 0},    // 负数：收敛到全市场
+		{-999, 0},  // 负数：收敛到全市场
+	}
+	for _, c := range cases {
+		if got := (EmailPrefs{ScoreLimit: c.in}).Sanitize().ScoreLimit; got != c.want {
+			t.Errorf("Sanitize(ScoreLimit=%d) = %d，期望 %d", c.in, got, c.want)
+		}
+	}
+}
+
+// TestEmailRefreshBeforeSendRoundTrip 开关与只数上限要能落盘、读回。
+func TestEmailRefreshBeforeSendRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	store := NewStoreAt(path)
+
+	prefs := DefaultEmailPrefs()
+	prefs.RefreshScoresBeforeSend = true
+	prefs.ScoreLimit = 1500
+	store.SetEmailPrefs(prefs)
+
+	got, saved := NewStoreAt(path).EmailPrefs()
+	if !saved {
+		t.Fatal("重新打开后应当报告已保存")
+	}
+	if !got.RefreshScoresBeforeSend {
+		t.Error("「发送前刷新评分」开关未持久化")
+	}
+	if got.ScoreLimit != 1500 {
+		t.Errorf("评分只数上限未持久化：%d", got.ScoreLimit)
+	}
+
+	// 关掉之后也要能读回 false
+	off := DefaultEmailPrefs()
+	off.RefreshScoresBeforeSend = false
+	store.SetEmailPrefs(off)
+
+	got, _ = NewStoreAt(path).EmailPrefs()
+	if got.RefreshScoresBeforeSend {
+		t.Error("关掉之后读回仍是开启")
+	}
+}
+
+// TestEmailPrefsSanitizeKeepsRefreshFlag Sanitize 不该动这个开关与只数上限。
+func TestEmailPrefsSanitizeKeepsRefreshFlag(t *testing.T) {
+	got := EmailPrefs{
+		SendTime:                "not-a-time", // 会被纠正
+		RefreshScoresBeforeSend: true,
+		ScoreLimit:              1234,
+	}.Sanitize()
+	if !got.RefreshScoresBeforeSend {
+		t.Error("Sanitize 不该把合法的开关改成 false")
+	}
+	if got.ScoreLimit != 1234 {
+		t.Errorf("Sanitize 不该改合法的只数上限：%d", got.ScoreLimit)
 	}
 }

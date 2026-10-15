@@ -616,6 +616,21 @@ type EmailPrefs struct {
 	// ---- 内容 ----
 	Scope       string `json:"scope"`       // active / one
 	PortfolioID string `json:"portfolioId"` // Scope=one 时用
+	// RefreshScoresBeforeSend 表示"发送前先把评分刷到最新"。
+	//
+	// 为什么需要它：调仓建议是拿**某一帧评分**算出来的。那一帧如果还停在昨天
+	// （应用刚启动、或当天盘后还没刷过），算出来的建议就是基于旧数据的 ——
+	// 邮件内容看着正常，数字却是过期的。默认开。
+	//
+	// 代价是首刷一次全市场要几十秒（增量：当天已算过的不会重算），
+	// 所以界面上要写出来，并允许用户关掉。
+	RefreshScoresBeforeSend bool `json:"refreshScoresBeforeSend"`
+	// ScoreLimit 是刷新评分时的只数上限，**0 = 全市场**（默认）。
+	//
+	// 与界面上的「评分只数」同一个含义：广度闸门按全市场统计，
+	// 只评一部分会让它被系统性低估、进而判成"广度不足"并删光买入信号。
+	// 所以默认全市场，只有确实想省掉那几十秒的用户才会去调它。
+	ScoreLimit int `json:"scoreLimit"`
 	// IncludeHoldings 附当前持仓明细（成本 / 现价 / 浮动盈亏）
 	IncludeHoldings bool `json:"includeHoldings"`
 	// IncludeCandidates 附候选池 Top N。默认关：候选池会让邮件长很多，
@@ -629,18 +644,22 @@ type EmailPrefs struct {
 // **Enabled 默认关**：发邮件会真的把持仓数据发出去，必须由用户显式打开。
 func DefaultEmailPrefs() EmailPrefs {
 	return EmailPrefs{
-		Enabled:           false,
-		Host:              "",
-		Port:              465,
-		Encryption:        EmailEncryptAuto,
-		Subject:           "【FreeStock】{date} 调仓日报 · {portfolio}",
-		SendTime:          "17:00",
-		Weekdays:          []int{1, 2, 3, 4, 5},
-		Scope:             EmailScopeActive,
-		IncludeHoldings:   true,
-		IncludeCandidates: false,
-		CandidateLimit:    10,
-		TimeoutSeconds:    30,
+		Enabled:    false,
+		Host:       "",
+		Port:       465,
+		Encryption: EmailEncryptAuto,
+		Subject:    "【FreeStock】{date} 调仓日报 · {portfolio}",
+		SendTime:   "17:00",
+		Weekdays:   []int{1, 2, 3, 4, 5},
+		Scope:      EmailScopeActive,
+		// 先刷评分再发：不刷的话建议可能基于昨天的评分，
+		// "准时发出的一封过期邮件"比晚几十秒更有害
+		RefreshScoresBeforeSend: true,
+		ScoreLimit:              0, // 全市场
+		IncludeHoldings:         true,
+		IncludeCandidates:       false,
+		CandidateLimit:          10,
+		TimeoutSeconds:          30,
 	}
 }
 
@@ -685,6 +704,12 @@ func (p EmailPrefs) Sanitize() EmailPrefs {
 	}
 	p.CandidateLimit = clampInt(p.CandidateLimit, 1, 50, def.CandidateLimit)
 	p.TimeoutSeconds = clampInt(p.TimeoutSeconds, 5, 300, def.TimeoutSeconds)
+	// ScoreLimit：**0 是合法值**（= 全市场），负数与超大值才收敛。
+	// ⚠ 不能用 clampInt —— 它会把 0 当成"没填"回落到默认值，
+	// 而这里 0 恰恰是默认值本身，语义相反。
+	if p.ScoreLimit < 0 {
+		p.ScoreLimit = 0
+	}
 
 	// 收件人：把逗号/分号/空白混写的输入统一成"一行一个"
 	p.Recipients = NormalizeRecipients(p.Recipients)

@@ -116,6 +116,27 @@ export class EmailPrefs {
     "portfolioId": string;
 
     /**
+     * RefreshScoresBeforeSend 表示"发送前先把评分刷到最新"。
+     * 
+     * 为什么需要它：调仓建议是拿**某一帧评分**算出来的。那一帧如果还停在昨天
+     * （应用刚启动、或当天盘后还没刷过），算出来的建议就是基于旧数据的 ——
+     * 邮件内容看着正常，数字却是过期的。默认开。
+     * 
+     * 代价是首刷一次全市场要几十秒（增量：当天已算过的不会重算），
+     * 所以界面上要写出来，并允许用户关掉。
+     */
+    "refreshScoresBeforeSend": boolean;
+
+    /**
+     * ScoreLimit 是刷新评分时的只数上限，**0 = 全市场**（默认）。
+     * 
+     * 与界面上的「评分只数」同一个含义：广度闸门按全市场统计，
+     * 只评一部分会让它被系统性低估、进而判成"广度不足"并删光买入信号。
+     * 所以默认全市场，只有确实想省掉那几十秒的用户才会去调它。
+     */
+    "scoreLimit": number;
+
+    /**
      * IncludeHoldings 附当前持仓明细（成本 / 现价 / 浮动盈亏）
      */
     "includeHoldings": boolean;
@@ -173,6 +194,12 @@ export class EmailPrefs {
         }
         if (!("portfolioId" in $$source)) {
             this["portfolioId"] = "";
+        }
+        if (!("refreshScoresBeforeSend" in $$source)) {
+            this["refreshScoresBeforeSend"] = false;
+        }
+        if (!("scoreLimit" in $$source)) {
+            this["scoreLimit"] = 0;
         }
         if (!("includeHoldings" in $$source)) {
             this["includeHoldings"] = false;

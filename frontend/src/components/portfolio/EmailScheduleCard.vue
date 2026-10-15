@@ -539,6 +539,46 @@ defineExpose({ reload: load });
         </span>
       </div>
 
+      <!-- 发送前刷新评分 -->
+      <div class="border-t pt-3">
+        <div class="flex flex-wrap items-center gap-x-4 gap-y-2">
+          <label class="flex items-center gap-1.5 text-xs">
+            <input v-model="form.refreshScoresBeforeSend" type="checkbox" class="size-3.5" />
+            <b>发送前先刷新评分</b>
+          </label>
+          <label v-if="form.refreshScoresBeforeSend" class="flex items-center gap-1.5 text-xs">
+            评分只数
+            <select
+              v-model.number="form.scoreLimit"
+              class="bg-background h-7 rounded border px-1.5 text-xs outline-none"
+              title="广度闸门按全市场统计「评分≥70 的只数」。只评一部分会让它被系统性低估，判成「广度不足」并删光买入信号。"
+            >
+              <option :value="0">全市场（推荐）</option>
+              <option :value="3000">3000</option>
+              <option :value="1500">1500</option>
+              <option :value="800">800</option>
+              <option :value="300">300</option>
+            </select>
+          </label>
+          <span v-if="form.refreshScoresBeforeSend" class="text-muted-foreground text-[11px]">
+            首次执行要几十秒；当天已经刷过则秒回（不会重复算）
+          </span>
+        </div>
+        <p class="text-muted-foreground mt-1 text-[11px]">
+          <template v-if="form.refreshScoresBeforeSend">
+            调仓建议是拿<b>某一帧评分</b>算出来的。不先刷的话，那一帧可能还停在昨天
+            （应用刚启动、或当天盘后还没点过「刷新评分」），
+            发出去的就是一封<b>准时但过期</b>的邮件 —— 内容看着正常，数字却是旧的，
+            而收件人完全看不出来。刷新<b>只针对这封邮件用到的策略</b>，走增量。
+          </template>
+          <template v-else>
+            <b class="text-amber-500">已关闭</b>：邮件会用<b>数据库里现有的评分</b>生成。
+            如果那帧评分不是最新的，建议就是基于旧数据的 —— 界面上的「生成建议」
+            旁边会显示评分日，可以对照。
+          </template>
+        </p>
+      </div>
+
       <!-- 明文存储说明 -->
       <p class="text-muted-foreground border-t pt-2 text-[11px]">
         {{ info?.passwordNote }}

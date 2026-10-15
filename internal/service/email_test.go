@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -185,6 +186,92 @@ func TestEnsureEmailSchedulerToleratesNil(t *testing.T) {
 	service.recordSend(nil)
 	service.recordSendResult(false, "k", nil, "e")
 	service.markSentKey("k")
+}
+
+// TestSchedulerBeginBlocksReentry 发送闸门必须能挡住重入。
+//
+// ⚠ 为什么必须有它：发送前要先刷评分（首刷全市场几十秒），比 30 秒的轮询间隔长。
+// 没有闸门的话第二次轮询会在上一次还没发完时又进来 —— **刷两遍、发两封**。
+func TestSchedulerBeginBlocksReentry(t *testing.T) {
+	sched := newEmailScheduler()
+
+	release, ok := sched.begin()
+	if !ok {
+		t.Fatal("第一次应当拿得到闸门")
+	}
+
+	if _, again := sched.begin(); again {
+		t.Error("上一次还没放行时，第二次不该拿到闸门")
+	}
+
+	release()
+
+	release2, ok := sched.begin()
+	if !ok {
+		t.Fatal("放行之后应当又能拿到闸门")
+	}
+	release2()
+}
+
+// TestSchedulerBeginReleaseIsIdempotent 重复放行不能把状态弄反。
+//
+// 放行函数会被 defer 调用；重复放行最多多解锁一次，
+// 不能变成"闸门被别人关上"（那会导致之后再也不发送）。
+func TestSchedulerBeginReleaseIsIdempotent(t *testing.T) {
+	sched := newEmailScheduler()
+	release, _ := sched.begin()
+	release()
+	release() // 再放一次不该出问题
+
+	release3, ok := sched.begin()
+	if !ok {
+		t.Fatal("重复放行之后仍应能拿到闸门")
+	}
+	release3()
+
+	sched.mu.Lock()
+	sending := sched.sending
+	sched.mu.Unlock()
+	if sending {
+		t.Error("最终不该停在「正在发送」状态")
+	}
+}
+
+// TestSchedulerBeginConcurrent 并发调用只能有一个拿到闸门。
+//
+// 调度器是单个协程，但"手动立即发送"与轮询可能同时进来，所以按并发验证。
+func TestSchedulerBeginConcurrent(t *testing.T) {
+	sched := newEmailScheduler()
+
+	const workers = 16
+	var (
+		wg      sync.WaitGroup
+		mu      sync.Mutex
+		granted int
+		release func()
+	)
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			done, ok := sched.begin()
+			if !ok {
+				return
+			}
+			mu.Lock()
+			granted++
+			release = done
+			mu.Unlock()
+		}()
+	}
+	wg.Wait()
+
+	if granted != 1 {
+		t.Errorf("并发下应当恰好一个拿到闸门，实际 %d 个", granted)
+	}
+	if release != nil {
+		release()
+	}
 }
 
 // TestRecordSendResultKeepsFailedKeyEmpty 失败的发送**不写去重键**，

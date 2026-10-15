@@ -146,6 +146,12 @@ type emailScheduler struct {
 	// 失败的发送**不写这个键** —— 否则配置修好之后当天不会再重试。
 	lastSentKey string
 
+	// sending 表示"这一轮正在发送"。
+	//
+	// ⚠ 需要它是因为发送前要先刷评分（首刷全市场几十秒），比 30 秒的轮询间隔长：
+	// 没有这道闸门的话，第二次轮询会在上一次还没发完时又进来，**刷两遍、发两封**。
+	sending bool
+
 	lastSentAt     time.Time
 	lastStatus     string
 	lastError      string
@@ -158,6 +164,31 @@ type emailTick func()
 
 func newEmailScheduler() *emailScheduler {
 	return &emailScheduler{stop: make(chan struct{})}
+}
+
+// begin 尝试进入"正在发送"状态。
+//
+// 返回 (放行函数, 是否拿到)。拿到 false 表示**上一次还没发完**，调用方应当直接返回。
+//
+// ⚠ 拿到 true 时**必须**调用放行函数（defer 它）。不放行的话闸门会一直关着，
+// 后续所有轮询都被挡在外面 —— 表现是"发过一次之后就再也不发了"，
+// 而且不会报任何错。
+//
+// 抽成方法只是为了可测：这段判断没有别的依赖。
+func (s *emailScheduler) begin() (func(), bool) {
+	s.mu.Lock()
+	if s.sending {
+		s.mu.Unlock()
+		return func() {}, false
+	}
+	s.sending = true
+	s.mu.Unlock()
+
+	return func() {
+		s.mu.Lock()
+		s.sending = false
+		s.mu.Unlock()
+	}, true
 }
 
 // ---------------------------------------------------------------------------
@@ -410,9 +441,13 @@ func fromAddress(prefs config.EmailPrefs) string {
 //
 // 预览是这套功能唯一的"所见即所得"入口：邮件发出去就收不回来，
 // 所以必须能在发之前看到正文。
+//
+// ⚠ 预览**也会先刷新评分**（与真正发送同一条路径）：否则预览显示的是
+// 上一帧评分的建议，而真正发出去的是刷过之后的 —— 两者对不上，
+// 预览就失去了"所见即所得"的意义。代价是点预览可能等几十秒（首刷）。
 func (s *PortfolioService) PreviewEmail() (*EmailPreview, error) {
 	prefs := s.emailPrefs()
-	digest, err := s.buildDigest(prefs)
+	digest, err := s.prepareDigest(prefs, s.defaultRefresher())
 	if err != nil {
 		return nil, err
 	}
@@ -510,9 +545,16 @@ func (s *PortfolioService) SendDailyEmailNow() (*EmailSendResult, error) {
 func (s *PortfolioService) sendDigest(
 	prefs config.EmailPrefs, recipients []string, isScheduled bool,
 ) (*EmailSendResult, error) {
+	return s.sendDigestWith(prefs, recipients, isScheduled, s.defaultRefresher())
+}
+
+// sendDigestWith 与 sendDigest 相同，只是允许注入"刷新评分"的实现（测试用）。
+func (s *PortfolioService) sendDigestWith(
+	prefs config.EmailPrefs, recipients []string, isScheduled bool, refresh scoreRefresher,
+) (*EmailSendResult, error) {
 	started := time.Now()
 
-	digest, err := s.buildDigest(prefs)
+	digest, err := s.prepareDigest(prefs, refresh)
 	if err != nil {
 		return nil, err
 	}
@@ -539,6 +581,7 @@ func (s *PortfolioService) sendDigest(
 	slog.Info("调仓日报已发送",
 		"scheduled", isScheduled, "host", prefs.Host, "port", prefs.Port,
 		"recipients", recipients, "portfolios", portfolioNames(digest),
+		"tradeDate", digest.TradeDate,
 		"elapsed", elapsed.Round(time.Millisecond).String())
 
 	return &EmailSendResult{
@@ -569,6 +612,9 @@ func testEmailBody(prefs config.EmailPrefs, recipients []string) (string, string
 		{"收件人", strings.Join(recipients, ", ")},
 		{"发送时间", prefs.SendTime},
 		{"发送日", weekdayText(prefs.Weekdays)},
+		// 发送前刷不刷评分会直接影响邮件里的数字是不是最新的，
+		// 测试邮件里一并交代，省得用户去设置里翻
+		{"发送前刷新评分", refreshSettingText(prefs)},
 	}
 
 	var b strings.Builder
@@ -665,32 +711,20 @@ func (s *PortfolioService) buildDigest(prefs config.EmailPrefs) (*email.Digest, 
 	if err != nil {
 		return nil, err
 	}
-	all, err := store.List()
+	selected, err := selectDigestPortfolios(store, prefs)
 	if err != nil {
 		return nil, err
 	}
+	return s.buildDigestFor(store, selected, prefs)
+}
 
-	selected := make([]portfolio.Portfolio, 0, len(all))
-	if prefs.Scope == config.EmailScopeOne {
-		for _, item := range all {
-			if item.ID == prefs.PortfolioID {
-				selected = append(selected, item)
-				break
-			}
-		}
-		if len(selected) == 0 {
-			return nil, fmt.Errorf("指定的组合不存在（id=%s），请重新选择", prefs.PortfolioID)
-		}
-	} else {
-		for _, item := range all {
-			// 归档组合默认不发：它们已经不在运行
-			if item.Status == portfolio.StatusArchived {
-				continue
-			}
-			selected = append(selected, item)
-		}
-	}
-
+// buildDigestFor 用**已经挑好的**组合列表拼内容。
+//
+// 抽出来是为了让"发送前刷新评分"能复用同一份列表 ——
+// 否则挑两次列表，万一期间组合被删/被归档，刷新的集合与发出去的集合会对不上。
+func (s *PortfolioService) buildDigestFor(
+	store *portfolio.Store, selected []portfolio.Portfolio, prefs config.EmailPrefs,
+) (*email.Digest, error) {
 	digest := &email.Digest{GeneratedAt: time.Now()}
 	if len(selected) == 0 {
 		digest.Notes = append(digest.Notes,
@@ -711,6 +745,184 @@ func (s *PortfolioService) buildDigest(prefs config.EmailPrefs) (*email.Digest, 
 		digest.MarketStateLabel = label
 	}
 
+	return digest, nil
+}
+
+// selectDigestPortfolios 挑出这次要发进邮件的组合。
+//
+// 抽出来单独一个函数，是为了让"发送前刷新评分"能**只刷这些组合用到的策略**：
+// 刷一堆跟这封邮件无关的策略，只是白白多花几十秒。
+func selectDigestPortfolios(
+	store *portfolio.Store, prefs config.EmailPrefs,
+) ([]portfolio.Portfolio, error) {
+	all, err := store.List()
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]portfolio.Portfolio, 0, len(all))
+	if prefs.Scope == config.EmailScopeOne {
+		for _, item := range all {
+			if item.ID == prefs.PortfolioID {
+				out = append(out, item)
+				break
+			}
+		}
+		if len(out) == 0 {
+			return nil, fmt.Errorf("指定的组合不存在（id=%s），请重新选择", prefs.PortfolioID)
+		}
+		return out, nil
+	}
+
+	for _, item := range all {
+		// 归档组合默认不发：它们已经不在运行
+		if item.Status == portfolio.StatusArchived {
+			continue
+		}
+		out = append(out, item)
+	}
+	return out, nil
+}
+
+// ---------------------------------------------------------------------------
+// 发送前刷新评分
+// ---------------------------------------------------------------------------
+
+// scoreRefresher 是"刷新某个策略的评分"这件事的抽象。
+//
+// 抽出来只有一个目的：**让这段流程可以测**。正常实现就是
+// `s.RefreshStrength(strategyID, limit, false)`；测试里换成一个记账用的假函数，
+// 就能断言"刷了哪几个策略、传了多大的 limit"，而不用真去拉全市场行情。
+type scoreRefresher func(strategyID string, limit int, force bool) (*RefreshResult, error)
+
+// refreshScoresBeforeSend 是"按组合列表刷评分"的实现。
+//
+// ⚠ 它**不依赖 PortfolioService**，所以可以脱离数据库单独测：
+// 传一个记账用的假 refresher 就能断言"刷了哪几个策略、传了多大的 limit"。
+func refreshScoresBeforeSend(
+	selected []portfolio.Portfolio, prefs config.EmailPrefs, refresh scoreRefresher,
+) []string {
+	if !prefs.RefreshScoresBeforeSend || refresh == nil {
+		return nil
+	}
+
+	// 策略去重（归一化后再比，与原实现的 normalize_strategy_ids 一致）
+	seen := map[string]bool{}
+	ids := make([]string, 0, len(selected))
+	for _, item := range selected {
+		id := portfolio.NormalizeStrategy(item.StrategyID, item.Type)
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		ids = append(ids, id)
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+
+	began := time.Now()
+	notes := make([]string, 0, len(ids)+1)
+	refreshed := 0
+	failed := 0
+	for _, id := range ids {
+		label := score.StrategyLabelOf(id)
+		result, err := refresh(id, prefs.ScoreLimit, false)
+		if err != nil {
+			// ⚠ **不中止** —— 一个策略刷不动不该让整封邮件发不出去。
+			// 但也不能吞掉：写进说明里，收件人才知道数字可能是旧的。
+			failed++
+			slog.Warn("发送前刷新评分失败", "strategy", id, "err", err)
+			notes = append(notes, fmt.Sprintf(
+				"评分刷新失败（%s）：%v —— 该策略的建议可能基于旧评分", label, err))
+			continue
+		}
+		refreshed++
+		if result == nil {
+			continue
+		}
+		if result.SkippedFromCache {
+			// 当天已经刷过：一次行情都没拉。说明白，
+			// 免得用户看到"秒回"以为根本没刷
+			slog.Info("发送前评分已是最新，跳过重算",
+				"strategy", id, "tradeDate", result.TradeDate, "total", result.Total)
+			continue
+		}
+		slog.Info("发送前已刷新评分",
+			"strategy", id, "tradeDate", result.TradeDate,
+			"saved", result.Saved, "reused", result.Reused, "total", result.Total)
+	}
+
+	elapsed := time.Since(began).Round(time.Millisecond)
+	if refreshed > 0 {
+		notes = append(notes, fmt.Sprintf(
+			"发送前已刷新评分：%d 个策略（%s），耗时 %s",
+			refreshed, scoreLimitText(prefs.ScoreLimit), elapsed))
+	}
+	if refreshed == 0 {
+		notes = append(notes, fmt.Sprintf(
+			"发送前刷新评分：%d 个策略都没成功（耗时 %s），下面的建议可能基于旧评分",
+			failed, elapsed))
+	}
+	return notes
+}
+
+// scoreLimitText 把只数上限说成人话。
+func scoreLimitText(limit int) string {
+	if limit <= 0 {
+		return "全部标的"
+	}
+	return fmt.Sprintf("前 %d 只", limit)
+}
+
+// refreshSettingText 把"发送前刷不刷评分"说成人话（测试邮件里用）。
+func refreshSettingText(prefs config.EmailPrefs) string {
+	if !prefs.RefreshScoresBeforeSend {
+		return "关闭（用数据库里现有的评分）"
+	}
+	return "开启（" + scoreLimitText(prefs.ScoreLimit) + "，增量）"
+}
+
+// defaultRefresher 是生产用的刷分实现（增量刷新，已算过的不重算）。
+func (s *PortfolioService) defaultRefresher() scoreRefresher {
+	return func(strategyID string, limit int, force bool) (*RefreshResult, error) {
+		return s.RefreshStrength(strategyID, limit, force)
+	}
+}
+
+// prepareDigest 是"发送 / 预览"共用的准备步骤：
+//
+//	挑组合 → （可选）先把评分刷到最新 → 拼内容
+//
+// ⚠ 刷新**必须在拼内容之前**。反过来的话，刷完还得再拼一次才拿到新数字，
+// 于是"刷了却没用上"—— 而那正是这个功能要避免的事。
+//
+// 预览与发送走同一条路径，是为了让"预览看到的 = 真正发出去的"。
+// 预览也会触发一次刷新，这样它显示的评分日就是实际会用的那一天。
+func (s *PortfolioService) prepareDigest(
+	prefs config.EmailPrefs, refresh scoreRefresher,
+) (*email.Digest, error) {
+	store, err := s.db()
+	if err != nil {
+		return nil, err
+	}
+	selected, err := selectDigestPortfolios(store, prefs)
+	if err != nil {
+		return nil, err
+	}
+
+	// ⚠ 顺序：**先刷新，再拼内容**（理由见下面的注释与 9.6.1）
+	notes := refreshScoresBeforeSend(selected, prefs, refresh)
+
+	digest, err := s.buildDigestFor(store, selected, prefs)
+	if err != nil {
+		return nil, err
+	}
+	// 刷新说明插到最前面：它是"这封邮件的数据新鲜度"的交代，
+	// 放在一堆组合级提示之后容易被忽略
+	if len(notes) > 0 {
+		digest.Notes = append(notes, digest.Notes...)
+	}
 	return digest, nil
 }
 
@@ -1093,6 +1305,18 @@ func (s *PortfolioService) maybeSendScheduledEmail(now time.Time) {
 		return // 今天这一档已经发过
 	}
 	s.emailSched.mu.Unlock()
+
+	// ⚠ **重入保护**：发送前会先刷评分（首刷全市场几十秒），
+	// 比 30 秒的轮询间隔长。没有这道闸门的话，第二次轮询会在
+	// 上一次还没发完时又进来，于是**刷两遍、发两封**。
+	done, ok := s.emailSched.begin()
+	if !ok {
+		slog.Debug("定时日报正在发送中，跳过本次轮询")
+		return
+	}
+	// ⚠ `done` 必须 defer：下面任何一条 return 都要放行，
+	// 否则闸门会一直关着、之后再也不会发送。
+	defer done()
 
 	recipients, invalid := email.ParseRecipients(prefs.Recipients)
 	if err := s.validateEmailConfig(prefs, recipients, invalid); err != nil {

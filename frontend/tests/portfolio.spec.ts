@@ -175,6 +175,9 @@ function emailPrefs(overrides: Record<string, unknown> = {}) {
     weekdays: [1, 2, 3, 4, 5],
     scope: "active",
     portfolioId: "",
+    // 发送前先刷评分：默认开（不刷的话建议可能基于旧评分）
+    refreshScoresBeforeSend: true,
+    scoreLimit: 0, // 0 = 全市场
     includeHoldings: true,
     includeCandidates: false,
     candidateLimit: 10,
@@ -938,5 +941,88 @@ describe("组合页 · 调仓日报邮件", () => {
     }
     await nextTick();
     expect(wrapper.text()).toContain("工作日");
+  });
+
+  // ---- 发送前先刷新评分 ----
+
+  it("默认开启「发送前先刷新评分」，并写明为什么", async () => {
+    const wrapper = await openCard();
+
+    // 默认必须是开的：不刷的话发出去可能是一封"准时但过期"的邮件
+    expect(wrapper.text()).toContain("发送前先刷新评分");
+    // 理由要写在界面上，否则用户不知道为什么发信前要等
+    expect(wrapper.text()).toContain("某一帧评分");
+    expect(wrapper.text()).toContain("准时但过期");
+    // 代价也要说（首次几十秒、已刷过则秒回）
+    expect(wrapper.text()).toContain("首次执行要几十秒");
+  });
+
+  it("刷新评分的只数上限默认全市场", async () => {
+    const wrapper = await openCard();
+    const select = wrapper
+      .findAll("select")
+      .find((s) => s.text().includes("全市场（推荐）"));
+    expect(select, "找不到「评分只数」下拉").toBeTruthy();
+    expect((select!.element as HTMLSelectElement).value).toBe("0");
+  });
+
+  it("关掉刷新开关时明确警告建议可能基于旧评分", async () => {
+    mocks.getEmailPrefs.mockResolvedValue(
+      emailInfo({ prefs: emailPrefs({ refreshScoresBeforeSend: false }) }),
+    );
+    const wrapper = await openCard();
+
+    // ⚠ 断言文案要够独特：页面上另有"定时发送已关闭"这类字样
+    expect(wrapper.text()).toContain("邮件会用");
+    expect(wrapper.text()).toContain("旧数据");
+    // 关掉后不该再显示只数选择与代价说明
+    expect(wrapper.text()).not.toContain("首次执行要几十秒");
+  });
+
+  it("保存时把刷新开关与只数上限一起提交", async () => {
+    const wrapper = await openCard();
+
+    // 改只数上限为 800
+    const select = wrapper
+      .findAll("select")
+      .find((s) => s.text().includes("全市场（推荐）"))!;
+    await select.setValue("800");
+
+    await button(wrapper, "保存设置")!.trigger("click");
+    await vi.waitFor(() => expect(mocks.saveEmailPrefs).toHaveBeenCalled());
+
+    const payload = mocks.saveEmailPrefs.mock.calls[0][0];
+    expect(payload.refreshScoresBeforeSend).toBe(true);
+    expect(payload.scoreLimit).toBe(800);
+  });
+
+  it("读回已保存的只数上限", async () => {
+    mocks.getEmailPrefs.mockResolvedValue(
+      emailInfo({ prefs: emailPrefs({ refreshScoresBeforeSend: true, scoreLimit: 300 }) }),
+    );
+    const wrapper = await openCard();
+
+    const select = wrapper
+      .findAll("select")
+      .find((s) => s.text().includes("全市场（推荐）"))!;
+    expect((select.element as HTMLSelectElement).value).toBe("300");
+  });
+
+  it("读回关闭状态，重新打开后仍给出说明", async () => {
+    mocks.getEmailPrefs.mockResolvedValue(
+      emailInfo({ prefs: emailPrefs({ refreshScoresBeforeSend: false }) }),
+    );
+    const wrapper = await openCard();
+    expect(wrapper.text()).toContain("邮件会用");
+
+    const refreshToggle = wrapper
+      .findAll("label")
+      .find((l) => l.text().includes("发送前先刷新评分"))!
+      .find('input[type="checkbox"]');
+    await refreshToggle.setValue(true);
+    await nextTick();
+
+    expect(wrapper.text()).toContain("首次执行要几十秒");
+    expect(wrapper.text()).not.toContain("邮件会用");
   });
 });
