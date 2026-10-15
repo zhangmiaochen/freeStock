@@ -678,7 +678,59 @@ func evaluateRisks(horizon Horizon, input ScoreInput, fair FairValue, dimensions
 		})
 	}
 
-	// ⑦ 行业或个股估值存在明显周期性误判
+	// ⑦ 当前价格隐含的成长要求明显超出公司自身能力
+	//
+	// 这是本轮新增的机制（见 impliedexpectation.go）。它与 ⑥ 的区别：
+	// ⑥ 说的是"模型内部假设太乐观"，这里说的是"市场当前价格要求公司做到的
+	// 增速，高于公司自己能做到的" —— 高增长行业里最该防的就是这一条：
+	// 行业好、公司好，但价格已经把未来多年的高增长提前反映完了。
+	//
+	// ⚠ 只在**反解可靠**（`Implied.Available`）时触发。现金流为负或有缺季时不触发，
+	// 因为那时无法可靠反解，硬报风险等于用一个算不准的数去限制评级。
+	if implied := input.FairByHorizon["12m"].Implied; implied.Available {
+		if implied.Verdict == "over" && (implied.Fulfillment == "low" || implied.Fulfillment == "medium") {
+			severity := RiskNotice
+			capped := RatingGood
+			if implied.Fulfillment == "low" {
+				// 兑现概率低 + 市场要求明显偏高 → 直接限制评级
+				severity = RiskCap
+				capped = RatingNeutral
+			}
+			flags = append(flags, RiskFlag{
+				Code:     RiskGrowthExpectationTooHigh,
+				Severity: severity,
+				Title:    "股价隐含的成长要求高于公司自身能力",
+				Reason: fmt.Sprintf("按当前价反解，市场要求的长期增速约 %.1f%%、需持续约 %.1f 年，"+
+					"而公司自身近年增速约 %.1f%%（高出 %.1f 个百分点）；兑现概率评估为 %s。"+
+					"价格已提前反映未来的高增长，成长一旦不及预期，估值下修风险显著",
+					implied.ImpliedGrowth*100, implied.ImpliedYears,
+					implied.AchievableGrowth*100, implied.GrowthGap*100,
+					fulfillmentText(implied.Fulfillment)),
+				CapRating: capped,
+			})
+		}
+	}
+
+	// ⑧ 当前价格在为"超出自身能力的增长"支付很多年的现金流
+	//
+	// 与 ⑦ 是同一枚硬币的两面：⑦ 说的是"要求太高"，这里说的是"为此付的钱太多"
+	// （用年限表达）。分开报是因为它们可以单独出现 —— 比如要求的增速只比自身高
+	// 一点（⑦ 不触发），但要维持非常久（⑧ 触发）。
+	if implied := input.FairByHorizon["12m"].Implied; implied.Available &&
+		implied.ImpliedYears >= thresholds.ImpliedGrowthYearsMax {
+		flags = append(flags, RiskFlag{
+			Code:     RiskGrowthDurationDemanding,
+			Severity: RiskNotice,
+			Title:    "当前价格依赖长期的高成长兑现",
+			Reason: fmt.Sprintf("当前市值比「按公司自身增速（%.1f%%）折现的价值」高出相当于 %.1f 年自由现金流的金额"+
+				"（超过 %.0f 年的阈值）——为超出自身能力的增长支付了很长时间的现金流；"+
+				"若成长只按自身增速实现，合理价值约 %.2f 元（相对现价 %.1f%%）",
+				implied.AchievableGrowth*100, implied.ImpliedYears,
+				thresholds.ImpliedGrowthYearsMax, implied.ValueAtAchievable, implied.DownsideIfMiss*100),
+		})
+	}
+
+	// ⑨ 行业或个股估值存在明显周期性误判
 	if input.Industry.CyclicalWarning {
 		flags = append(flags, RiskFlag{
 			Code:     RiskCyclicalMisjudge,
@@ -849,6 +901,20 @@ func structuralNote(self SelfValuation) string {
 	return "已检测到结构性变化，历史分位权重已下调：" + joinStrings(self.StructuralReasons, "；")
 }
 
+// fulfillmentText 把兑现概率档位翻成中文（用于风险说明）。
+func fulfillmentText(level string) string {
+	switch level {
+	case "high":
+		return "高（自身能力足以覆盖市场要求）"
+	case "medium":
+		return "中等（需要成长保持在较好水平）"
+	case "low":
+		return "低（需要显著加速或长期维持）"
+	}
+	return "未知（数据不足）"
+}
+
+// growthNoteText 把成长结论翻成一句人话。
 func growthNoteText(growth Growth) string {
 	parts := make([]string, 0, 3)
 	if growth.RevenueCAGR5 != 0 {

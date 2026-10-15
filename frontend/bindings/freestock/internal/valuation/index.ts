@@ -11,6 +11,7 @@ export {
     Horizon,
     HorizonRanking,
     HorizonScore,
+    ImpliedExpectation,
     IndexEvaluation,
     IndustryValuation,
     IndustryWeight,

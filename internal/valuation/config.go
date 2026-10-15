@@ -75,6 +75,14 @@ type RiskThresholds struct {
 	MinReturnRiskRatio float64 `json:"minReturnRiskRatio"`
 	// OptimismDependenceMax 是允许的"乐观依赖度"上限。
 	OptimismDependenceMax float64 `json:"optimismDependenceMax"`
+	// ImpliedGrowthYearsMax 是"为超出自身能力的增长付账"可接受的年限上限。
+	//
+	// 口径见 ImpliedExpectation.ImpliedYears：当前市值比"按公司自身增速折现的
+	// 价值"高出的部分，相当于多少年的自由现金流。
+	//
+	// 取 5 年的理由：A 股一轮产能/景气周期大致 3~5 年，超过 5 年意味着
+	// 当前价格在赌一个跨周期的持续高增长，这是需要明确提示的赌注。
+	ImpliedGrowthYearsMax float64 `json:"impliedGrowthYearsMax"`
 	// MinDataCoverage 是触发"无法可靠评估"的数据覆盖率下限。
 	MinDataCoverage float64 `json:"minDataCoverage"`
 	// DeteriorateQuarters 是"盈利持续恶化"需要连续恶化的季度数。
@@ -165,6 +173,8 @@ func DefaultParams() Params {
 			PremiumMax:            0.30,
 			MinReturnRiskRatio:    1.0,
 			OptimismDependenceMax: 0.40,
+			// ImpliedGrowthYearsMax：为超出自身能力的增长付账超过 5 年即提示
+			ImpliedGrowthYearsMax: 5.0,
 			MinDataCoverage:       0.50,
 			DeteriorateQuarters:   2,
 		},
@@ -307,6 +317,7 @@ func sanitizeRiskThresholds(in, def RiskThresholds) RiskThresholds {
 	out.PremiumMax = clampFloatRange(in.PremiumMax, 0.02, 3, def.PremiumMax)
 	out.MinReturnRiskRatio = clampFloatRange(in.MinReturnRiskRatio, 0.1, 10, def.MinReturnRiskRatio)
 	out.OptimismDependenceMax = clampFloatRange(in.OptimismDependenceMax, 0.05, 1, def.OptimismDependenceMax)
+	out.ImpliedGrowthYearsMax = clampFloatRange(in.ImpliedGrowthYearsMax, 1, 30, def.ImpliedGrowthYearsMax)
 	out.MinDataCoverage = clampFloatRange(in.MinDataCoverage, 0.1, 0.9, def.MinDataCoverage)
 	out.DeteriorateQuarters = clampIntRange(in.DeteriorateQuarters, 1, 8, def.DeteriorateQuarters)
 	return out

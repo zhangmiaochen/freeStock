@@ -246,7 +246,18 @@ export class FairValue {
     "conflictNote"?: string;
 
     /**
-     * ImpliedGrowth 是当前价格隐含的成长预期（反向 DCF 的结果）。
+     * Implied 是当前价格隐含的**市场预期**（真正的反向 DCF 反解）。
+     * 
+     * ⚠ 这里替换掉了早期版本的一个循环论证实现：它把 `fairPE` 反解回去
+     * 得到"PE 对应的成长分"，于是"高 PE"必然推出"高隐含成长" ——
+     * 那不是问市场要求多少增长，只是把 fairPE 的假设换个说法讲一遍。
+     * 详见 impliedexpectation.go 的说明。
+     */
+    "implied": ImpliedExpectation;
+
+    /**
+     * ImpliedGrowth 保留为 Implied.ImpliedGrowth 的扁平镜像，供既有调用方与
+     * 界面少一层取值路径。值为 0 且 Implied.Available 为 false 时表示不可用。
      */
     "impliedGrowth": number;
 
@@ -311,6 +322,9 @@ export class FairValue {
         if (!("conflict" in $$source)) {
             this["conflict"] = false;
         }
+        if (!("implied" in $$source)) {
+            this["implied"] = (new ImpliedExpectation());
+        }
         if (!("impliedGrowth" in $$source)) {
             this["impliedGrowth"] = 0;
         }
@@ -342,9 +356,10 @@ export class FairValue {
     static createFrom($$source: any = {}): FairValue {
         const $$createField9_0 = $$createType4;
         const $$createField10_0 = $$createType5;
-        const $$createField17_0 = $$createType6;
-        const $$createField18_0 = $$createType0;
-        const $$createField19_0 = $$createType8;
+        const $$createField13_0 = $$createType6;
+        const $$createField18_0 = $$createType7;
+        const $$createField19_0 = $$createType0;
+        const $$createField20_0 = $$createType9;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("methods" in $$parsedSource) {
             $$parsedSource["methods"] = $$createField9_0($$parsedSource["methods"]);
@@ -352,14 +367,17 @@ export class FairValue {
         if ("methodsUsed" in $$parsedSource) {
             $$parsedSource["methodsUsed"] = $$createField10_0($$parsedSource["methodsUsed"]);
         }
+        if ("implied" in $$parsedSource) {
+            $$parsedSource["implied"] = $$createField13_0($$parsedSource["implied"]);
+        }
         if ("confidence" in $$parsedSource) {
-            $$parsedSource["confidence"] = $$createField17_0($$parsedSource["confidence"]);
+            $$parsedSource["confidence"] = $$createField18_0($$parsedSource["confidence"]);
         }
         if ("warnings" in $$parsedSource) {
-            $$parsedSource["warnings"] = $$createField18_0($$parsedSource["warnings"]);
+            $$parsedSource["warnings"] = $$createField19_0($$parsedSource["warnings"]);
         }
         if ("assumptions" in $$parsedSource) {
-            $$parsedSource["assumptions"] = $$createField19_0($$parsedSource["assumptions"]);
+            $$parsedSource["assumptions"] = $$createField20_0($$parsedSource["assumptions"]);
         }
         return new FairValue($$parsedSource as Partial<FairValue>);
     }
@@ -500,7 +518,7 @@ export class Growth {
      * Creates a new Growth instance from a string or object.
      */
     static createFrom($$source: any = {}): Growth {
-        const $$createField15_0 = $$createType10;
+        const $$createField15_0 = $$createType11;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("flags" in $$parsedSource) {
             $$parsedSource["flags"] = $$createField15_0($$parsedSource["flags"]);
@@ -651,10 +669,10 @@ export class HorizonRanking {
      * Creates a new HorizonRanking instance from a string or object.
      */
     static createFrom($$source: any = {}): HorizonRanking {
-        const $$createField0_0 = $$createType11;
-        const $$createField1_0 = $$createType13;
-        const $$createField2_0 = $$createType15;
-        const $$createField5_0 = $$createType16;
+        const $$createField0_0 = $$createType12;
+        const $$createField1_0 = $$createType14;
+        const $$createField2_0 = $$createType16;
+        const $$createField5_0 = $$createType17;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("horizon" in $$parsedSource) {
             $$parsedSource["horizon"] = $$createField0_0($$parsedSource["horizon"]);
@@ -775,12 +793,12 @@ export class HorizonScore {
      * Creates a new HorizonScore instance from a string or object.
      */
     static createFrom($$source: any = {}): HorizonScore {
-        const $$createField0_0 = $$createType11;
-        const $$createField1_0 = $$createType17;
-        const $$createField2_0 = $$createType17;
+        const $$createField0_0 = $$createType12;
+        const $$createField1_0 = $$createType18;
+        const $$createField2_0 = $$createType18;
         const $$createField8_0 = $$createType2;
-        const $$createField9_0 = $$createType18;
-        const $$createField10_0 = $$createType17;
+        const $$createField9_0 = $$createType19;
+        const $$createField10_0 = $$createType18;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("horizon" in $$parsedSource) {
             $$parsedSource["horizon"] = $$createField0_0($$parsedSource["horizon"]);
@@ -801,6 +819,142 @@ export class HorizonScore {
             $$parsedSource["contributions"] = $$createField10_0($$parsedSource["contributions"]);
         }
         return new HorizonScore($$parsedSource as Partial<HorizonScore>);
+    }
+}
+
+/**
+ * ImpliedExpectation 是"当前价格隐含的市场预期"及其兑现评估。
+ */
+export class ImpliedExpectation {
+    /**
+     * Available 表示能可靠反解（需要正的 TTM 自由现金流与完整现金流科目）。
+     */
+    "available": boolean;
+
+    /**
+     * Reason 在不可用时说明原因（不硬算）。
+     */
+    "reason"?: string;
+
+    /**
+     * ImpliedGrowth 是反解出的**市场要求增速**（小数，0.25 = 25%）。
+     * 
+     * ⚠ ImpliedGrowth **只在 `Unreachable` 为 false 时才可信**：
+     * 为 true 时它被夹在搜索区间端点，真实要求只在那个方向之外。
+     */
+    "impliedGrowth": number;
+
+    /**
+     * Unreachable 表示"当前市值超出搜索区间的可解释范围"。
+     * 
+     * 只有上端会这样（价格高于 80% 增速所能支撑的价值）——
+     * 下端（价格过低）直接判不可用并说明，因为那时 DCF 框架本身不适用。
+     */
+    "unreachable": boolean;
+
+    /**
+     * ImpliedYears 是现值口径下，市场要求的成长需要持续的**年数**。
+     * 
+     * 含义：在 ImpliedGrowth 这条路径上，累计折现现金流覆盖当前市值所需年数。
+     * 0 表示"当前现金流的现值就已经覆盖市值"（不需要成长）。
+     */
+    "impliedYears": number;
+
+    /**
+     * DurationCapped 表示 ImpliedYears 撞到了 ImpliedDurationCap（真实需求更久）。
+     */
+    "durationCapped": boolean;
+
+    /**
+     * AchievableGrowth 是"公司自身能做到的增速"（历史增速代理，小数）。
+     */
+    "achievableGrowth": number;
+
+    /**
+     * AchievableBasis 说明 AchievableGrowth 取自哪个口径。
+     */
+    "achievableBasis"?: string;
+
+    /**
+     * GrowthGap 是 ImpliedGrowth − AchievableGrowth（正数=市场要求高于自身能力）。
+     */
+    "growthGap": number;
+
+    /**
+     * Fulfillment 是兑现概率档位（high/medium/low/unknown）。
+     */
+    "fulfillment": string;
+
+    /**
+     * FulfillmentNote 说明这个档位是依据哪几个信号判的。
+     */
+    "fulfillmentNote"?: string;
+
+    /**
+     * ValueAtAchievable 是"成长只按自身实际增速实现"时的每股合理价值。
+     */
+    "valueAtAchievable": number;
+
+    /**
+     * DownsideIfMiss 是不及预期时相对现价的跌幅（负数表示下跌）。
+     */
+    "downsideIfMiss": number;
+
+    /**
+     * Verdict 是结论档位：over/under/fair/unknown。
+     */
+    "verdict": string;
+
+    /**
+     * Note 是给人看的结论与口径说明。
+     */
+    "note"?: string;
+
+    /** Creates a new ImpliedExpectation instance. */
+    constructor($$source: Partial<ImpliedExpectation> = {}) {
+        if (!("available" in $$source)) {
+            this["available"] = false;
+        }
+        if (!("impliedGrowth" in $$source)) {
+            this["impliedGrowth"] = 0;
+        }
+        if (!("unreachable" in $$source)) {
+            this["unreachable"] = false;
+        }
+        if (!("impliedYears" in $$source)) {
+            this["impliedYears"] = 0;
+        }
+        if (!("durationCapped" in $$source)) {
+            this["durationCapped"] = false;
+        }
+        if (!("achievableGrowth" in $$source)) {
+            this["achievableGrowth"] = 0;
+        }
+        if (!("growthGap" in $$source)) {
+            this["growthGap"] = 0;
+        }
+        if (!("fulfillment" in $$source)) {
+            this["fulfillment"] = "";
+        }
+        if (!("valueAtAchievable" in $$source)) {
+            this["valueAtAchievable"] = 0;
+        }
+        if (!("downsideIfMiss" in $$source)) {
+            this["downsideIfMiss"] = 0;
+        }
+        if (!("verdict" in $$source)) {
+            this["verdict"] = "";
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new ImpliedExpectation instance from a string or object.
+     */
+    static createFrom($$source: any = {}): ImpliedExpectation {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new ImpliedExpectation($$parsedSource as Partial<ImpliedExpectation>);
     }
 }
 
@@ -1033,10 +1187,10 @@ export class IndexEvaluation {
      * Creates a new IndexEvaluation instance from a string or object.
      */
     static createFrom($$source: any = {}): IndexEvaluation {
-        const $$createField7_0 = $$createType19;
-        const $$createField19_0 = $$createType21;
-        const $$createField26_0 = $$createType23;
-        const $$createField27_0 = $$createType6;
+        const $$createField7_0 = $$createType20;
+        const $$createField19_0 = $$createType22;
+        const $$createField26_0 = $$createType24;
+        const $$createField27_0 = $$createType7;
         const $$createField30_0 = $$createType0;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("peBand" in $$parsedSource) {
@@ -1236,7 +1390,7 @@ export class IndustryValuation {
      * Creates a new IndustryValuation instance from a string or object.
      */
     static createFrom($$source: any = {}): IndustryValuation {
-        const $$createField10_0 = $$createType19;
+        const $$createField10_0 = $$createType20;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("peBand" in $$parsedSource) {
             $$parsedSource["peBand"] = $$createField10_0($$parsedSource["peBand"]);
@@ -1489,8 +1643,8 @@ export class Outlook {
      * Creates a new Outlook instance from a string or object.
      */
     static createFrom($$source: any = {}): Outlook {
-        const $$createField0_0 = $$createType11;
-        const $$createField5_0 = $$createType25;
+        const $$createField0_0 = $$createType12;
+        const $$createField5_0 = $$createType26;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("horizon" in $$parsedSource) {
             $$parsedSource["horizon"] = $$createField0_0($$parsedSource["horizon"]);
@@ -1607,7 +1761,7 @@ export class Quality {
      * Creates a new Quality instance from a string or object.
      */
     static createFrom($$source: any = {}): Quality {
-        const $$createField11_0 = $$createType27;
+        const $$createField11_0 = $$createType28;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("issues" in $$parsedSource) {
             $$parsedSource["issues"] = $$createField11_0($$parsedSource["issues"]);
@@ -1871,7 +2025,7 @@ export class RankRow {
      * Creates a new RankRow instance from a string or object.
      */
     static createFrom($$source: any = {}): RankRow {
-        const $$createField31_0 = $$createType6;
+        const $$createField31_0 = $$createType7;
         const $$createField32_0 = $$createType2;
         const $$createField33_0 = $$createType0;
         const $$createField34_0 = $$createType0;
@@ -2162,6 +2316,25 @@ export enum RiskCode {
      * 多方法结果冲突
      */
     RiskMethodConflict = "method_conflict",
+
+    /**
+     * RiskGrowthExpectationTooHigh 是"当前价格隐含的成长要求明显超出公司自身能力"。
+     * 
+     * 与 RiskOptimismDependent 的区别（两者都关于"成长"，但问的不是一件事）：
+     * 
+     * 	optimism_dependent          乐观情景被剔除后收益掉太多 → 说的是**模型内部**的假设敏感度
+     * 	growth_expectation_too_high 市场当前价格要求公司做到的增速高于它自身能做到的
+     * 	                            → 说的是**市场定价**与公司能力之间的缺口
+     * 
+     * 后者是"高增长行业里最该防的那件事"：行业好、公司好，但价格已经把未来的
+     * 多年高增长提前反映完了。所以必须有独立的风险码，不能被前者吸收。
+     */
+    RiskGrowthExpectationTooHigh = "growth_expectation_too_high",
+
+    /**
+     * RiskGrowthDurationDemanding 是"当前价格在为超出自身能力的增长支付很多年的现金流"。
+     */
+    RiskGrowthDurationDemanding = "growth_duration_demanding",
 };
 
 /**
@@ -2408,8 +2581,8 @@ export class ScoreDistribution {
      * Creates a new ScoreDistribution instance from a string or object.
      */
     static createFrom($$source: any = {}): ScoreDistribution {
-        const $$createField6_0 = $$createType28;
-        const $$createField7_0 = $$createType29;
+        const $$createField6_0 = $$createType29;
+        const $$createField7_0 = $$createType30;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("histogram" in $$parsedSource) {
             $$parsedSource["histogram"] = $$createField6_0($$parsedSource["histogram"]);
@@ -2556,10 +2729,10 @@ export class SelfValuation {
      * Creates a new SelfValuation instance from a string or object.
      */
     static createFrom($$source: any = {}): SelfValuation {
-        const $$createField2_0 = $$createType30;
-        const $$createField11_0 = $$createType19;
-        const $$createField12_0 = $$createType19;
-        const $$createField13_0 = $$createType19;
+        const $$createField2_0 = $$createType31;
+        const $$createField11_0 = $$createType20;
+        const $$createField12_0 = $$createType20;
+        const $$createField13_0 = $$createType20;
         const $$createField17_0 = $$createType0;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("current" in $$parsedSource) {
@@ -2804,15 +2977,15 @@ export class StockScore {
      * Creates a new StockScore instance from a string or object.
      */
     static createFrom($$source: any = {}): StockScore {
-        const $$createField9_0 = $$createType31;
-        const $$createField10_0 = $$createType32;
-        const $$createField11_0 = $$createType33;
-        const $$createField12_0 = $$createType35;
-        const $$createField13_0 = $$createType36;
-        const $$createField14_0 = $$createType37;
-        const $$createField15_0 = $$createType23;
-        const $$createField16_0 = $$createType6;
-        const $$createField17_0 = $$createType8;
+        const $$createField9_0 = $$createType32;
+        const $$createField10_0 = $$createType33;
+        const $$createField11_0 = $$createType34;
+        const $$createField12_0 = $$createType36;
+        const $$createField13_0 = $$createType37;
+        const $$createField14_0 = $$createType38;
+        const $$createField15_0 = $$createType24;
+        const $$createField16_0 = $$createType7;
+        const $$createField17_0 = $$createType9;
         const $$createField18_0 = $$createType2;
         const $$createField21_0 = $$createType0;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
@@ -2972,35 +3145,36 @@ const $$createType2 = $Create.Array($$createType1);
 const $$createType3 = MethodResult.createFrom;
 const $$createType4 = $Create.Array($$createType3);
 const $$createType5 = $Create.Array($Create.Any);
-const $$createType6 = Confidence.createFrom;
-const $$createType7 = Evidence.createFrom;
-const $$createType8 = $Create.Array($$createType7);
-const $$createType9 = GrowthFlag.createFrom;
-const $$createType10 = $Create.Array($$createType9);
-const $$createType11 = Horizon.createFrom;
-const $$createType12 = RankRow.createFrom;
-const $$createType13 = $Create.Array($$createType12);
-const $$createType14 = ExcludedRow.createFrom;
-const $$createType15 = $Create.Array($$createType14);
-const $$createType16 = ScoreDistribution.createFrom;
-const $$createType17 = $Create.Map($Create.Any, $Create.Any);
-const $$createType18 = Outlook.createFrom;
-const $$createType19 = ValuationBand.createFrom;
-const $$createType20 = IndustryWeight.createFrom;
-const $$createType21 = $Create.Array($$createType20);
-const $$createType22 = HorizonScore.createFrom;
-const $$createType23 = $Create.Array($$createType22);
-const $$createType24 = Scenario.createFrom;
-const $$createType25 = $Create.Array($$createType24);
-const $$createType26 = QualityIssue.createFrom;
-const $$createType27 = $Create.Array($$createType26);
-const $$createType28 = $Create.Array($Create.Any);
-const $$createType29 = $Create.Map($Create.Any, $Create.Any);
-const $$createType30 = ValuationPoint.createFrom;
-const $$createType31 = SelfValuation.createFrom;
-const $$createType32 = IndustryValuation.createFrom;
-const $$createType33 = RelativeValuation.createFrom;
-const $$createType34 = FairValue.createFrom;
-const $$createType35 = $Create.Map($Create.Any, $$createType34);
-const $$createType36 = Growth.createFrom;
-const $$createType37 = Quality.createFrom;
+const $$createType6 = ImpliedExpectation.createFrom;
+const $$createType7 = Confidence.createFrom;
+const $$createType8 = Evidence.createFrom;
+const $$createType9 = $Create.Array($$createType8);
+const $$createType10 = GrowthFlag.createFrom;
+const $$createType11 = $Create.Array($$createType10);
+const $$createType12 = Horizon.createFrom;
+const $$createType13 = RankRow.createFrom;
+const $$createType14 = $Create.Array($$createType13);
+const $$createType15 = ExcludedRow.createFrom;
+const $$createType16 = $Create.Array($$createType15);
+const $$createType17 = ScoreDistribution.createFrom;
+const $$createType18 = $Create.Map($Create.Any, $Create.Any);
+const $$createType19 = Outlook.createFrom;
+const $$createType20 = ValuationBand.createFrom;
+const $$createType21 = IndustryWeight.createFrom;
+const $$createType22 = $Create.Array($$createType21);
+const $$createType23 = HorizonScore.createFrom;
+const $$createType24 = $Create.Array($$createType23);
+const $$createType25 = Scenario.createFrom;
+const $$createType26 = $Create.Array($$createType25);
+const $$createType27 = QualityIssue.createFrom;
+const $$createType28 = $Create.Array($$createType27);
+const $$createType29 = $Create.Array($Create.Any);
+const $$createType30 = $Create.Map($Create.Any, $Create.Any);
+const $$createType31 = ValuationPoint.createFrom;
+const $$createType32 = SelfValuation.createFrom;
+const $$createType33 = IndustryValuation.createFrom;
+const $$createType34 = RelativeValuation.createFrom;
+const $$createType35 = FairValue.createFrom;
+const $$createType36 = $Create.Map($Create.Any, $$createType35);
+const $$createType37 = Growth.createFrom;
+const $$createType38 = Quality.createFrom;

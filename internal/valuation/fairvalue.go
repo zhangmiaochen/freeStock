@@ -75,7 +75,15 @@ type FairValue struct {
 	// ConflictNote 说明冲突的具体表现。
 	ConflictNote string `json:"conflictNote,omitempty"`
 
-	// ImpliedGrowth 是当前价格隐含的成长预期（反向 DCF 的结果）。
+	// Implied 是当前价格隐含的**市场预期**（真正的反向 DCF 反解）。
+	//
+	// ⚠ 这里替换掉了早期版本的一个循环论证实现：它把 `fairPE` 反解回去
+	// 得到"PE 对应的成长分"，于是"高 PE"必然推出"高隐含成长" ——
+	// 那不是问市场要求多少增长，只是把 fairPE 的假设换个说法讲一遍。
+	// 详见 impliedexpectation.go 的说明。
+	Implied ImpliedExpectation `json:"implied"`
+	// ImpliedGrowth 保留为 Implied.ImpliedGrowth 的扁平镜像，供既有调用方与
+	// 界面少一层取值路径。值为 0 且 Implied.Available 为 false 时表示不可用。
 	ImpliedGrowth float64 `json:"impliedGrowth"`
 	// ModelGrowth 是模型采用的成长假设。
 	ModelGrowth float64 `json:"modelGrowth"`
@@ -393,7 +401,10 @@ func EvaluateFairValue(input FairValueInput) FairValue {
 	out.Upside = (out.Optimistic - out.Price) / out.Price
 
 	// ---- 反向 DCF：当前价格隐含的成长预期 ----
-	out.ImpliedGrowth, out.GrowthExpectation, out.GrowthNote = impliedGrowth(input, out)
+	out.Implied = impliedExpectationOf(input, out)
+	out.ImpliedGrowth = out.Implied.ImpliedGrowth
+	out.GrowthExpectation = out.Implied.Verdict
+	out.GrowthNote = out.Implied.Note
 
 	// ---- 多方法冲突 ----
 	out.Conflict, out.ConflictNote = detectMethodConflict(methods)
@@ -925,62 +936,54 @@ func detectMethodConflict(methods []MethodResult) (bool, string) {
 	return false, ""
 }
 
-// impliedGrowth 用反向 DCF 反解当前价格隐含的成长预期。
+// impliedExpectationOf 从正向估值的输入里组装出反解所需的一组量。
 //
-// 做法：把 fairPE 的目标 PE 公式视为"当前 PE 隐含的成长分"，反解出成长分，
-// 再映射回增速区间。这是**检查市场预期是否过高**的关键闸门 ——
-// 如果市场隐含的增速远高于公司历史与行业水平，那么"估值便宜"就是错觉。
-func impliedGrowth(input FairValueInput, fair FairValue) (float64, string, string) {
+// 这是"正向模型"与"反向反解"之间**唯一**的接缝：正向用 `dcfValue` 算价值，
+// 反向用同一个 `dcfValue` 二分反解增速，所以两者的差就是**定价分歧**本身，
+// 而不是两套假设互相比对。
+//
+// "公司自身可实现增速"取的是**历史增速代理**（近 3 年营收 CAGR，缺失时退到
+// 同比）。这不是市场一致预期 —— 本机没有可用的分析师预期数据
+// （`analyst_consensus` 只有 5 天且无法回填），界面必须写明这一点。
+func impliedExpectationOf(input FairValueInput, fair FairValue) ImpliedExpectation {
 	asOf := input.AsOf
-	if asOf.TTM.NetProfit <= 0 || input.Shares <= 0 || input.Price <= 0 {
-		return 0, "", "公司亏损或缺少股本，无法用反向 DCF 反解市场隐含预期"
-	}
-	epsTTM := asOf.TTM.NetProfit / input.Shares
-	if epsTTM <= 0 {
-		return 0, "", "TTM 每股收益 ≤ 0，无法反解隐含预期"
-	}
-	currentPE := input.Price / epsTTM
-	quality := input.Quality.Score
 
-	// 当前 PE 对应的"成长分"：由 fairPE 反解
-	// fairPE = 8 + 22 × (g×0.55 + q×0.45)/100  ⇒  g = ((PE−8)/22 × 100 − 0.45q) / 0.55
-	impliedScore := ((currentPE-8)/22*100 - 0.45*quality) / 0.55
-	impliedScore = clampScore(impliedScore)
-
-	// 把"成长分"映射回增速：用与正推相同的映射反解
-	// 正推时 growthScore 由 growthCurve 组合而成，这里用最直接的近似：
-	// 成长分 50 视为对应 0% 增长，100 视为 30% 增长，0 视为 −30%
-	implied := (impliedScore - 50) / 50 * 0.30
-
-	model := input.Growth.RevenueCAGR3
-	if model == 0 {
-		model = input.Growth.RevenueYoY
+	achievable := input.Growth.RevenueCAGR3
+	basis := "近 3 年营收 CAGR"
+	if achievable == 0 {
+		achievable = input.Growth.RevenueYoY
+		basis = "最近一期营收同比"
 	}
-	verdict := ""
-	note := ""
-	switch {
-	case model == 0:
-		verdict = "unknown"
-		note = fmt.Sprintf("当前 PE %.1f 倍隐含的长期增速约 %.1f%%；"+
-			"公司自身成长数据不足，无法判断该预期是否偏高", currentPE, implied*100)
-	case implied > model+0.10:
-		verdict = "high"
-		note = fmt.Sprintf("当前 PE %.1f 倍隐含的市场预期增速约 %.1f%%，"+
-			"明显高于公司近 3 年实际增速 %.1f%%（高出 %.1f 个百分点）——**市场预期偏高**，"+
-			"成长一旦不及预期，估值下修风险显著", currentPE, implied*100, model*100, (implied-model)*100)
-	case implied < model-0.10:
-		verdict = "low"
-		note = fmt.Sprintf("当前 PE %.1f 倍隐含的市场预期增速约 %.1f%%，"+
-			"低于公司近 3 年实际增速 %.1f%%（低 %.1f 个百分点）——**市场预期偏低**，"+
-			"若成长能维持，存在估值修复空间", currentPE, implied*100, model*100, (model-implied)*100)
-	default:
-		verdict = "fair"
-		note = fmt.Sprintf("当前 PE %.1f 倍隐含的市场预期增速约 %.1f%%，与公司近 3 年实际增速 %.1f%% 基本匹配",
-			currentPE, implied*100, model*100)
+	if achievable == 0 {
+		achievable = input.Growth.ProfitCAGR3
+		basis = "近 3 年净利润 CAGR"
 	}
-	_ = fair
-	return implied, verdict, note
+	if achievable == 0 {
+		basis = "公司成长数据不足"
+	}
+
+	// 现金流科目完整度取两个科目里**较差**的那个：反解依赖自由现金流，
+	// 经营现金流与资本开支任一缺季都会让 TTM 自由现金流失真。
+	cashQuarters := asOf.TTM.CashOperateQuarters
+	if asOf.TTM.CapexQuarters < cashQuarters {
+		cashQuarters = asOf.TTM.CapexQuarters
+	}
+
+	return EvaluateImpliedExpectation(
+		fair.Base,             // 正向基准合理价值（每股），仅用于文案与交叉校验
+		input.Price,           // 当前价（不复权，与市值同口径）
+		input.Shares,          // 总股本
+		asOf.TTM.FreeCashFlow, // TTM 自由现金流
+		cashQuarters,          // 现金流科目完整度
+		achievable, basis,     // 自身可实现增速 + 口径说明
+		input.Quality.Score,           // 盈利质量（兑现概率信号）
+		growthPersistOf(input.Growth), // 成长持续性（兑现概率信号）
+		input.Params,
+	)
 }
+
+// growthPersistOf 取成长持续性；0 表示数据不足。
+func growthPersistOf(growth Growth) float64 { return growth.Consistency }
 
 // estimateValuationConfidence 估计估值置信度。
 //

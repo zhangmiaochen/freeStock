@@ -231,6 +231,19 @@ const (
 	RiskCyclicalMisjudge      RiskCode = "cyclical_misjudge"       // 周期性误判
 	RiskDataQuality           RiskCode = "data_quality"            // 数据缺失/过期/口径不一致
 	RiskMethodConflict        RiskCode = "method_conflict"         // 多方法结果冲突
+	// RiskGrowthExpectationTooHigh 是"当前价格隐含的成长要求明显超出公司自身能力"。
+	//
+	// 与 RiskOptimismDependent 的区别（两者都关于"成长"，但问的不是一件事）：
+	//
+	//	optimism_dependent          乐观情景被剔除后收益掉太多 → 说的是**模型内部**的假设敏感度
+	//	growth_expectation_too_high 市场当前价格要求公司做到的增速高于它自身能做到的
+	//	                            → 说的是**市场定价**与公司能力之间的缺口
+	//
+	// 后者是"高增长行业里最该防的那件事"：行业好、公司好，但价格已经把未来的
+	// 多年高增长提前反映完了。所以必须有独立的风险码，不能被前者吸收。
+	RiskGrowthExpectationTooHigh RiskCode = "growth_expectation_too_high"
+	// RiskGrowthDurationDemanding 是"当前价格在为超出自身能力的增长支付很多年的现金流"。
+	RiskGrowthDurationDemanding RiskCode = "growth_duration_demanding"
 )
 
 // RiskFlag 是一条风险约束结论。

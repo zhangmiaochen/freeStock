@@ -329,7 +329,37 @@ export const RISK_CODE_LABELS: Record<string, string> = {
   cyclical_misjudge: "可能存在周期性误判",
   data_quality: "数据质量不足",
   method_conflict: "估值方法结论冲突",
+  // 这一对是"高增长行业里最该防的那件事"（见开发计划 §6）：
+  // 行业好、公司好，但价格已经把未来多年的高增长提前反映完了。
+  growth_expectation_too_high: "股价隐含的成长要求高于公司自身能力",
+  growth_duration_demanding: "当前价格依赖长期的高成长兑现",
 };
+
+/** 市场隐含预期的结论档位文案（over/fair/under/unknown）。 */
+export const IMPLIED_VERDICT_LABELS: Record<string, string> = {
+  over: "市场要求高于自身能力",
+  fair: "市场要求与自身能力匹配",
+  under: "市场要求低于自身能力",
+  unknown: "无法反解",
+};
+
+/** 兑现概率档位文案。 */
+export const FULFILLMENT_LABELS: Record<string, string> = {
+  high: "高",
+  medium: "中",
+  low: "低",
+  unknown: "未知",
+};
+
+export function impliedVerdictLabel(verdict: unknown): string {
+  const key = keyOf(verdict);
+  return IMPLIED_VERDICT_LABELS[key] ?? key;
+}
+
+export function fulfillmentLabel(level: unknown): string {
+  const key = keyOf(level);
+  return FULFILLMENT_LABELS[key] ?? key;
+}
 
 export function riskCodeLabel(code: unknown): string {
   const key = keyOf(code);

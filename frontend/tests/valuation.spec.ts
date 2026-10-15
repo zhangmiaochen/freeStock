@@ -411,6 +411,23 @@ function stockValuation(): StockValuation {
           modelGrowth: 0.11,
           growthExpectation: "high",
           growthNote: "当前 PE 11.8 倍隐含的市场预期增速约 18.0%，明显高于公司近 3 年实际增速 11.0%",
+          // 市场隐含预期（反向 DCF 反解）
+          implied: {
+            available: true,
+            impliedGrowth: 0.25,
+            impliedYears: 4.2,
+            durationCapped: false,
+            unreachable: false,
+            achievableGrowth: 0.08,
+            achievableBasis: "近 3 年营收 CAGR",
+            growthGap: 0.17,
+            fulfillment: "low",
+            fulfillmentNote: "市场要求比自身增速高 17.0 个百分点，需要显著加速；成长持续性 35%（偏弱）",
+            valueAtAchievable: 18.4,
+            downsideIfMiss: -0.164,
+            verdict: "over",
+            note: "按当前价反解，市场要求的长期增速约 25.0%、且需要持续约 4.2 年才能支撑当前市值；公司自身近年增速 8.0%（近 3 年营收 CAGR）。市场要求明显高于自身能力",
+          },
           confidence: { score: 77, level: "high", reasons: ["区间宽度正常"] },
           warnings: ["12 个月 期限的基准合理价值被夹到现价的 200% 上限"],
           assumptions: [],
@@ -591,10 +608,11 @@ beforeEach(() => {
 });
 
 describe("多期限性价比评估页", () => {
-  it("默认按市值前 150 只加载，并显示溯源信息（评估日 / 模型版本 / 覆盖数）", async () => {
+  it("默认按**全市场**加载，并显示溯源信息（评估日 / 模型版本 / 覆盖数）", async () => {
     const { wrapper } = await mountPage();
 
-    expect(mocks.getValuationReport).toHaveBeenCalledWith(150, false);
+    // 默认全市场（0）：前 150 只只覆盖市值最大的那批，排名会有偏
+    expect(mocks.getValuationReport).toHaveBeenCalledWith(0, false);
 
     const text = wrapper.text();
     expect(text).toContain("多期限性价比");
@@ -605,7 +623,7 @@ describe("多期限性价比评估页", () => {
     expect(text).toContain("5781");
     expect(text).toContain("135");
     expect(text).toContain("22.0 秒");
-    expect(text).toContain("市值前 150 只");
+    expect(text).toContain("全市场");
   });
 
   it("五档期限都可切换，且各档均分不同（不允许复制同一个评分）", async () => {
@@ -1008,9 +1026,51 @@ describe("多期限性价比：个股详情", () => {
     const wrapper = mount(StockValuationPanel, { props: { code: "601899" } });
     await vi.waitFor(() => expect(mocks.getStockValuation).toHaveBeenCalledWith("601899"));
     await nextTick();
-    await nextTick();
     return wrapper;
   }
+
+  it("展示「市场隐含预期」：隐含增速 / 需持续年数 / 自身增速 / 兑现概率与依据", async () => {
+    const wrapper = await mountStock();
+    const text = wrapper.text();
+
+    expect(text).toContain("市场隐含预期");
+    // 四个核心数字都要在
+    expect(text).toContain("25.0%"); // 隐含长期增速
+    expect(text).toContain("4.2 年"); // 需持续
+    expect(text).toContain("8.0%"); // 公司自身增速
+    expect(text).toContain("低"); // 兑现概率
+    // 结论与依据
+    expect(text).toContain("市场要求高于自身能力");
+    expect(text).toContain("成长持续性 35%");
+    // 口径必须写清楚"自身增速是历史代理、不是市场一致预期"
+    expect(text).toContain("公司历史增速");
+    expect(text).toContain("不是市场一致预期");
+    // 且必须说明它与"安全边际"是两个不同问题
+    expect(text).toContain("安全边际");
+    expect(text).toContain("当前价格在要求什么");
+  });
+
+  it("无法反解时给出原因而不是数字（现金流为负 / 缺季）", async () => {
+    const payload = stockValuation();
+    const slot = payload.stock.fairByHorizon["12m"];
+    if (!slot) throw new Error("fixture 缺少 12m 档");
+    slot.implied = {
+      available: false,
+      reason: "TTM 自由现金流 -3.00 亿 ≤ 0，无法用现金流折现反解市场隐含预期",
+    } as never;
+    mocks.getStockValuation.mockResolvedValue(payload);
+
+    const StockValuationPanel = (await import("@/components/valuation/StockValuationPanel.vue")).default;
+    const wrapper = mount(StockValuationPanel, { props: { code: "601899" } });
+    await vi.waitFor(() => expect(mocks.getStockValuation).toHaveBeenCalled());
+    await nextTick();
+
+    const text = wrapper.text();
+    expect(text).toContain("暂无法反解市场隐含预期");
+    expect(text).toContain("自由现金流");
+    // 不可用时不该显示"需持续 X 年"这种看起来像结论的数字
+    expect(text).not.toContain("需持续");
+  });
 
   it("四层估值都在：当前估值 / 自身历史分位 / 行业估值 / 相对行业与同行", async () => {
     const wrapper = await mountStock();

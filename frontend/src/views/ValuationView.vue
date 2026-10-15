@@ -33,7 +33,17 @@ const router = useRouter();
 const report = ref<ValuationReport | null>(null);
 const loading = ref(false);
 const error = ref("");
-const limit = ref(150);
+/**
+ * 评估范围。默认**全市场**（0）而不是前 150 只。
+ *
+ * 为什么默认全市场：这个页面的用途是"找出值得买的标的"，前 150 只只覆盖
+ * 市值最大的那一批 —— 小盘里的机会与"看起来便宜其实是价值陷阱"的样本
+ * 都会被直接排除在外，用户看到的排名是**有偏**的。
+ *
+ * 代价是可接受的全市场评估（实测 6.7~8.3 秒，靠派生快照 + 8 路并发做到），
+ * 而且数据集缓存之后改范围 / 切回页面都是亚秒级，所以默认给最完整的那一档。
+ */
+const limit = ref(0);
 const activeHorizon = ref("12m");
 
 const selectedCode = ref("");
@@ -182,14 +192,16 @@ onMounted(() => load(false));
         正在读取数据湖的行情、财报、股本与复权因子并逐只评估…
       </div>
       <p class="text-muted-foreground max-w-3xl text-[11px] leading-relaxed">
-        首次评估要读全市场 5 年的行情与财报（约 700 万行 + 650 万行）。
-        这些数据会物化成<b>本地快照</b>（数据湖目录下的 <code>valuation_cache/</code>），
-        所以 <b>{{ limitLabel(limit) }} 通常 5~8 秒、全市场（约 4400 只）10 秒以内</b>；
+        默认评估<b>全市场（约 4400 只）</b>：先读入 5 年的行情与财报
+        （约 700 万行 + 650 万行，来自数据湖目录下的
+        <code>valuation_cache/</code> 本地快照），再逐只算五档评分。
+        <b>首次约 12 秒</b>（读快照 5 秒 + 评估 7 秒）；
         之后切换评估范围、切回本页、点重新评估都是<b>亚秒级</b>。
       </p>
       <p class="text-muted-foreground max-w-3xl text-[11px] leading-relaxed">
+        如果只想先看大市值，切到「前 150 只」可以直接复用已加载的数据，<b>不到 1 秒</b>。
         每天第一次（数据湖更新后）需要重建快照，那一次约 15~20 秒，
-        它在后台完成、<b>不阻塞本次评估</b>。删除 <code>valuation_cache/</code>
+        它在后台完成、<b>不阻塞本次评估</b>；删除 <code>valuation_cache/</code>
         不影响正确性，只会让下一次慢一次。
       </p>
       <div class="bg-muted/30 h-64 animate-pulse rounded-lg" />

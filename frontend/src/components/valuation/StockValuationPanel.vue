@@ -12,7 +12,7 @@
 import { computed, ref, watch } from "vue";
 import { ChevronDown, ChevronRight, Info, LoaderCircle, TriangleAlert, X } from "@lucide/vue";
 import { api, errorMessage, type HorizonScore, type StockValuation } from "@/lib/backend";
-import { formatCap, formatMultiple, formatPct, formatPctValue, formatRatio, confidenceClass, confidenceLabel, growthFlagLabel, methodLabel, percentileClass, percentileLabel, quadrantClass, quadrantLabel, qualityIssueLabel, ratingClass, ratingLabel, riskSeverityClass, riskSeverityLabel, scoreClass, stageLabel, DIMENSION_LABELS, DIMENSION_ORDER, HORIZON_LABELS } from "@/lib/valuation";
+import { formatCap, formatMultiple, formatPct, formatPctValue, formatRatio, confidenceClass, confidenceLabel, growthFlagLabel, methodLabel, percentileClass, percentileLabel, quadrantClass, quadrantLabel, qualityIssueLabel, ratingClass, ratingLabel, riskSeverityClass, riskSeverityLabel, scoreClass, stageLabel, DIMENSION_LABELS, DIMENSION_ORDER, HORIZON_LABELS, impliedVerdictLabel, fulfillmentLabel } from "@/lib/valuation";
 
 const props = defineProps<{ code: string }>();
 const emit = defineEmits<{ (e: "close"): void }>();
@@ -57,6 +57,15 @@ async function load() {
 watch(() => props.code, load, { immediate: true });
 
 const stock = computed(() => result.value?.stock ?? null);
+
+/**
+ * 市场隐含预期（固定用 12 个月口径）。
+ *
+ * 为什么不跟随 activeHorizon：反解依赖 TTM 自由现金流与长期增速假设，
+ * 本身就是**长期口径**的问题（"市场要求未来多年做到什么"）。
+ * 按 1 个月口径反解没有意义 —— 那正是方案禁止的"把长期结论硬套到短期"。
+ */
+const implied = computed(() => stock.value?.fairByHorizon?.["12m"]?.implied ?? null);
 const horizonScore = computed<HorizonScore | null>(() => {
   const list = stock.value?.scores ?? [];
   return list.find((item) => item.horizon.key === activeHorizon.value) ?? list[3] ?? null;
@@ -169,6 +178,59 @@ const notes = computed(() => result.value?.notes ?? []);
           </p>
           <p class="text-muted-foreground/70 text-[10px]">区间宽度 / 方法一致性 / 数据覆盖</p>
         </div>
+      </div>
+
+      <!-- 市场隐含预期（当前价格在要求什么） -->
+      <div
+        v-if="implied"
+        class="rounded-md border px-3 py-2"
+        :class="implied.available && implied.verdict === 'over' ? 'border-amber-500/30 bg-amber-500/5' : ''"
+      >
+        <p class="text-foreground mb-1.5 text-xs font-medium">
+          市场隐含预期
+          <span class="text-muted-foreground ml-1 font-normal">按当前价反解「市场要求公司做到什么」，再看它做不做得到</span>
+        </p>
+
+        <template v-if="implied.available">
+          <div class="text-muted-foreground grid gap-x-6 gap-y-1 text-[11px] sm:grid-cols-2 lg:grid-cols-4">
+            <span>
+              隐含长期增速
+              <b class="text-foreground">{{ formatPct(implied.impliedGrowth, 1, false) }}</b>
+              <span v-if="implied.unreachable" class="text-amber-400">（≥，已越出模型区间）</span>
+            </span>
+            <span>
+              需持续
+              <b class="text-foreground">{{ implied.impliedYears.toFixed(1) }} 年</b>
+              <span v-if="implied.durationCapped" class="text-muted-foreground/70">（≥上限）</span>
+            </span>
+            <span>
+              公司自身增速
+              <b class="text-foreground">{{ formatPct(implied.achievableGrowth, 1, false) }}</b>
+            </span>
+            <span>
+              兑现概率
+              <b :class="implied.fulfillment === 'low' ? 'text-rose-400' : implied.fulfillment === 'high' ? 'text-emerald-400' : 'text-foreground'">
+                {{ fulfillmentLabel(implied.fulfillment) }}
+              </b>
+            </span>
+          </div>
+
+          <p class="mt-1.5 text-[11px] leading-relaxed" :class="implied.verdict === 'over' ? 'text-amber-300' : 'text-muted-foreground'">
+            <b>{{ impliedVerdictLabel(implied.verdict) }}</b>：{{ implied.note }}
+          </p>
+          <p v-if="implied.fulfillmentNote" class="text-muted-foreground/70 mt-1 text-[10px] leading-relaxed">
+            兑现概率依据：{{ implied.fulfillmentNote }}
+          </p>
+          <p class="text-muted-foreground/70 mt-1 text-[10px] leading-relaxed">
+            「自身增速」用的是<b>公司历史增速</b>（{{ implied.achievableBasis || "口径缺失" }}），
+            不是市场一致预期 —— 本机没有可回填的分析师预期数据，这一点必须说明。
+            与「安全边际」是两个不同问题：安全边际问"值多少钱"，这里问"当前价格在要求什么"。
+          </p>
+        </template>
+
+        <p v-else class="text-muted-foreground text-[11px] leading-relaxed">
+          暂无法反解市场隐含预期：{{ implied.reason }}
+        </p>
       </div>
 
       <!-- 结构性变化提示 -->
