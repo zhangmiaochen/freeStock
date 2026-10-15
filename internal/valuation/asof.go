@@ -309,6 +309,19 @@ func BuildAsOfFrom(kept []Report, evalDate int64) AsOf {
 	out.LatestPeriod = latest.Period
 	out.LatestAnnounce = latest.AnnounceDate
 
+	// ② 建 (年, 季) → 行号索引。
+	//
+	// ⚠ 这一步是性能关键，不是可选优化。`ttmOf` 对每个科目都要问
+	// "某年某季的累计值是多少"，而 `cumulativeAt` 原本是**线性扫描**。
+	// 实测代价：4443 只标的全市场评估里，TTM 计算会做 **220 万次**
+	// `cumulativeAt`（24 个公告日快照 × 21 个科目 × 4443 只），
+	// 每次扫描最多 40 行 → 近亿次比较，CPU profile 上直接是热点。
+	// 建索引之后每次查询是 O(1)。
+	index := make(map[int64]int, len(kept))
+	for i := range kept {
+		index[yearQuarterKey(kept[i].Year, kept[i].Quarter)] = i
+	}
+
 	// ③ 每个科目按 TTM 公式汇总。
 	for _, item := range TrackedItems {
 		statement := StatementOf(item)
@@ -321,7 +334,7 @@ func BuildAsOfFrom(kept []Report, evalDate int64) AsOf {
 			}
 			continue
 		}
-		value, ok := ttmOf(kept, item)
+		value, ok := ttmOfIndexed(kept, index, item)
 		if !ok {
 			out.Missing = append(out.Missing, item)
 			continue
@@ -339,8 +352,8 @@ func BuildAsOfFrom(kept []Report, evalDate int64) AsOf {
 		CashOperate:     out.Items[ItemNetCashOperate],
 		Capex:           out.Items[ItemCapex],
 	}
-	_, out.TTM.CashOperateQuarters, _ = ttmQuarters(kept, ItemNetCashOperate)
-	_, out.TTM.CapexQuarters, _ = ttmQuarters(kept, ItemCapex)
+	_, out.TTM.CashOperateQuarters, _ = ttmQuartersIndexed(kept, index, ItemNetCashOperate)
+	_, out.TTM.CapexQuarters, _ = ttmQuartersIndexed(kept, index, ItemCapex)
 	out.TTM.FreeCashFlow = out.TTM.CashOperate - out.TTM.Capex
 	return out
 }
@@ -370,6 +383,87 @@ func (a AsOf) Retained(date int64) AsOf {
 		return a
 	}
 	return BuildAsOfFrom(kept, date)
+}
+
+// yearQuarterKey 把 (年, 季) 折成一个 map 键。
+//
+// 用位移而不是拼字符串：这条路径每次评估要走几百万次，
+// 拼字符串会产生大量短命对象（GC 压力），位移是纯算术、零分配。
+func yearQuarterKey(year, quarter int) int64 {
+	return int64(year)<<8 | int64(quarter)
+}
+
+// cumulativeAtIndexed 用索引取某年某季的"年初至今累计"值。
+//
+// 与 cumulativeAt 语义完全相同（Q2/Q3 的累计值就是那一行的值，Q4 存的是全年值，
+// **不做任何减法**），只是把"线性扫描 reports"换成"查索引"。
+// 见 BuildAsOfFrom 里关于为什么必须建索引的说明。
+func cumulativeAtIndexed(reports []Report, index map[int64]int, year, quarter int, item string) (float64, bool) {
+	position, ok := index[yearQuarterKey(year, quarter)]
+	if !ok {
+		return 0, false
+	}
+	value, ok := reports[position].Values[item]
+	return value, ok
+}
+
+// ttmOfIndexed 是 ttmOf 的索引版。
+func ttmOfIndexed(reports []Report, index map[int64]int, item string) (float64, bool) {
+	value, quarters, ok := ttmQuartersIndexed(reports, index, item)
+	if !ok || quarters <= 0 {
+		return 0, false
+	}
+	return value, true
+}
+
+// ttmQuartersIndexed 是 ttmQuarters 的索引版。
+//
+// 公式与语义一字未改（见 ttmQuarters 的说明），只是所有取值走索引：
+//
+//	TTM = 上年全年 + 本年至今 − 去年同期     （latest.Quarter != 4）
+//	TTM = 本年至今                          （latest.Quarter == 4，Q4 即全年）
+//
+// ⚠ 修改这里必须同步修改 ttmQuarters —— 两份实现对应同一个业务公式，
+// 任何分叉都会让"派生快照路径"与"引擎单测路径"算出不同的 TTM。
+func ttmQuartersIndexed(reports []Report, index map[int64]int, item string) (float64, int, bool) {
+	if len(reports) == 0 {
+		return 0, 0, false
+	}
+	latest := reports[len(reports)-1]
+	ytd, hasYTD := cumulativeAtIndexed(reports, index, latest.Year, latest.Quarter, item)
+	if !hasYTD {
+		return 0, 0, false
+	}
+	// 年报期（Q4）本身就是全年值，无需再拼。
+	if latest.Quarter == 4 {
+		return ytd, 4, true
+	}
+
+	yearAnnual, hasAnnual := cumulativeAtIndexed(reports, index, latest.Year-1, 4, item)
+	prevYTD, hasPrev := cumulativeAtIndexed(reports, index, latest.Year-1, latest.Quarter, item)
+	if hasAnnual && hasPrev {
+		return yearAnnual + ytd - prevYTD, latest.Quarter + 4, true
+	}
+
+	// 回退：上年年报缺失时，**只能用上年前三季之和**当基数。
+	//
+	// ⚠ 这种情况下不能再减"去年同期"：Q1~Q3 之和里本来就不含第四季度，
+	// 减掉同期会把第四季度凭空算成负数。实测反例：上年前三季和 330、本年至今 230、
+	// 去年同期 210 —— 正确结果是 330 + 230 = 560（缺一个 Q4 的近似），
+	// 而不是 330 + 230 − 210 = 350（那等于把 2026Q2 之前的一段算了两遍又减掉一遍）。
+	//
+	// 返回的季度数按实际参与的报告期累计，调用方据此降置信度。
+	sum, quarters := 0.0, 0
+	for _, quarter := range []int{1, 2, 3} {
+		if value, ok := cumulativeAtIndexed(reports, index, latest.Year-1, quarter, item); ok {
+			sum += value
+			quarters++
+		}
+	}
+	if quarters >= 3 {
+		return sum + ytd, quarters + latest.Quarter, true
+	}
+	return 0, 0, false
 }
 
 // ttmOf 按 TTM 公式算出某科目的 TTM；数据不足返回 false。

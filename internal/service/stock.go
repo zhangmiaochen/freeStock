@@ -201,17 +201,22 @@ type StockService struct {
 	lakeMu sync.Mutex
 	lake   *cnlake.Lake
 
-	// 多期限性价比评估的全市场结果缓存（见 valuation.go）。
+	// 多期限性价比评估的缓存（见 valuation.go）。分三层，各自解决一个慢点：
+	//
+	//   valDataset  —— 从数据湖读进来的原始数据（15~21 秒）。只依赖 (评估日, 代次)，
+	//                  所以改评估范围、切回页面都不该重读磁盘。
+	//   valUniverse —— 全市场行业基准（约 4 秒，只依赖 (评估日, 代次)）。
+	//   valCache    —— 最终报告（按 limit 分桶，30 分钟 TTL）。
 	//
 	// 与 periodCache 同理：**不在 ClearCache 里抢锁清空**，
 	// 由条目里的 `gen`（数据源代次）判断是否过期。
-	//
-	// valUniverse 是"全市场行业基准"（按行业分组的公司快照）。它与 valCache
-	// 分开缓存，因为它只依赖 (评估日, 数据源代次)、与 limit 无关：
-	// 用户在界面上切"前 80 只 / 前 150 只 / 全市场"时不该重算全市场那一遍。
 	valMu       sync.Mutex
 	valCache    *valuationCacheEntry
 	valUniverse *valuationUniverseEntry
+	valDataset  *valuationDatasetEntry
+	valHistory  *valuationHistoryEntry
+	// valStocks 是单只标的的完整评估缓存（详情页），见 GetStockValuation。
+	valStocks map[string]*valuationStockEntry
 }
 
 // lake 返回 cnequity 数据湖句柄（惰性创建）。

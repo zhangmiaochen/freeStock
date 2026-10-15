@@ -43,3 +43,6 @@ build/android/local.properties
 .idea
 .DS_Store
 Thumbs.db
+
+# CPU profile（FREESTOCK_PROF=1 时由 valuation_budget_test.go 生成）
+*.prof

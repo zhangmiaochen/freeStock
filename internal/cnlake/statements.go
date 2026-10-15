@@ -37,15 +37,25 @@ type StatementRow struct {
 // 返回顺序为文件顺序（按 report_period 分区，即按报告期升序），
 // 调用方不要依赖它——按需自建索引。
 //
+// startYear/endYear > 0 时**只读该年份区间内的报告期分区**。
+// 数据湖的 financial_statement_items 从 2001Q1 起有 103 个分区，而多期限
+// 性价比评估只用到近几年的报告期（历史估值序列起点 2021，再往前留几年做
+// 同比与 CAGR 的余量），按年份裁剪能直接省掉一半以上的解码量。
+//
 // 性能：列裁剪（只读 6 列）+ 读取时按科目白名单过滤 + 32 路并发。
-// 实测全量读取约 1.5~3 秒（880 万行的列式解码是 CPU 密集的，
-// 见 readTyped 的说明）。
-func (l *Lake) AllStatementItems(items []string) ([]StatementRow, error) {
+// 实测全量（103 个分区、652 万行命中）约 4.6 秒；裁到 2015 起约省一半。
+func (l *Lake) AllStatementItems(items []string, startYear, endYear int) ([]StatementRow, error) {
 	const dataset = "financial_statement_items"
 	if !l.HasDataset(dataset) {
 		return nil, fmt.Errorf("cnlake: %s 尚未入库", dataset)
 	}
 	files := l.DatasetFiles(dataset)
+	if len(files) == 0 {
+		return nil, nil
+	}
+	if startYear > 0 && endYear > 0 {
+		files = l.FilesForYears(dataset, startYear, endYear)
+	}
 	if len(files) == 0 {
 		return nil, nil
 	}
@@ -93,8 +103,8 @@ func (l *Lake) AllStatementItems(items []string) ([]StatementRow, error) {
 
 // AllStatementItemsSorted 与 AllStatementItems 相同，但结果按
 // (证券代码, 报告期) 升序返回，便于上层顺序建索引。
-func (l *Lake) AllStatementItemsSorted(items []string) ([]StatementRow, error) {
-	rows, err := l.AllStatementItems(items)
+func (l *Lake) AllStatementItemsSorted(items []string, startYear, endYear int) ([]StatementRow, error) {
+	rows, err := l.AllStatementItems(items, startYear, endYear)
 	if err != nil {
 		return nil, err
 	}

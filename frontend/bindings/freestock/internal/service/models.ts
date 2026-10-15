@@ -3349,6 +3349,41 @@ export class PhaseTiming {
 }
 
 /**
+ * PinyinInfo 是一个名称的拼音（供前端做搜索匹配）。
+ */
+export class PinyinInfo {
+    /**
+     * Pinyin 是全拼，多音字的所有写法用空格分隔（如 "pinganyinxing pinganyinhang"）。
+     */
+    "pinyin": string;
+
+    /**
+     * Initials 是首字母缩写，同样是多写法（如 "payx payh"）。
+     */
+    "initials": string;
+
+    /** Creates a new PinyinInfo instance. */
+    constructor($$source: Partial<PinyinInfo> = {}) {
+        if (!("pinyin" in $$source)) {
+            this["pinyin"] = "";
+        }
+        if (!("initials" in $$source)) {
+            this["initials"] = "";
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new PinyinInfo instance from a string or object.
+     */
+    static createFrom($$source: any = {}): PinyinInfo {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new PinyinInfo($$parsedSource as Partial<PinyinInfo>);
+    }
+}
+
+/**
  * PlanResult 是一次调仓建议。
  */
 export class PlanResult {

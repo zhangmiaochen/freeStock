@@ -114,7 +114,7 @@ func TestIndustryBenchmarkUsesFullMarket(t *testing.T) {
 			missingName, len(ranking.Rows))
 	}
 
-	// ---- 5 行业码必须带体系前缀，且展示名不能只是把代码抄一遍 ----
+	// ---- 6 行业码必须带体系前缀，且展示名不能只是把代码抄一遍 ----
 	//
 	// 本机 industry_members 混存 eastmoney（4 位代码 + 中文名）与申万
 	// （6 位代码 + 名称即代码）。不带前缀会让两套体系的同名数字码撞车；
@@ -138,5 +138,35 @@ func TestIndustryBenchmarkUsesFullMarket(t *testing.T) {
 	}
 	if checked == 0 {
 		t.Error("没有任何行业被检查到 —— 行业聚合可能整块为空")
+	}
+
+	// ---- 7 排名行必须带 industryCode（界面按它做行业筛选）----
+	//
+	// 界面上的行业筛选是"多选行业码"，需要每一行都知道自己属于哪个行业。
+	// 只看 industryName 是不够的：本机行业体系混存（sw / eastmoney），
+	// 名称可能重名或为空，而代码带体系前缀、是真正的身份。
+	missingIndustryCode := 0
+	for _, row := range ranking.Rows {
+		if row.IndustryCode == "" {
+			missingIndustryCode++
+		}
+	}
+	if missingIndustryCode > 0 {
+		t.Errorf("%d/%d 行的 industryCode 为空 —— 界面的行业筛选会失效",
+			missingIndustryCode, len(ranking.Rows))
+	}
+
+	// ---- 8 排名行的名称必须能取到拼音（搜索用）----
+	//
+	// 拼音本身由 TestGetNamePinyinMatchesSearchIndex 覆盖，
+	// 这里只断言"排名行确实带了名称"，否则前端无从算拼音。
+	unnamed := 0
+	for _, row := range ranking.Rows {
+		if row.Name == "" {
+			unnamed++
+		}
+	}
+	if unnamed > 0 {
+		t.Errorf("%d 行没有名称，拼音搜索无法生效", unnamed)
 	}
 }

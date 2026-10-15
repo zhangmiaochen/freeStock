@@ -321,3 +321,71 @@ func TestParsePeriod(t *testing.T) {
 		}
 	}
 }
+
+// TestTTMIndexedMatchesQuadratic 钉住"索引版 TTM"与"线性扫描版 TTM"逐值一致。
+//
+// 为什么必须钉：这两份实现是同一条业务公式（TTM = 上年全年 + 本年至今 − 去年同期）
+// 的两个版本 —— 索引版是为了消掉全市场评估里的近亿次比较才加的。
+// 一旦有人只改其中一份，就会出现"引擎单测走线性版、真实评估走索引版"，
+// 结果是**单测全绿但线上算错**，属于最难查的一类问题。
+//
+// 用例覆盖三条分支：Q4（直接用全年）、正常相减、上年年报缺失的回退。
+func TestTTMIndexedMatchesQuadratic(t *testing.T) {
+	build := func(periods ...string) ([]Report, map[int64]int) {
+		reports := make([]Report, 0, len(periods))
+		announce := int64(20200101)
+		for _, period := range periods {
+			year, quarter, ok := ParsePeriod(period)
+			if !ok {
+				t.Fatalf("测试数据里的报告期格式不对: %q", period)
+			}
+			reports = append(reports, Report{
+				Period: period, Year: year, Quarter: quarter, AnnounceDate: announce,
+				Values: map[string]float64{
+					ItemRevenue:   float64(year-2000)*100 + float64(quarter)*10,
+					ItemNetProfit: float64(year-2000)*10 + float64(quarter),
+				},
+			})
+			announce += 10000
+		}
+		index := make(map[int64]int, len(reports))
+		for i := range reports {
+			index[yearQuarterKey(reports[i].Year, reports[i].Quarter)] = i
+		}
+		return reports, index
+	}
+
+	cases := []struct {
+		name    string
+		periods []string
+	}{
+		{"单季 Q1", []string{"2026Q1"}},
+		{"Q2 正常相减（上年年报与同期都在）", []string{"2025Q1", "2025Q2", "2025Q3", "2025Q4", "2026Q1", "2026Q2"}},
+		{"Q3 正常相减", []string{"2025Q4", "2026Q1", "2026Q2", "2026Q3"}},
+		{"Q4 直接用全年", []string{"2025Q4", "2026Q4"}},
+		{"上年年报缺失 → 回退前三季和", []string{"2025Q1", "2025Q2", "2025Q3", "2026Q1", "2026Q2"}},
+		{"只有本年 Q1，无任何上年数据", []string{"2026Q1"}},
+	}
+	for _, item := range []string{ItemRevenue, ItemNetProfit} {
+		for _, testCase := range cases {
+			reports, index := build(testCase.periods...)
+
+			wantValue, wantQuarters, wantOK := ttmQuarters(reports, item)
+			gotValue, gotQuarters, gotOK := ttmQuartersIndexed(reports, index, item)
+
+			if wantOK != gotOK {
+				t.Errorf("%s / %s：可用性不一致 want=%v got=%v", testCase.name, item, wantOK, gotOK)
+				continue
+			}
+			if !wantOK {
+				continue
+			}
+			if wantValue != gotValue {
+				t.Errorf("%s / %s：TTM 值不一致 want=%.4f got=%.4f", testCase.name, item, wantValue, gotValue)
+			}
+			if wantQuarters != gotQuarters {
+				t.Errorf("%s / %s：参与季度数不一致 want=%d got=%d", testCase.name, item, wantQuarters, gotQuarters)
+			}
+		}
+	}
+}

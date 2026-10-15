@@ -97,3 +97,13 @@ func StatementDate(value int64) int64 {
 // index_bars 的 trade_date 在数据湖里是 BIGINT 形态的天数（与 daily_bars 的
 // DATE 列不同），所以不能直接用 daysToDate 之外的方式解读。
 func BarDateValue(days int32) int64 { return daysToDate(days) }
+
+// DaysFromDate 把 YYYYMMDD 转成 parquet DATE 的天数（BarDateValue 的逆运算）。
+//
+// 用途：**构造** `BarRow` 时用。服务层从派生快照（存的是 YYYYMMDD）
+// 重建 BarRow 时必须经过这个转换 —— 直接把 YYYYMMDD 塞进 TradeDate
+// 会让 `BarRow.Date()` 解出一个荒谬的年月日（实测 574421010）。
+//
+// 之所以要专门导出一个函数而不是让调用方自己算：这个 int32 字段的语义
+// （"自 1970-01-01 起的天数"）一点都不显然，踩过一次坑就得封起来。
+func DaysFromDate(date int64) int32 { return dateToDays(date) }

@@ -37,6 +37,7 @@ const mocks = vi.hoisted(() => ({
   getIndexValuation: vi.fn(),
   listValuationIndices: vi.fn(),
   getValuationParams: vi.fn(),
+  getNamePinyin: vi.fn(),
 }));
 
 vi.mock("@/lib/backend", () => ({
@@ -47,6 +48,7 @@ vi.mock("@/lib/backend", () => ({
     getIndexValuation: mocks.getIndexValuation,
     listValuationIndices: mocks.listValuationIndices,
     getValuationParams: mocks.getValuationParams,
+    getNamePinyin: mocks.getNamePinyin,
   },
   errorMessage: (err: unknown) => String(err),
 }));
@@ -775,9 +777,7 @@ describe("多期限性价比：排名表", () => {
   });
 
   it("行业聚合不可用时「对行业中位」显示「—」而不是 0%（0 会被读成与行业持平）", async () => {
-    // 行业整块不可用：加权 PE、行业分位、当前 PE 都为 0
-    const broken = {
-      ...rankRow("601899", "紫金矿业", 70.9),
+    const broken = {      ...rankRow("601899", "紫金矿业", 70.9),
       industryWeightedPE: 0,
       industryPercentile: 0,
       currentPE: 0,
@@ -837,6 +837,106 @@ describe("多期限性价比：排名表", () => {
     text = wrapper.text();
     expect(text).toContain("平安银行");
     expect(text).not.toContain("紫金矿业");
+  });
+
+  it("搜索支持拼音全拼与首字母（与股票列表页同一套规则）", async () => {
+    // 后端按"名称原样"返回拼音，多音字的所有写法都在同一个串里
+    mocks.getNamePinyin.mockResolvedValue({
+      贵州茅台: { pinyin: "guizhoumaotai", initials: "gzmt" },
+      平安银行: { pinyin: "pinganyinxing pinganyinhang", initials: "payx payh" },
+    });
+    const wrapper = await mountTable({
+      rows: [rankRow("600519", "贵州茅台", 70.9), rankRow("000001", "平安银行", 55)],
+      scored: 2,
+    });
+    await flushPromises();
+    await nextTick();
+
+    const input = wrapper.findAll("input").find((item) => item.attributes("type") !== "checkbox")!;
+
+    // 全拼
+    await input.setValue("guizhou");
+    await nextTick();
+    expect(wrapper.text()).toContain("贵州茅台");
+    expect(wrapper.text()).not.toContain("平安银行");
+
+    // 首字母
+    await input.setValue("gzmt");
+    await nextTick();
+    expect(wrapper.text()).toContain("贵州茅台");
+
+    // 多音字的另一个读法也要能命中（「银行」的行读 háng）
+    await input.setValue("payh");
+    await nextTick();
+    expect(wrapper.text()).toContain("平安银行");
+    expect(wrapper.text()).not.toContain("贵州茅台");
+
+    // 中文名称仍可搜
+    await input.setValue("茅台");
+    await nextTick();
+    expect(wrapper.text()).toContain("贵州茅台");
+  });
+
+  it("行业筛选是真筛选（按行业多选，可叠加可清除）", async () => {
+    const bank = { ...rankRow("000001", "平安银行", 55), industryCode: "sw:480301", industryName: "银行" };
+    const liquor = { ...rankRow("600519", "贵州茅台", 70.9), industryCode: "sw:340501", industryName: "白酒" };
+    const wrapper = await mountTable({ rows: [bank as RankRow, liquor as RankRow], scored: 2 });
+
+    // 两个行业都出现为可点的筛选按钮
+    const buttons = wrapper.findAll("button");
+    const bankButton = buttons.find((b) => b.text().startsWith("银行"));
+    const liquorButton = buttons.find((b) => b.text().startsWith("白酒"));
+    expect(bankButton).toBeTruthy();
+    expect(liquorButton).toBeTruthy();
+
+    await bankButton!.trigger("click");
+    await nextTick();
+    let text = wrapper.text();
+    expect(text).toContain("平安银行");
+    expect(text).not.toContain("贵州茅台");
+
+    // 再选一个行业 → 并集（两个都在）
+    await liquorButton!.trigger("click");
+    await nextTick();
+    text = wrapper.text();
+    expect(text).toContain("平安银行");
+    expect(text).toContain("贵州茅台");
+
+    // 清除
+    const clear = wrapper.findAll("button").find((b) => b.text().includes("清除行业筛选"));
+    expect(clear).toBeTruthy();
+    await clear!.trigger("click");
+    await nextTick();
+    text = wrapper.text();
+    expect(text).toContain("平安银行");
+    expect(text).toContain("贵州茅台");
+
+    // 输入行业名也能当搜索词（提示语承诺了三件事：代码/名称/行业）
+    const input = wrapper.findAll("input").find((item) => item.attributes("type") !== "checkbox")!;
+    await input.setValue("白酒");
+    await nextTick();
+    text = wrapper.text();
+    expect(text).toContain("贵州茅台");
+    expect(text).not.toContain("平安银行");
+  });
+
+  it("行很多时只渲染视口内的行（虚拟列表），不是全部塞进 DOM", async () => {
+    // 造 2000 行 —— 真实全市场规模是 4400+
+    const many = Array.from({ length: 2000 }, (_, index) => {
+      const code = String(600000 + index);
+      return { ...rankRow(code, `公司${index}`, 70.9), rank: index + 1 } as RankRow;
+    });
+    const wrapper = await mountTable({ rows: many, scored: 2000 });
+    await nextTick();
+
+    const rendered = wrapper.findAll("tbody tr").length;
+    // 关键断言：绝不能渲染 2000 行
+    expect(rendered).toBeLessThan(200);
+    // 但至少要渲染出一些行（否则就是"虚拟列表把自己也虚拟没了"）
+    expect(rendered).toBeGreaterThan(0);
+
+    // 参与排名的总数仍如实显示，虚拟化不影响语义
+    expect(wrapper.text()).toContain("2000");
   });
 });
 

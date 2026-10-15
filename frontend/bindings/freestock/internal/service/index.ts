@@ -59,6 +59,7 @@ export {
     MoneyFlowPoint,
     MoneyFlowSummary,
     PhaseTiming,
+    PinyinInfo,
     PlanResult,
     PortfolioOption,
     PortfolioOptions,

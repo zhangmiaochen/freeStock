@@ -180,8 +180,18 @@ onMounted(() => load(false));
       <div class="text-muted-foreground flex items-center gap-2 text-xs">
         <LoaderCircle class="size-3.5 animate-spin" />
         正在读取数据湖的行情、财报、股本与复权因子并逐只评估…
-        <span class="text-[11px]">（{{ limitLabel(limit) }} 通常 20~40 秒；全市场要几分钟）</span>
       </div>
+      <p class="text-muted-foreground max-w-3xl text-[11px] leading-relaxed">
+        首次评估要读全市场 5 年的行情与财报（约 700 万行 + 650 万行）。
+        这些数据会物化成<b>本地快照</b>（数据湖目录下的 <code>valuation_cache/</code>），
+        所以 <b>{{ limitLabel(limit) }} 通常 5~8 秒、全市场（约 4400 只）10 秒以内</b>；
+        之后切换评估范围、切回本页、点重新评估都是<b>亚秒级</b>。
+      </p>
+      <p class="text-muted-foreground max-w-3xl text-[11px] leading-relaxed">
+        每天第一次（数据湖更新后）需要重建快照，那一次约 15~20 秒，
+        它在后台完成、<b>不阻塞本次评估</b>。删除 <code>valuation_cache/</code>
+        不影响正确性，只会让下一次慢一次。
+      </p>
       <div class="bg-muted/30 h-64 animate-pulse rounded-lg" />
     </div>
 

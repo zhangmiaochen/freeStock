@@ -95,6 +95,7 @@ import type {
   IndustryValuationDetail,
   IndustryDistributionRow,
   IndexValuationResult,
+  PinyinInfo,
   StockValuation,
   ValuationIndexOption,
   ValuationParamsInfo,
@@ -175,6 +176,7 @@ export type {
   Snapshot,
   StockScore,
   StockValuation,
+  PinyinInfo,
   ValuationBand,
   ValuationIndexOption,
   ValuationParamsInfo,
@@ -362,6 +364,18 @@ export const api = {
     StockService.ListValuationIndices() as Promise<ValuationIndexOption[]>,
   /** 当前生效的模型参数（五档权重、情景概率、评级分界），供界面解释口径 */
   getValuationParams: () => StockService.GetValuationParams() as Promise<ValuationParamsInfo>,
+  /**
+   * 批量取名称的拼音（全拼 + 首字母，含多音字多写法）。
+   *
+   * 走后端是为了与股票列表页 / K 线页的搜索规则**完全一致**：
+   * 那边用的是 `internal/service/kline.go` 的同一套实现
+   * （go-pinyin + 列出多音字所有读音，所以 `payh` 与 `payx` 都能搜到「平安银行」）。
+   * 前端再引一套 JS 拼音库会出现"同一名称两个页面搜出不同结果"。
+   *
+   * 键是**入参名称原样**；未命中的名称不出现在结果里。
+   */
+  getNamePinyin: (names: string[]) =>
+    StockService.GetNamePinyin(names) as Promise<Record<string, PinyinInfo>>,
 
   // ---- cne 数据更新（见 docs/cne数据更新方案.md）----
   //

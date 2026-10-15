@@ -212,18 +212,41 @@ func partitionYear(datasetDir, path string) (int, bool) {
 
 // FilesForYears 只挑分区年份落在 [startYear, endYear] 内的 parquet 文件。
 // startYear/endYear <= 0 时返回全部。
+// FilesForYears 按分区里的**年份**裁剪文件列表。
+//
+// 分区名形如 `report_period=2023Q1`、`change_date=2018`，所以用前缀解析出年份。
+//
+// ⚠ 两个边界可以**只给一个**，另一个传 0 表示不设限：
+//
+//	FilesForYears(x, 2015, 0)     → 2015 年及以后（最常用）
+//	FilesForYears(x, 0, 2020)     → 2020 年及以前
+//	FilesForYears(x, 2015, 2024)  → 闭区间
+//	FilesForYears(x, 0, 0)        → 全部
+//
+// 早期版本在 `endYear <= 0` 时直接返回**全部**文件，导致 `(2015, 0)` 这种
+// 显然合理的调用静默失效（裁剪没发生，白读 60 个分区）。单边界必须支持。
+//
+// 没有年份分区的数据集（`partitioned == false`）一律保留：裁不掉也不能丢数据。
 func (l *Lake) FilesForYears(name string, startYear, endYear int) []string {
 	all := l.DatasetFiles(name)
-	if startYear <= 0 || endYear <= 0 {
+	if startYear <= 0 && endYear <= 0 {
 		return all
 	}
 	dir := l.DatasetDir(name)
 	out := make([]string, 0, len(all))
 	for _, path := range all {
 		year, partitioned := partitionYear(dir, path)
-		if !partitioned || (year >= startYear && year <= endYear) {
+		if !partitioned {
 			out = append(out, path)
+			continue
 		}
+		if startYear > 0 && year < startYear {
+			continue
+		}
+		if endYear > 0 && year > endYear {
+			continue
+		}
+		out = append(out, path)
 	}
 	return out
 }
@@ -960,8 +983,32 @@ func (l *Lake) SectorMembers() ([]SectorMemberRow, error) {
 // `ShareStructures(code)` 是每只股票扫一遍整个数据集（6.1MB / 26 个分区）
 // 再按代码过滤，实测约 84ms/只 —— 这是在日线和估值都做了批量之后，
 // `quoteRange` 里**最后一个**按代码的慢路径。
+// AllShareStructures 一次读出全部股本结构行。
+//
+// `ShareStructures(code)` 是每只股票扫一遍整个数据集（6.1MB / 26 个分区）
+// 再按代码过滤，实测约 84ms/只 —— 这是在日线和估值都做了批量之后，
+// `quoteRange` 里**最后一个**按代码的慢路径。
 func (l *Lake) AllShareStructures() ([]ShareStructureRow, error) {
 	files := l.DatasetFiles("share_structure")
+	if len(files) == 0 {
+		return nil, nil
+	}
+	return readTyped[ShareStructureRow](files, nil)
+}
+
+// AllShareStructuresSince 只读 fromYear 起的股本变更。
+//
+// 数据湖的 share_structure 从 2001 起共 16.8 万行，而"重建历史市值"只需要
+// 覆盖评估区间（多期限性价比评估的估值序列起点是 2021，往前留几年余量即可）。
+// 按年份裁剪分区可以直接省掉早期年份的解码。
+func (l *Lake) AllShareStructuresSince(fromYear int) ([]ShareStructureRow, error) {
+	files := l.DatasetFiles("share_structure")
+	if len(files) == 0 {
+		return nil, nil
+	}
+	if fromYear > 0 {
+		files = l.FilesForYears("share_structure", fromYear, 0)
+	}
 	if len(files) == 0 {
 		return nil, nil
 	}

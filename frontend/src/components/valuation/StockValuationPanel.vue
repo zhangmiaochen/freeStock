@@ -23,17 +23,34 @@ const error = ref("");
 const activeHorizon = ref("12m");
 const expanded = ref<Record<string, boolean>>({});
 
+/**
+ * 请求序号，用来丢弃"过期响应"。
+ *
+ * 为什么需要：面板在榜上反复点不同标的（`watch(() => props.code)`）会连续发请求，
+ * 而它们的返回顺序**不保证**与发出顺序一致（缓存命中时几乎瞬间返回、
+ * 未命中时要算几十毫秒）。没有这个守卫的话，先发的慢请求可能后到，
+ * 把新股票的数据覆盖成旧股票 —— 界面上的表现就是"点了 A 却显示 B 的数字"，
+ * 而且是一个很难复现的时序问题。
+ *
+ * 规则很简单：只有序号等于最新一次的响应才允许写进 `result`。
+ */
+let requestSeq = 0;
+
 async function load() {
   if (!props.code) return;
+  const seq = ++requestSeq;
   loading.value = true;
   error.value = "";
   result.value = null;
   try {
-    result.value = await api.getStockValuation(props.code);
+    const payload = await api.getStockValuation(props.code);
+    if (seq !== requestSeq) return; // 已经被更晚的点击取代，丢弃
+    result.value = payload;
   } catch (err) {
+    if (seq !== requestSeq) return;
     error.value = errorMessage(err);
   } finally {
-    loading.value = false;
+    if (seq === requestSeq) loading.value = false;
   }
 }
 

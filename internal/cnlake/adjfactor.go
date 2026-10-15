@@ -101,6 +101,7 @@ func (l *Lake) HasAdjFactors() bool {
 	return err == nil && info.IsDir()
 }
 
+// factors 返回复权因子缓存（惰性创建）。
 func (l *Lake) factors() *adjFactorCache {
 	l.adjMu.Lock()
 	defer l.adjMu.Unlock()
