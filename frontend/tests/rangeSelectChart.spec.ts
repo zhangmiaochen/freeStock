@@ -1,14 +1,15 @@
 import { describe, expect, it } from "vitest";
 
 /**
- * 框选用的 ECharts 配置在 SSR 下真的能渲染出来。
+ * 框选用到的 ECharts 配置在 SSR 下真的能渲染。
  *
- * 挡的是"选项名写错但纯函数测试全绿"这一类错误 —— 例如 brush 少注册
- * `BrushComponent` 时**不报错**，只是框选完全没反应，
- * 而那正是最难自己发现的情况（Fibonacci 的 markLine 就踩过同一个坑）。
+ * ⚠ 这一条**只证明配置结构合法**，不证明框选能交互 ——
+ * "光写 option.brush 框选不会工作"那个坑只有真浏览器测得出来，
+ * 交互是否被启用由 tests/rangeSelectActivation.spec.ts 盯着。
+ * 这里补充的是"少注册组件时静默失效"这一类问题。
  */
-describe("框选统计的图表配置（SSR）", () => {
-  it("注册 BrushComponent 后 brush 配置能被 ECharts 接受并渲染", async () => {
+describe("框选相关组件的注册（SSR）", () => {
+  it("注册 BrushComponent 后 brush 配置能被 ECharts 接受", async () => {
     const echarts = await import("echarts/core");
     const { CandlestickChart } = await import("echarts/charts");
     const { BrushComponent, GridComponent } = await import("echarts/components");
@@ -25,7 +26,7 @@ describe("框选统计的图表配置（SSR）", () => {
         brushType: "rect",
         brushMode: "single",
         transformable: false,
-        brushStyle: { borderWidth: 1, color: "rgba(59,130,246,0.10)", borderColor: "#3b82f6" },
+        brushStyle: { borderWidth: 1, color: "rgba(59,130,246,0.12)", borderColor: "#3b82f6" },
       },
       series: [
         {
@@ -41,9 +42,10 @@ describe("框选统计的图表配置（SSR）", () => {
       ],
     });
 
-    // 不抛错即为通过（配置非法时 ECharts 会抛或报错）
     const svg = chart.renderToSVGString();
-    const option = chart.getOption() as { brush?: { brushType?: string; brushMode?: string }[] | { brushType?: string; brushMode?: string } };
+    const option = chart.getOption() as {
+      brush?: { brushType?: string; brushMode?: string }[] | { brushType?: string; brushMode?: string };
+    };
     chart.dispose();
 
     expect(svg).toContain("<svg");
@@ -53,7 +55,7 @@ describe("框选统计的图表配置（SSR）", () => {
     expect(brush?.brushMode).toBe("single");
   });
 
-  it("框选高亮用的 markArea 结构与「选中区间」对得上", async () => {
+  it("框选高亮用的 markArea 能画出来", async () => {
     const echarts = await import("echarts/core");
     const { CandlestickChart } = await import("echarts/charts");
     const { GridComponent, MarkAreaComponent } = await import("echarts/components");
@@ -61,10 +63,9 @@ describe("框选统计的图表配置（SSR）", () => {
     // ⚠ markArea 需要 MarkAreaComponent —— 与 markLine 一样，少注册只是画不出来
     echarts.use([CandlestickChart, GridComponent, MarkAreaComponent, SVGRenderer]);
 
-    const dates = [20260105, 20260106, 20260107, 20260108, 20260109];
     const chart = echarts.init(null, null, { renderer: "svg", ssr: true, width: 640, height: 320 });
     chart.setOption({
-      xAxis: { type: "category", data: dates, boundaryGap: true },
+      xAxis: { type: "category", data: [20260105, 20260106, 20260107, 20260108, 20260109], boundaryGap: true },
       yAxis: { type: "value", min: "dataMin", max: "dataMax" },
       series: [
         {
@@ -89,18 +90,16 @@ describe("框选统计的图表配置（SSR）", () => {
     const svg = chart.renderToSVGString();
     chart.dispose();
 
-    // markArea 画成了一个带填充的矩形。
+    // markArea 画成一条带填充的路径/矩形。
     //
-    // ⚠ 三个坑都在这里踩过：
+    // ⚠ 两个坑都在这里踩过：
     //   1. 忘了 `echarts.use([SVGRenderer])` 时报的是
     //      "Renderer 'undefined' is not imported"，与 markArea 无关，很容易误判；
-    //   2. ECharts 会把颜色规范化（`rgba(59,130,246,0.12)` → `rgba(59,130,246,.12)`，
-    //      十六进制还可能改写成 `#rrggbbaa`），所以只能断言"有半透明填充"，不能比原串；
-    //   3. **markArea 不一定画成 `<rect>`** —— 实测它是一条带 fill 的 `<path>`，
-    //      底层元素类型是实现细节，钉死它会得到一个假失败。
+    //   2. ECharts 会把颜色规范化（`rgba(59,130,246,0.12)` → `rgba(59,130,246,.12)`），
+    //      所以只能断言"有半透明填充"，不能按原串比；底层是 path 还是 rect
+    //      属于实现细节，钉死它会得到假失败。
     const compact = svg.replace(/\s+/g, "");
     expect(compact).toMatch(/fill="(rgba?\(|#[0-9a-f]{6,8}")/i);
-    // 背景一个矩形 + 高亮一条路径，说明两样都画出来了
     expect(compact).toContain("<rect");
     expect(compact).toContain("<path");
   });

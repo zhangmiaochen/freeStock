@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { Candle } from "@/lib/indicators";
 import {
   RANGE_METRIC_NOTES,
+  axisValuesFromCoordRange,
   calendarDaysBetween,
   rangeStats,
   selectionFromAxisValues,
@@ -233,6 +234,68 @@ describe("自然日跨度", () => {
 
   it("顺序颠倒时返回 0（而不是负数）", () => {
     expect(calendarDaysBetween(20260110, 20260105)).toBe(0);
+  });
+});
+
+/**
+ * brush 的 coordRange 取值。
+ *
+ * 这组数据是**真 Chromium + ECharts 6.1.0 实测**得到的，形状是
+ * `[[x0, x1], [y0, y1]]` —— x 的两个端点都在 `[0]` 里，`[1]` 是 y。
+ * 曾经按 `[[x0, y0], [x1, y1]]` 取（`[0][0]` 与 `[1][0]`），
+ * 第二项拿到的是 y0（价格），区间被撑到数据末尾 ——
+ * 面板显示的涨跌幅与框选的时间段完全对不上。
+ */
+describe("brush coordRange 折算", () => {
+  it("rect 形态 [[x0,x1],[y0,y1]] —— 取 [0] 那一对", () => {
+    // 实测：把第 10 根框到第 20 根（共 60 根数据）
+    expect(axisValuesFromCoordRange([[10, 20], [157.78947368421052, 187.26315789473685]]))
+      .toEqual([10, 20]);
+    // ⚠ 不能取到 [1][0]（那是 y0 = 157.79）
+    const values = axisValuesFromCoordRange([[10, 20], [157.79, 187.26]])!;
+    expect(values[1]).not.toBeCloseTo(157.79, 2);
+  });
+
+  it("扁平形态 [x0, x1] 也认", () => {
+    expect(axisValuesFromCoordRange([12, 48])).toEqual([12, 48]);
+  });
+
+  it("顺序不敏感（从右往左框也一样）", () => {
+    expect(axisValuesFromCoordRange([[20, 10], [187.26, 157.79]])).toEqual([20, 10]);
+  });
+
+  it("取不到有限数值时返回 null，而不是 NaN 下标", () => {
+    expect(axisValuesFromCoordRange(undefined)).toBeNull();
+    expect(axisValuesFromCoordRange(null)).toBeNull();
+    expect(axisValuesFromCoordRange([])).toBeNull();
+    expect(axisValuesFromCoordRange([1])).toBeNull();
+    expect(axisValuesFromCoordRange([Number.NaN, 5])).toBeNull();
+    expect(axisValuesFromCoordRange([Number.POSITIVE_INFINITY, 5])).toBeNull();
+    expect(axisValuesFromCoordRange([["abc", 1], [2, 3]])).toBeNull();
+    expect(axisValuesFromCoordRange([[1], [2, 3]])).toBeNull();
+  });
+
+  it("与 selectionFromAxisValues 串起来得到正确的半开区间（精确对齐框选）", () => {
+    // 第 10~20 根 → [10, 21)
+    const a = axisValuesFromCoordRange([[10, 20], [157.79, 187.26]])!;
+    expect(selectionFromAxisValues(60, a[0], a[1])).toEqual({ from: 10, to: 21 });
+
+    // 第 5~30 根 → [5, 31)
+    const b = axisValuesFromCoordRange([[5, 30], [157.79, 187.26]])!;
+    expect(selectionFromAxisValues(60, b[0], b[1])).toEqual({ from: 5, to: 31 });
+
+    // 第 30~50 根 → [30, 51)
+    const c = axisValuesFromCoordRange([[30, 50], [157.79, 187.26]])!;
+    expect(selectionFromAxisValues(60, c[0], c[1])).toEqual({ from: 30, to: 51 });
+  });
+
+  it("旧取法（[1][0]）会撑到数据末尾 —— 这正是 bug 的形态", () => {
+    const coordRange = [[10, 20], [157.79, 187.26]];
+    const wrong = [coordRange[0][0], coordRange[1][0]];
+    // 旧实现把 y0 = 157.79 当成 x 端点，四舍五入后越界，被夹到最后一根
+    const wrongSel = selectionFromAxisValues(60, wrong[0], wrong[1])!;
+    expect(wrongSel.to - 1).toBe(59); // 一路到末尾，与框选不符
+    expect(wrongSel.to - 1).not.toBe(20);
   });
 });
 

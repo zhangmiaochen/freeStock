@@ -245,24 +245,148 @@
 
 实现上有几处刻意的选择：
 
-1. **开启时禁用 inside 缩放（拖拽平移），滑条照旧可用** —— 框选与平移都用左键拖，
+1. ⚠ **光在 option 里写 `brush` 是没用的，必须显式调一次 `enableBrush`** ——
+   而且**每次缩放（datazoom）之后还要再补一次**，见下面的专节；
+2. **开启时禁用 inside 缩放（拖拽平移），滑条照旧可用** —— 框选与平移都用左键拖，
    不禁用就会"一边拉框一边把图拖走"，而且平移会连带触发斐波那契重算，
    框选过程中图一直在动。所以不是靠挡事件，而是让两者不抢同一个手势；
-2. **brush 的 y 只用来判断"框有没有落在图上"**，统计的始终是 K 线本身：
-   用户是照着时间轴框的，不会在意框在上半张还是下半张。像素→数据的换算
-   交给 ECharts 的 `convertFromPixel`，自己按格子宽度除会漏掉 `boundaryGap`
-   与 dataZoom 的偏移；
-3. 松手后**清掉 brush 自己那层虚线框**，改用主图 series 的 `markArea` 画常驻高亮：
+3. **区间端点直接取 brush 给的 `coordRange`**，不要自己换算、也不要按别的字段判断：
+   `chart.convertFromPixel({xAxisIndex: 0}, [px, px])` **返回 null**（实测），
+   而 `areas[0]` **只有** `range`（像素）与 `coordRange`（轴数据坐标），
+   **没有 `x` / `y` / `width` / `height`**。
+   并且 `coordRange` 的形状是 **`[[x0, x1], [y0, y1]]`** ——
+   x 的两个端点都在 `[0]` 里，`[1]` 装的是 y（价格）。取错一项，
+   区间就会被撑到数据末尾（见下面的专节）；
+4. 松手后**清掉 brush 自己那层虚线框**，改用主图 series 的 `markArea` 画常驻高亮：
    brush 的选框横跨所有面板，而统计只统计 K 线，高亮也只该盖主图；
    `markArea` 必须设 `silent: true`，否则它会吃掉鼠标事件、挡住十字光标
    （与斐波那契的 `markLine` 同一个坑）。图表上还叠了一个
    `pointer-events: none` 的装饰层，只为把光标换成十字；
-4. **双击取消框选**得自己接：ECharts 的 brush 默认 `removeOnClick: false`
+5. **双击取消框选**得自己接：ECharts 的 brush 默认 `removeOnClick: false`
    （源码注释写明"单击不清，因为用户可能随手点一下"），所以"点一下清掉"的
-   直觉在这里不成立；
-5. **切周期 / 换复权 / 换标的都会清掉框选**：日线的"第 10~20 根"不是周线的
+   直觉在这里并不成立；
+6. **切周期 / 换复权 / 换标的都会清掉框选**：日线的"第 10~20 根"不是周线的
    "第 10~20 根"，留着旧下标只会给出与眼前图表对不上的数字；
-6. **只框到一根时不显示统计面板**（单根不构成"区间涨跌"，那只是它自己的开盘到收盘）。
+7. **只框到一根时不显示统计面板**（单根不构成"区间涨跌"，那只是它自己的开盘到收盘）。
+
+##### 六个只有真浏览器才测得出来的 ECharts 坑
+
+这一块连着踩了六次，共同点是"配置看着没问题、单测全绿、但功能就是不工作"：
+
+**① 光写 `option.brush`，框选毫无反应**
+
+```
+BrushView._updateController
+  → brushController.enableBrush(brushModel.brushOption)
+                                ^^^^^^^^^^^^^^^^^^^^^^ 光写 option 时它一直是 {}
+  → enableBrush 里 `brushOption.brushType && this._doEnableBrush(...)` 为假
+  → 画笔永不启用：_brushType === undefined、面板没注册、mousedown 根本不处理
+```
+
+`brushModel.brushOption` 只在 `setAreas` / `setBrushOption` 里才被赋值
+（`getInitialData` 里那一行在 ECharts 源码中是注释掉的），所以
+`dispatchAction({type:'brush', areas: []})` 也没用（它遇到空数组直接 return）。
+**官方示例一律走 `toolbox.feature.brush`，正是因为它会去 update 一次当前 brushOption。**
+
+修法：拿 `getViewOfComponentModel(brushModel)._brushController`
+再 `enableBrush({brushType:'rect', brushMode:'single', ...})`。
+
+**② 一缩放，画笔就被关掉了**
+
+同理：**dataZoom 一变，`BrushView` 就会重绘并再调一次
+`enableBrush(brushModel.brushOption)`，而那里是 `{}` ——
+`enableBrush({})` 会把已启用的画笔「停用」**（实测 `_brushType` 由 `rect` 变 `null`）。
+所以"用户拖一下滑条或滚轮缩放之后，框选就再也不响应了"，而且看不出原因。
+
+修法：在 `datazoom` 事件里**补一次** `syncBrushEnabled()`；
+`applyRangeSelectMode` 自己派发的那个 dataZoom 动作也会触发它，顺序要对。
+
+**③ 选框的背景色挡住 K 线**
+
+`brushStyle` 走的是 **zrender 的样式键**（`fill` / `stroke` / `lineWidth`），
+不是 canvas 那套 `color` / `borderColor`。**写错了不报错、也不生效**，
+选框就一直用 ECharts 的默认浅灰填充盖在图上。实测对照：
+
+| brushStyle | 实际生效的样式 |
+|---|---|
+| `{color, borderColor}` | `{lineWidth:2, stroke:'rgba(234,237,245,0.5)', fill:'#cfd2d7'}` ← 默认灰，挡图 |
+| `{stroke, fill}` | `{lineWidth:1.5, stroke:'#3b82f6', fill:'rgba(59,130,246,0.08)'}` |
+
+**④ 按不存在的字段做判断，把每一次框选都拒掉了**
+
+`options.brush` 写对了、画笔也启用了、拖拽确实有反应 —— 但统计面板**永远不出现**，
+而且"双击清除之后再框"也一样没反应。原因是组件里做过一个"框有没有落在图上"的
+判断，用的是 `area.y` / `area.height`：
+
+```js
+// area 的**真实结构**（真 Chromium 抓下来的）
+{ brushType, panelId,
+  range:      [[206, 342], [150, 280]],       // 像素
+  coordRange: [[10, 20], [157.79, 187.26]],   // 轴数据坐标 ← 要的就是它
+  coordRanges, __rangeOffset }
+// ⚠ 没有 x / y / width / height
+```
+
+`area.y` 与 `area.height` 都是 `undefined`，`Math.min(NaN, ...) > Math.max(NaN, ...)`
+恒为 `false`，于是 `rangeFromBrushArea` 对**每一次**框选都返回 `null`。
+表面上像是"框选功能坏了 / 清除之后坏了"，其实是同一个 `NaN`。
+
+修法：换算只认 `coordRange`，把那段 y 判断整个删掉。
+面板与时间轴一一对应，从成交量面板里框一段本来就该得到那段时间的 K 线统计，
+不需要按面板过滤。
+
+**⑤ `coordRange` 的形状是 `[[x0, x1], [y0, y1]]`，不是 `[[x0,y0],[x1,y1]]`**
+
+这一条最阴：**它不报错，只是给出错区间**。按"两个点"的直觉去取
+`[0][0]` 与 `[1][0]`，第二项拿到的是 **`y0`（y 轴上的价格）**：
+
+```
+目标：第 10~20 根   coordRange = [[10, 20], [157.79, 187.26]]
+  正确取法 [0] = [10, 20]        → 区间 10~20   ✅
+  错误取法 [0][0],[1][0]         → 区间 10~59   ❌（y0=157.79 越界后被夹到最后一根）
+```
+
+于是面板显示的涨跌幅是"从框选起点一路到数据末尾"，与框的时间段完全对不上。
+
+**为什么第一次没发现**：早期那次实测的 `coordRange` 恰好是
+`[[70, 92], [139.37, 187.26]]`，`[1][0] = 139.37` 与真正的 x1 很接近，
+而 `Math.round(139.37)` 又越界被夹到最后一根 —— "看起来是对的"。
+只有**先量出每个下标对应的像素位置、再精确地从第 i 根框到第 j 根、对比结果**，
+才能暴露这种偏差。这也是补上后面那条"按已知下标精确框选"验证的由来。
+
+**⑥ 顺带一个**：`chart.convertFromPixel({xAxisIndex: 0}, [px, px])` **返回 null**，
+所以"自己把像素换成下标"这条路的终点也是 `NaN` —— 同样表现为统计不出现。
+
+还有一条方向相反的坑：关闭框选时**必须显式 `enableBrush(false)`**。
+只靠"下次 render 不再 enable"是关不掉的 —— 画笔一直留着，拖拽照样出框，
+只是我们的统计面板不显示，又变成"拖了没反应"。
+
+六条教训：
+
+- `getOption().brush` 里有字段 ≠ 框选能用。**配置被接受**和**功能被启用**是两件事；
+- **不要凭想象使用 ECharts 回调参数的字段名与形状**。`brushEnd` 的 `areas[i]`
+  到底有哪些字段、`coordRange` 是"两对"还是"两个点"，只有在真浏览器里
+  `JSON.stringify` 一次才知道 —— 用错不会报错，只会**静默地**让判断永远为假、
+  或者给出一个看似合理的错数字；
+- **"看起来对"不算验证**。数值类功能必须用**已知输入**做对拍：
+  先 `convertToPixel` 量出每个下标的位置，再从第 i 根精确框到第 j 根，
+  断言结果正好是 `[i, j]`；
+- happy-dom 里 zrender 收不到 DOM 事件（它选了 pointer 通道而 happy-dom 不派发），
+  所以这一整类问题在单测里既不能复现也不能排除 —— **交互必须用真浏览器验**；
+- 回归用例要断言**行为**而不是配置：`tests/rangeSelectActivation.spec.ts`
+  （13 个用例）用真浏览器抓到的 `areas[0]` 实测结构喂给 `brushEnd`，
+  断言能算出 `{from: 10, to: 21}`（正好是框的那一段，不是一路到末尾）；
+  另外还钉住开了会
+  `enableBrush(rect/single)`、关了会 `enableBrush(false)`、datazoom 之后会再补一次、
+  以及 `brushStyle` 用的是 `fill`/`stroke` 而不是 `color`/`borderColor`；
+- 数值换算那一步单独抽成纯函数（`axisValuesFromCoordRange`），
+  就能用实测值把它钉死。
+
+> 真浏览器验证的做法（本次用的）：装 Playwright Chromium，
+> 用 `page.setContent` 加载 CDN 版 ECharts 复刻组件 option 与事件处理，
+> 再用 `page.mouse.down/move/up` 真拖。**六步都要过**：
+> 框选后出统计 → 再框仍出 → 双击清除收起 → **清除后仍能框选** →
+> 二次清除后仍能框选 → 关闭开关后拖拽不出区间。
 
 统计全部在前端算，后端只记住开关（`showRangeSelect`）。
 纯函数在 `lib/rangeStats.ts`，口径文案也在那里（`RANGE_METRIC_NOTES`），
@@ -1051,7 +1175,7 @@ freeStock/
 │   │   ├── lib/backend.ts         # Wails 绑定封装
 │   │   ├── lib/format.ts          # 数字/日期格式化
 │   │   └── views/                 # 页面：StockListView / KlineView / DataSourceView …
-│   └── tests/                     # 249 个前端用例（指标、store、各页面、外壳）
+│   └── tests/                     # 268 个前端用例（指标、store、各页面、外壳）
 ├── docs/free-stockdb-api.md       # 逆向整理的 free-stockdb HTTP 接口说明
 └── build/                         # Wails 打包配置（图标、Taskfile）
 ```
@@ -1100,14 +1224,15 @@ K  线   : 贵州茅台 2855 根（2015 起）+ 31 条分红；股息率 4.13%
 Go 测试里既有纯函数单测（推导指标、复权、拼音、市场分类），
 也有**对拍本机 free-stockdb 的集成测试**（服务不可达时自动 skip）。
 
-前端 249 个用例，覆盖：
+前端 268 个用例，覆盖：
 
 - `indicators.spec.ts` — 均线 / 布林 / MACD 数值、参数校正、日→周/月/年聚合（含 ISO 跨年周）、**资金流周期求和**
 - `stock.spec.ts` — 股票列表 store（市场、行业、搜索、排序、分页、未分类分组）+ 列表页联想搜索（且**不显示指数**）
 - `kline.spec.ts` — K 线页（加载、周期切换、指标开关、均线增删、三种复权、布林/MACD 参数、资金流开关、**配置读回与落盘**、**指数：按带后缀的代码搜索 / 无复权按钮 / 隐藏估值与资金流**、**斐波那契开关与落盘/读回**、**框选统计：开关与落盘/读回、统计面板渲染与口径、指数不显示成交额、清除与双击取消、只框一根不显示、切周期清掉框选**）
 - `fibonacci.spec.ts` — 斐波那契分割位（dataZoom 百分比折算下标、可见区间高低点、分割位 = 高点 − 比例 × 区间、区间为 0 不画线、平移后位置跟着换、**SSR 真的画得出线与标签**）
-- `rangeStats.spec.ts` — 框选区间统计的纯函数（首开→末收口径、**跳空不能丢**、最高/最低与出现日期、最大回撤只在收盘价序列上算、振幅、日均波动与涨跌天数、平盘不计、成交额求和与指数为 0、交易日数与自然日跨度、越界夹取、单根返回 null、刷选像素区间→下标的换算与口径文案）
-- `rangeSelectChart.spec.ts` — 框选用到的 ECharts 配置在 SSR 下确实渲染（`BrushComponent` 注册、brush 配置被接受、`markArea` 画出高亮）
+- `rangeStats.spec.ts` — 框选区间统计的纯函数（首开→末收口径、**跳空不能丢**、最高/最低与出现日期、最大回撤只在收盘价序列上算、振幅、日均波动与涨跌天数、平盘不计、成交额求和与指数为 0、交易日数与自然日跨度、越界夹取、单根返回 null、**brush `coordRange` → 下标的换算（形状 `[[x0,x1],[y0,y1]]`，用真浏览器精确框选抓到的实测值）**、口径文案）
+- `rangeSelectChart.spec.ts` — 框选用到的 ECharts 组件注册（`BrushComponent` 让 brush 配置被接受、`MarkAreaComponent` 让高亮画得出来 —— 少注册只会静默失效）
+- `rangeSelectActivation.spec.ts` — **框选真的被启用/停用了，而且区间与框选一致**：用**真浏览器抓到的 `brushEnd` 实测结构**（`areas[0]` 只有 `range`/`coordRange`，没有 `x/y/width/height`；`coordRange` 是 `[[x0,x1],[y0,y1]]`）断言"框第 10~20 根"能算出 `{from:10,to:21}` —— 这一条同时挡两种静默失效：按不存在的字段判断（每次框选都被拒）、以及把 `[1][0]`（y0）当 x 端点（区间一路撑到末尾）；另有：开关打开时调用 `enableBrush(rect/single)`、关闭时调用 `enableBrush(false)`（只清选框是关不掉的）、**datazoom 之后会再补一次启用**（否则缩放一次框选就废了）、**`brushStyle` 必须是 `fill`/`stroke` 而不是 `color`/`borderColor`**（写错就一直是默认灰填充、挡住 K 线）、空选区通知父组件清除、取不到坐标时不吐 `NaN` 下标、inside 缩放随之禁用而滑条保留、十字光标层必须 `pointer-events-none`
 - `settings.spec.ts` — 数据湖卡片（财报未入库 / 已入库 / 无数据湖 / 改路径四种状态）
 - `finance.spec.ts` — 财务数据页（四类数据渲染、表未入库、表在库但该股无记录、读取失败）
 - `boards.spec.ts` — 板块行情页（分类切换、周期切换不重复请求、自定义周期与非法输入、区间列显示「—」而不是 0%、区间不可用提示、排序、热力图裁剪、成分展开与过滤、重叠提示、覆盖徽标）

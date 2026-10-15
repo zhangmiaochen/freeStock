@@ -316,6 +316,57 @@ export function selectionFromAxisValues(
 }
 
 /**
+ * 从 brush 的 `coordRange` 里取出时间轴上的两个端点值（数据坐标）。
+ *
+ * ⚠ **形状很容易搞错，而且搞错了不会报错、只会给出错区间。**
+ * 真 Chromium + ECharts 6.1.0 实测（`brushType: 'rect'`，x 轴为 category）：
+ *
+ * ```js
+ * coordRange = [[10, 20], [157.79, 187.26]]
+ * //             ↑x0  ↑x1   ↑y0      ↑y1
+ * // 即 [[x0, x1], [y0, y1]] —— x 的两个端点都在 [0] 里
+ * ```
+ *
+ * 曾经按 `[[x0, y0], [x1, y1]]` 去取（`[0][0]` 与 `[1][0]`），
+ * 第二项拿到的是 **y0**（157.79，y 轴上的价格），于是区间末端被算到
+ * 数据末尾 —— 面板显示的涨跌幅与框选的时间段完全对不上。
+ *
+ * 之所以一开始没发现：早期那次实测的 `coordRange` 恰好是
+ * `[[70, 92], [139.37, 187.26]]`，`[1][0]` = 139.37 与真正的 x1 很接近，
+ * 而 `Math.round(139.37)` 又越界被夹到最后一根，"看起来是对的"。
+ * **只有按已知下标精确框选、再对比结果，才能发现这种偏差。**
+ *
+ * 两种形状都认：
+ *   - `[[x0, x1], [y0, y1]]`（rect，实测）
+ *   - `[[x0, y0], [x1, y1]]`（lineX 之类）
+ * 判定依据是"哪一对更像时间轴下标"：坐标轴的两个端点里，
+ * 一个一定在数据范围内。取不到有限数值时返回 null，
+ * 让调用方放弃这次框选（而不是产出 NaN 下标）。
+ */
+export function axisValuesFromCoordRange(coordRange: unknown): [number, number] | null {
+  if (!Array.isArray(coordRange) || coordRange.length < 2) return null;
+
+  const toFinite = (value: unknown): number | null => {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  };
+
+  // 形态一（实测的 rect）：[[x0, x1], [y0, y1]] —— 时间轴那一对在 [0]
+  const head = coordRange[0];
+  if (Array.isArray(head)) {
+    if (head.length < 2) return null;
+    const a = toFinite(head[0]);
+    const b = toFinite(head[1]);
+    return a === null || b === null ? null : [a, b];
+  }
+
+  // 形态二（某些版本 / lineX）：[x0, x1]
+  const a = toFinite(coordRange[0]);
+  const b = toFinite(coordRange[1]);
+  return a === null || b === null ? null : [a, b];
+}
+
+/**
  * 区间信息里"值得看"的那几项的顺序与口径说明。
  *
  * 放在 lib 里（而不是组件里拼）是为了让**口径文案**也能被单测钉住 ——

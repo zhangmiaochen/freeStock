@@ -55,7 +55,11 @@ import {
 } from "@/lib/indicators";
 import { fibMarkLine } from "@/lib/fibonacci";
 import { formatAmount, formatDate } from "@/lib/format";
-import { selectionFromAxisValues, type RangeSelection } from "@/lib/rangeStats";
+import {
+  axisValuesFromCoordRange,
+  selectionFromAxisValues,
+  type RangeSelection,
+} from "@/lib/rangeStats";
 
 echarts.use([
   CandlestickChart,
@@ -129,6 +133,20 @@ const DEA_COLOR = "#38bdf8";
 /** 资金流均线：主力净流入的平滑线 */
 const FLOW_MEAN_COLOR = "#f5c542";
 const FLOW_MEAN_WINDOW = 5;
+/**
+ * 框选选框的样式。
+ *
+ * ⚠ **字段名必须是 zrender 的 `fill` / `stroke` / `lineWidth`**，
+ * 不是 canvas 那套 `color` / `borderColor`。写错了**不报错、也不生效**，
+ * 选框会一直用 ECharts 的默认样式（浅灰填充），而那层填充会把 K 线盖住。
+ *
+ * 填充给得极淡：选框要能看清，但不能挡图 —— 常驻高亮由 markArea 负责，
+ * 它只盖主图、颜色也更轻。
+ */
+const BRUSH_STYLE = { lineWidth: 1.5, stroke: "#3b82f6", fill: "rgba(59,130,246,0.08)" };
+/** markArea 的常驻高亮（比选框更淡） */
+const HIGHLIGHT_FILL = "rgba(59,130,246,0.12)";
+const HIGHLIGHT_BORDER = "#3b82f6";
 
 const container = ref<HTMLElement | null>(null);
 let chart: echarts.ECharts | null = null;
@@ -181,7 +199,7 @@ function rangeHighlight(): Record<string, unknown> | null {
   return {
     silent: true,
     animation: false,
-    itemStyle: { color: "rgba(59,130,246,0.12)", borderColor: "#3b82f6", borderWidth: 1 },
+    itemStyle: { color: HIGHLIGHT_FILL, borderColor: HIGHLIGHT_BORDER, borderWidth: 1 },
     label: { show: false },
     data: [[{ xAxis: start.date }, { xAxis: end.date }]],
   };
@@ -485,7 +503,7 @@ function buildOption(): echarts.EChartsCoreOption {
       transformable: false,
       throttleType: "debounce",
       throttleDelay: 120,
-      brushStyle: { borderWidth: 1, color: "rgba(59,130,246,0.10)", borderColor: "#3b82f6" },
+      brushStyle: BRUSH_STYLE,
     },
     legend: {
       show: legendNames.length > 0,
@@ -591,6 +609,20 @@ function buildOption(): echarts.EChartsCoreOption {
 function render() {
   if (!chart) return;
   chart.setOption(buildOption(), { notMerge: true, lazyUpdate: false });
+  // ⚠ 每次都同步一次画笔状态：notMerge 会重建 brush 视图与 controller，
+  // 而"光写 option"并不会真的启用/停用画笔（见 enableBrush / disableBrush）
+  syncBrushEnabled();
+}
+
+/**
+ * 让画笔的启用状态与 `showRangeSelect` 对齐。
+ *
+ * 开：补一次 `enableBrush`；关：`enableBrush(false)`。
+ * **两个方向都要做** —— 只在开的时候 enable，关闭后拖拽照样会出框。
+ */
+function syncBrushEnabled() {
+  if (props.showRangeSelect) enableBrush();
+  else disableBrush();
 }
 
 /** 重入保护：局部更新时若又收到 datazoom 事件，不要递归 */
@@ -620,17 +652,34 @@ function updateFibonacciOnly() {
 }
 
 /**
- * 把 brush 画的矩形折算成 K 线下标区间。
+ * 把 brush 给出的选区折算成 K 线下标区间。
  *
- * 两个要点：
- *  1. **y 只用来判断"框有没有落在图上"** —— 统计的始终是 K 线本身，
- *     从成交量面板里框一段也应该得到那段时间的 K 线统计（用户是照着
- *     时间轴框的，不会在意框在上半张还是下半张）。所以对每个面板求
- *     y 方向交集，只要有交集就算命中；从图下方的滑条区域划过去则不算。
- *  2. **像素到数据的换算必须交给 ECharts**（`convertFromPixel`），
- *     自己按格子宽度除会漏掉 boundaryGap 与 dataZoom 的偏移。
+ * brush 事件里 `areas[i]` 的**真实结构**（实测 Chromium + ECharts 6.1.0）：
+ *
+ * ```js
+ * {
+ *   brushType: 'rect',
+ *   panelId: 'grid--\0series\00\00',
+ *   range:      [[200, 500], [150, 280]],   // 像素
+ *   coordRange: [[20, 64], [139.37, 187.26]], // 轴数据坐标 ← 要的就是它
+ *   coordRanges: [...], __rangeOffset: {...},
+ * }
+ * ```
+ *
+ * ⚠ **它没有 `x` / `y` / `width` / `height`**。早先这里按 `area.y`、
+ * `area.height` 做过一个"框有没有落在图上"的判断 —— 那两个字段是 `undefined`，
+ * 于是算术结果是 `NaN`、判断恒为假，**每一次框选都被拒掉**，
+ * 表现就是"框了但统计永远不出来"。这个函数现在只认 `coordRange`。
+ *
+ * ⚠ 也**不要自己用 `convertFromPixel` 换算**：实测
+ * `chart.convertFromPixel({ xAxisIndex: 0 }, [px, px])` 返回 `null`。
+ * 而 `coordRange` 本来就是轴数据坐标，对 category 轴就是下标，
+ * 且天然跟着 dataZoom 走（缩放后同一像素位置给出不同下标）。
+ *
+ * 也不需要用 y 去判断"框在哪个面板"：面板与时间轴一一对应，
+ * 从成交量面板里框一段本来就该得到那段时间的 K 线统计。
  */
-function rangeFromBrushArea(area: { x: number; y: number; width: number; height: number }): {
+function rangeFromBrushArea(area: { coordRange?: unknown }): {
   from: number;
   to: number;
 } | null {
@@ -638,42 +687,10 @@ function rangeFromBrushArea(area: { x: number; y: number; width: number; height:
   const total = props.candles.length;
   if (total <= 0) return null;
 
-  const grid = (chart as unknown as { getModel?: () => unknown }).getModel?.() as
-    | { getComponent?: (type: string, index?: number) => { coordinateSystem?: { getBoundingRect?: () => unknown } } }
-    | undefined;
-  const rects: { x: number; y: number; width: number; height: number }[] = [];
-  if (grid?.getComponent) {
-    const grids = (chart.getOption() as { grid?: unknown[] } | undefined)?.grid ?? [];
-    for (let index = 0; index < Math.max(1, grids.length); index++) {
-      const component = grid.getComponent("grid", index);
-      const rect = component?.coordinateSystem?.getBoundingRect?.() as
-        | { x: number; y: number; width: number; height: number }
-        | undefined;
-      if (rect && Number.isFinite(rect.y) && rect.height > 0) rects.push(rect);
-    }
-  }
-  // 拿不到面板几何就不能可靠折算 —— 宁可不给结果，也别给一个错的下标区间
-  if (rects.length === 0) return null;
+  const values = axisValuesFromCoordRange(area.coordRange);
+  if (!values) return null;
 
-  // ⚠ 先确认"这个矩形确实碰到了某个面板"：所有 x 轴共用同一份时间数据，
-  // 所以 x 的像素→数值换算只做一次；y 只用来判断框有没有落在图上
-  // （用户从图表下方空白处划过去时不该产出区间）。
-  const brushTop = area.y;
-  const brushBottom = area.y + area.height;
-  const hit = rects.some((rect) => {
-    const top = Math.max(brushTop, rect.y);
-    const bottom = Math.min(brushBottom, rect.y + rect.height);
-    return bottom > top;
-  });
-  if (!hit) return null;
-
-  const converted = chart.convertFromPixel({ xAxisIndex: 0 }, [
-    area.x,
-    area.x + area.width,
-  ]) as unknown;
-  if (!Array.isArray(converted) || converted.length < 2) return null;
-
-  return selectionFromAxisValues(total, Number(converted[0]), Number(converted[1]));
+  return selectionFromAxisValues(total, values[0], values[1]);
 }
 
 /** 清掉 brush 的选框（我们自己用 markArea 画高亮，不需要它那层虚线框）。 */
@@ -687,11 +704,72 @@ function clearBrushVisual() {
   }
 }
 
+/** 拿到 brush 的 controller（拿不到就返回 null）。 */
+function brushController(): { enableBrush?: (option: unknown) => void } | null {
+  if (!chart) return null;
+  const model = (
+    chart as unknown as { getModel?: () => { getComponent?: (type: string) => unknown } }
+  ).getModel?.();
+  const brushModel = model?.getComponent?.("brush");
+  if (!brushModel) return null;
+
+  const view = (
+    chart as unknown as { getViewOfComponentModel?: (m: unknown) => unknown }
+  ).getViewOfComponentModel?.(brushModel) as { _brushController?: unknown } | undefined;
+  const controller = view?._brushController as { enableBrush?: (option: unknown) => void } | undefined;
+  return controller ?? null;
+}
+
+/**
+ * 真正把 brush "打开"。
+ *
+ * ⚠ **只写 `option.brush` 是不够的 —— 框选不会有任何反应**（实测 Chromium +
+ * ECharts 6.1.0）。原因在 ECharts 内部：
+ *
+ *   - `BrushView._updateController` 会调用
+ *     `brushController.enableBrush(brushModel.brushOption)`；
+ *   - 而 `brushModel.brushOption` 只在 `setAreas` / `setBrushOption` 里才被赋值
+ *     （`getInitialData` 里那一行在 ECharts 源码中是注释掉的）——
+ *     **光写 option 时它一直是 `{}`**；
+ *   - 于是 `enableBrush({brushType: undefined})` 里的
+ *     `brushOption.brushType && this._doEnableBrush(...)` 为假，
+ *     画笔永远不启用：`_brushType` 是 undefined、面板也没注册，
+ *     拖拽时连 mousedown 都不会被处理。
+ *
+ * 表现形式极具误导性：`getOption().brush` 里字段一切正常、图表也不报错、
+ * 只是拖拽毫无反应。**官方示例一律走 toolbox（`toolbox.feature.brush`
+ * 会去 update 一次当前 brushOption）**，正是这个原因。
+ *
+ * 所以这里显式补这一步，并且 `render()` 之后每次都要补
+ * （`notMerge: true` 会重建视图与 controller）。
+ */
+function enableBrush() {
+  brushController()?.enableBrush?.({
+    brushType: "rect",
+    brushMode: "single",
+    transformable: false,
+    brushStyle: BRUSH_STYLE,
+  });
+}
+
+/**
+ * 关掉 brush。
+ *
+ * ⚠ **必须显式关**：`enableBrush` 会把画笔一直留着（`_doEnableBrush` 里
+ * 只是往 zr 上注册处理器），光靠"下次 render 不再 enable"是关不掉的 ——
+ * 那样关闭开关后拖拽照样会出框，只是我们的面板不显示，看起来像"拖了没反应"。
+ * ECharts 里对应的开关就是 `enableBrush(false)`。
+ */
+function disableBrush() {
+  brushController()?.enableBrush?.(false);
+}
+
 /**
  * 开关框选模式。
  *
- * 关掉时清掉 brush 的选框 —— 否则图上会留下一层看不懂的虚线框，
- * 而那时已经不再响应框选操作了。
+ * 打开时补一次 `enableBrush`（render 里也会同步，但用户可能只点了开关、
+ * 数据没变因而没有重绘）；关闭时**显式停用画笔**并清掉选框 ——
+ * 只清选框是不够的，画笔还开着，拖拽照样出框。
  *
  * 开/关都要同步 **inside 缩放的禁用状态**：它与框选都用左键拖，
  * 不禁用就是"一边拉框一边把图拖走"。只派发 `disabled` 这一个字段
@@ -704,6 +782,7 @@ function applyRangeSelectMode() {
     dataZoomIndex: 0,
     disabled: props.showRangeSelect,
   });
+  syncBrushEnabled();
   if (!props.showRangeSelect) clearBrushVisual();
 }
 
@@ -733,24 +812,28 @@ onMounted(() => {
     }
     // 分割位以"当前可见窗口"为区间，所以缩放/平移后必须重算
     updateFibonacciOnly();
+    // ⚠ **缩放会把画笔关掉**：dataZoom 一变，BrushView 就会重绘并调用
+    // `enableBrush(brushModel.brushOption)`，而那里是 `{}` ——
+    // `enableBrush({})` 会把已启用的画笔**停用**（实测 _brushType 由 rect 变 null）。
+    // 不管的话，用户一拖滑条/滚轮缩放，框选就再也不响应了。
+    syncBrushEnabled();
   });
 
   // 框选完成（松手）。**只认 brushEnd**：brush 动作在拖拽过程中会连续触发，
   // 在那里更新统计会让整页在拖动时反复重算。
   chart.on("brushEnd", ((params: unknown) => {
     if (brushUpdating) return;
-    const payload = params as {
-      areas?: { x: number; y: number; width: number; height: number }[];
-    };
+    // ⚠ 只有 `coordRange` 是我们要的；`range` 是像素、没有 x/y/width/height
+    const payload = params as { areas?: { coordRange?: unknown }[] };
     const areas = payload?.areas ?? [];
     if (areas.length === 0) {
       // 内置清空把选框清掉了 → 通知父组件收起统计面板
       emit("rangeCleared");
       return;
     }
-    const area = areas[0];
-    const range = rangeFromBrushArea(area);
-    // 框得太小 / 落在图外：不产生区间，也不清掉已有统计（用户可能只是手抖点了一下）
+    const range = rangeFromBrushArea(areas[0]);
+    // 框得太小 / 取不到轴上坐标：不产生区间，也不清掉已有统计
+    // （用户可能只是手抖点了一下）
     if (range) emit("rangeSelected", range);
   }) as unknown as (params: unknown) => void);
 
@@ -774,6 +857,9 @@ onMounted(() => {
   applyResetIfNeeded();
   render();
   applyRangeSelectMode();
+  // 再兜一次：applyRangeSelectMode 里的 dataZoom 动作也会触发 brush 视图重绘，
+  // 顺序上必须先让它跑完（见上面 datazoom 监听里的说明）
+  syncBrushEnabled();
 });
 
 onBeforeUnmount(() => {
