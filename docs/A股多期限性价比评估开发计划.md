@@ -902,6 +902,116 @@ FCF 的 3~4 倍，而高估值股票的市值本来就是 FCF 的几十倍 —�
 
 ---
 
+## 七、缓存失效链上的一处根因（第六轮修正）
+
+> 用户报告："软件重新打开 K 线能读到最新数据；但一直开着不重启，
+> 就一直读缓存、读不到最新数据。"
+
+### 7.1 根因：数据湖的**分区列表被永久缓存**
+
+不是 K 线那一层的问题。根因在最上游的 `internal/cnlake`：
+
+```go
+// lake.go —— 修改前
+func (l *Lake) DatasetFiles(name string) []string {
+    if cached, ok := l.files[name]; ok {
+        return cached          // ← 一旦写入，永不失效
+    }
+    ... WalkDir ...
+    l.files[name] = found
+}
+
+// rows.go —— 修改前
+func (l *Lake) BarPartitionDates() ([]int64, error) {
+    if l.barDatesLoaded && len(l.barDates) > 0 {
+        return l.barDates      // ← 同样永不失效
+    }
+    ... os.ReadDir(dir) ...
+    l.barDatesLoaded = true
+}
+```
+
+后果是一条完整的失效链被静默掐断：
+
+```
+日更落下新分区 trade_date=2026-10-16
+  → DatasetFiles 仍返回启动时那份文件列表（没有新文件）
+      → SourceSignature 只对旧文件算指纹 → 指纹"没变"
+      → LatestPartitionDate / BarPartitionDates 仍答昨天
+          → symbolCacheState 的 covered = (SourceThrough >= lakeLatestDate) 仍然成立
+              → 按股票缓存被判定为"可信且已覆盖到最新"
+                  → K 线读的就是缓存里那份，**直到进程重启**
+```
+
+这条链上**每一层都有自己的失效机制**（指纹、covered、TTL），但它们全部
+建立在"最新交易日是哪天"这个上游答案之上 —— 上游永远答昨天，下面全都不触发。
+
+### 7.2 修法：拿目录 mtime 当判据，而不是 TTL
+
+```go
+dirMod := os.Stat(dir).ModTime()          // 微秒级
+if cached && cachedDirMod.Equal(dirMod) {
+    return cached                          // 目录没变 → 文件列表不可能变
+}
+... 重新 WalkDir / ReadDir ...
+```
+
+**为什么用 mtime 而不是 TTL**：新增/删除分区一定会改**数据集目录**的 mtime，
+而 stat 它只要微秒级 —— 比重新 WalkDir 2612 个文件（实测 26~350ms）便宜三个数量级。
+用 TTL 的话，要么短到频繁重扫（2612 个目录的开销乘上查询频率），
+要么长到用户仍然要等。
+
+再加一道 30 秒 TTL 兜底，应对 mtime 精度不足的文件系统。
+
+另外给 `StockService.InvalidateDerivedCaches` 补了一句
+`lake.InvalidateDatasetFiles()`：cne 更新刚结束时显式清一次，
+让"最新"立刻到位，不必等 mtime 被探测到。
+
+### 7.3 为什么原来的测试没发现
+
+已有的 `TestKlineHistorySeesRewrittenSource` 测的是**改写已有分区** ——
+那条路径靠 `SourceSignature`（文件 size/mtime 哈希）能发现，所以是绿的。
+
+而用户遇到的场景是**新增分区**（日更每天做的就是这件事）。这两件事
+在失效机制上完全不同：改写让指纹变，新增让**文件列表**变 ——
+而文件列表被永久缓存了。
+
+所以补了两条用例：
+
+| 用例 | 层次 | 钉住什么 |
+|---|---|---|
+| `TestLakeSeesNewPartitionWithoutRestart` | `cnlake` | 同一个 lake 句柄，新增分区后 `LatestTradeDate` 必须变 |
+| `TestKlineSeesNewTradingDayWithoutRestart` | `service` | 不重启、不手工失效，K 线必须读到新交易日 |
+
+> ⚠ 两条用例都**刻意不用** `cnlaketest.Build`：合成湖的 daily_bars 是按
+> **年**分区（`trade_date=2026`），而真实数据湖是按**日**分区
+> （`trade_date=2026-10-16`）。两种布局混在一棵树里会让
+> `BarPartitionDates` 走进"分区名不是日期"的退化分支，测的就不是真实路径了
+> （第一版这么写，诊断输出显示走了退化分支才发现）。所以这两条用例
+> 手工造一份"按日分区"的最小数据湖。
+
+**验证方式**：把修复临时改回永久缓存（`&& true`），
+`TestLakeSeesNewPartitionWithoutRestart` 立刻失败并打印
+`新增 2026-10-16 分区后，LatestTradeDate 应为 20261016，实际 20261015`；
+恢复修复后两条都通过。这样确认了用例真的能抓住这个 bug，
+而不是"碰巧通过"。
+
+### 7.4 顺带修正：性能预算用例的测量方式
+
+修完这个问题后 `TestFullMarketRefreshBudget` 在**全量测试**里红了（30.8 秒），
+单独跑却是 9.3 秒。原因是那条用例测的是**一次 `GetValuationReport` 调用**，
+而这次调用里可能**顺带包含"派生快照过期 → 从原始分区重建"**（16~22 秒）。
+
+这暴露了两个问题，都改了：
+
+1. **测量对象错了**。拆成"⓪ 预热（含可能的快照重建）"与
+   "③ 重算（复用全部缓存）"，硬指标以 ⓪ 为准 —— 那才是"用户点全市场"的真实耗时。
+2. **断言太紧**。目标是 10 秒，但本机多进程争用下同一份代码在 6.7~9.3 秒波动，
+   卡 10 秒会变成"随机红"。改成 10 秒记警告、15 秒才失败 ——
+   仍然能挡住真正的量级回归（历史上出问题时会到 18 秒 / 30 秒）。
+
+---
+
 ## 五、怎么跑
 
 ```powershell

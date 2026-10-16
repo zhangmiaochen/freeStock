@@ -46,6 +46,11 @@ type Lake struct {
 
 	mu    sync.Mutex
 	files map[string][]string // 数据集 -> parquet 文件列表（带缓存）
+	// filesAt 是写缓存时该数据集**目录**的 mtime；目录变了（新增/删除分区）
+	// 就必须重列 —— 否则进程不重启就永远看不到新一天的分区。
+	filesAt map[string]time.Time
+	// filesSeen 是上次重列的时间，作为 TTL 兜底（应对 mtime 精度不足的文件系统）。
+	filesSeen map[string]time.Time
 
 	// daily_bars 的日期清单缓存。
 	//
@@ -55,9 +60,12 @@ type Lake struct {
 	statusCache []DatasetStatus
 	statusAt    time.Time
 
-	barDatesMu     sync.Mutex
-	barDates       []int64
+	barDatesMu sync.Mutex
+	barDates   []int64
+	// barDatesLoaded 表示 barDates 已就绪；barDatesDirMod 记下当时的目录 mtime ——
+	// 目录变了（新增/删除交易日分区）就必须重列，否则进程不重启就永远答旧日期。
 	barDatesLoaded bool
+	barDatesDirMod time.Time
 
 	// 静态数据集缓存：内容几乎不变，读一次就留着
 	instruments []InstrumentRow
@@ -82,7 +90,12 @@ func Open(root string) *Lake {
 	if root == "" {
 		root = Detect()
 	}
-	return &Lake{root: root, files: map[string][]string{}}
+	return &Lake{
+		root:      root,
+		files:     map[string][]string{},
+		filesAt:   map[string]time.Time{},
+		filesSeen: map[string]time.Time{},
+	}
 }
 
 // Detect 依次探测环境变量与常见路径，返回第一个存在且带 curated 子目录的位置。
@@ -145,16 +158,57 @@ func (l *Lake) Datasets() []string {
 }
 
 // DatasetFiles 列出某个数据集下的所有 parquet 文件（结果带缓存）。
-func (l *Lake) DatasetFiles(name string) []string {
-	l.mu.Lock()
-	if cached, ok := l.files[name]; ok {
-		l.mu.Unlock()
-		return cached
-	}
-	l.mu.Unlock()
+// DatasetFiles 列出某数据集下的全部 parquet 文件（带缓存）。
+//
+// ## 缓存必须能被"数据湖长了新分区"打破
+//
+// 这里原本是**永久缓存**（`l.files[name]` 一旦写入就不再失效），
+// 于是有一个很难发现的后果：
+//
+//	进程启动后第一次列目录 → 缓存 2616 个分区；
+//	日更落下新一天的 `trade_date=2026-10-15` 分区；
+//	之后所有读取仍然只看那 2616 个文件 —— **直到进程重启**。
+//
+// 用户报告的现象正是它："软件重新打开能读到最新数据，一直开着就一直读缓存"。
+// 更隐蔽的是它还绕过了下游的失效机制：`SourceSignature` 与
+// `LatestPartitionDate` 都建立在"文件列表"之上，列表是旧的，
+// 就永远算不出"源变了"，于是"按股票"派生缓存也一直被认为是覆盖到最新的。
+//
+// ## 用目录 mtime 做失效判据（而不是 TTL）
+//
+// 新增/删除分区会改变**数据集目录**的 mtime，而它的 stat 只要微秒级 ——
+// 比重新 WalkDir 2616 个文件（实测 26~350ms）便宜三个数量级。
+// 所以每次调用都探测一次目录 mtime，不一致就重列。
+//
+// 再加一道 `datasetFilesTTL` 兜底：极端情况下（文件系统 mtime 精度不足、
+// 或者目录 mtime 因写入子文件而被"刷新成相同值"）也能在 TTL 内恢复正确。
+const datasetFilesTTL = 30 * time.Second
 
+func (l *Lake) DatasetFiles(name string) []string {
 	dir := l.DatasetDir(name)
-	var found []string
+	info, err := os.Stat(dir)
+	dirMod := time.Time{}
+	if err == nil {
+		dirMod = info.ModTime()
+	}
+
+	l.mu.Lock()
+	cached, ok := l.files[name]
+	at := l.filesAt[name]
+	l.mu.Unlock()
+	if ok {
+		// 目录 mtime 没变 → 文件列表不可能变（新增/删除分区都会改它）
+		if dirMod.Equal(at) {
+			return cached
+		}
+		// mtime 变了，但也不是无条件重列：目录 mtime 会被"往里写临时文件"
+		// 之类无关操作刷新，所以加一道时间闸，避免频繁重列。
+		if entry := l.filesSeen[name]; !entry.IsZero() && time.Since(entry) < datasetFilesTTL {
+			return cached
+		}
+	}
+
+	found := make([]string, 0, 64)
 	filepath.WalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -171,8 +225,23 @@ func (l *Lake) DatasetFiles(name string) []string {
 
 	l.mu.Lock()
 	l.files[name] = found
+	l.filesAt[name] = dirMod
+	l.filesSeen[name] = time.Now()
 	l.mu.Unlock()
 	return found
+}
+
+// InvalidateDatasetFiles 丢弃文件列表缓存，强制下次重新列目录。
+//
+// 数据更新（cne）结束后调用，省掉"等目录 mtime 被探测到"的那一点延迟。
+// 注意：即使不调用它，`DatasetFiles` 也会自己发现新分区（见上面 mtime 判据）——
+// 这个方法只是让"刚更新完"这条路径更即时。
+func (l *Lake) InvalidateDatasetFiles() {
+	l.mu.Lock()
+	l.files = map[string][]string{}
+	l.filesAt = map[string]time.Time{}
+	l.filesSeen = map[string]time.Time{}
+	l.mu.Unlock()
 }
 
 // Partition 是数据集下的一个分区目录，例如 report_period=2024Q4。

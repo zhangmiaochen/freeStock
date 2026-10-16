@@ -308,6 +308,13 @@ func (s *StockService) InvalidateDerivedCaches() {
 	provider, _ := s.snapshot()
 	if lake, ok := provider.(*lakeProvider); ok {
 		lake.InvalidateSymbolBars()
+		// ⚠ 还要丢弃**数据湖的文件/分区列表缓存**。
+		//
+		// 这两份缓存（`DatasetFiles` / `BarPartitionDates`）决定"最新交易日是哪天"
+		// 与"有哪些分区"。它们现在都能靠目录 mtime 自己发现新分区，
+		// 但刚更新完时显式清一次可以让"最新"立刻就位，不必等下一次探测 ——
+		// 这也是用户报告问题的那条链路上最上游的一环。
+		lake.lake.InvalidateDatasetFiles()
 	}
 	// 估值评估的数据全部来自数据湖：刚落了新数据（新财报 / 新股本 / 新除权）
 	// 之后必须整体重算，否则详情页还会沿用旧财报算出来的分位。

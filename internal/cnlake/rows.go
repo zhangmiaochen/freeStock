@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/parquet-go/parquet-go"
 )
@@ -1159,8 +1160,26 @@ func (l *Lake) BarPartitionDates() ([]int64, error) {
 	// ⚠ **分区名是日期时也要缓存**：`bulkFillAllowed` 会**每只股票**调一次这个函数，
 	// 而 `os.ReadDir` 要遍历 2612 个目录。不缓存的话，条件选股 678 只
 	// 光是列目录就要几十秒，表现就是进度条卡在 0。
+	//
+	// ⚠⚠ 但缓存**必须能被"数据湖落了新分区"打破**。这里原本是永久缓存
+	// （`barDatesLoaded` 一旦为 true 就再也不过问），后果是：
+	//
+	//	进程启动后列一次目录 → 记住"最新交易日 = 昨天"；
+	//	日更落下今天的分区；
+	//	之后所有"最新交易日"仍然答昨天 —— **直到进程重启**。
+	//
+	// 这会让下游一连串缓存都认为"自己已经覆盖到最新"，全都不会失效
+	// （`symbolCacheState` 的 covered 判定、`cachedTradeDate`、
+	//  K 线的补尾区间…），表现就是用户说的"不重启就一直读缓存"。
+	//
+	// 判据同 DatasetFiles：目录 mtime 变了就重列（stat 微秒级，
+	// 比 ReadDir 2612 个目录便宜得多），再加一道 TTL 兜底。
+	dirMod := time.Time{}
+	if info, statErr := os.Stat(dir); statErr == nil {
+		dirMod = info.ModTime()
+	}
 	l.barDatesMu.Lock()
-	if l.barDatesLoaded && len(l.barDates) > 0 {
+	if l.barDatesLoaded && len(l.barDates) > 0 && l.barDatesDirMod.Equal(dirMod) {
 		out := make([]int64, len(l.barDates))
 		copy(out, l.barDates)
 		l.barDatesMu.Unlock()
@@ -1193,6 +1212,7 @@ func (l *Lake) BarPartitionDates() ([]int64, error) {
 		l.barDatesMu.Lock()
 		l.barDates = fromNames
 		l.barDatesLoaded = true
+		l.barDatesDirMod = dirMod
 		l.barDatesMu.Unlock()
 		return fromNames, nil
 	}
@@ -1208,10 +1228,18 @@ func (l *Lake) BarPartitionDates() ([]int64, error) {
 	return out, nil
 }
 
-// ensureDailyBarDates 从 parquet 内容里读出所有 bar 日期并缓存（只做一次）。
+// ensureDailyBarDates 从 parquet 内容里读出所有 bar 日期并缓存。
+//
+// 只在"分区名不是日期"这种退化布局下才会走到（正常布局由
+// `BarPartitionDates` 直接读目录名）。判据与它保持一致：
+// 目录 mtime 变了就必须重读，否则新增分区看不见。
 func (l *Lake) ensureDailyBarDates() error {
+	dirMod := time.Time{}
+	if info, statErr := os.Stat(l.DatasetDir("daily_bars")); statErr == nil {
+		dirMod = info.ModTime()
+	}
 	l.barDatesMu.Lock()
-	if l.barDatesLoaded {
+	if l.barDatesLoaded && l.barDatesDirMod.Equal(dirMod) {
 		l.barDatesMu.Unlock()
 		return nil
 	}
@@ -1236,6 +1264,7 @@ func (l *Lake) ensureDailyBarDates() error {
 	l.barDatesMu.Lock()
 	l.barDates = dates
 	l.barDatesLoaded = true
+	l.barDatesDirMod = dirMod
 	l.barDatesMu.Unlock()
 	return nil
 }
