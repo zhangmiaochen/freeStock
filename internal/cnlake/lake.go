@@ -231,17 +231,34 @@ func (l *Lake) DatasetFiles(name string) []string {
 	return found
 }
 
-// InvalidateDatasetFiles 丢弃文件列表缓存，强制下次重新列目录。
+// InvalidateDatasetFiles 丢弃"数据湖有哪些文件/哪些分区"的缓存。
 //
-// 数据更新（cne）结束后调用，省掉"等目录 mtime 被探测到"的那一点延迟。
-// 注意：即使不调用它，`DatasetFiles` 也会自己发现新分区（见上面 mtime 判据）——
-// 这个方法只是让"刚更新完"这条路径更即时。
+// ⚠ **两份缓存都要清**，因为它们服务的是同一个问题的两半：
+//
+//	files / filesAt / filesSeen  → DatasetFiles：有哪些 parquet 文件
+//	barDates / barDatesDirMod    → BarPartitionDates：有哪些交易日分区
+//
+// 只清前者是不够的：`LatestTradeDate` 与 `LatestPartitionDate` 都走
+// `BarPartitionDates`，而 service 层判定"按股票缓存是否已覆盖到最新"
+// （`symbolCacheState` 的 covered）正是拿它跟构建水位比的。
+// 分区日期还停在旧值 → covered 继续成立 → K 线继续读缓存。
+//
+// 数据更新（cne）结束后由 `StockService.InvalidateDerivedCaches` 调用。
+// 注意：即使不调用它，这两份缓存也会靠目录 mtime 自己发现新分区
+// （见 DatasetFiles 的说明）—— 这个方法只是让"刚更新完"这条路径不依赖探测。
 func (l *Lake) InvalidateDatasetFiles() {
 	l.mu.Lock()
 	l.files = map[string][]string{}
 	l.filesAt = map[string]time.Time{}
 	l.filesSeen = map[string]time.Time{}
 	l.mu.Unlock()
+
+	// 分区日期缓存用另一把锁，单独清（不嵌套持锁）
+	l.barDatesMu.Lock()
+	l.barDates = nil
+	l.barDatesLoaded = false
+	l.barDatesDirMod = time.Time{}
+	l.barDatesMu.Unlock()
 }
 
 // Partition 是数据集下的一个分区目录，例如 report_period=2024Q4。

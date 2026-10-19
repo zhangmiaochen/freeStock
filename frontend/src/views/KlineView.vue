@@ -16,15 +16,22 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import {
   ChartCandlestick,
+  GitBranch,
   Info,
   LoaderCircle,
+  Pause,
+  Play,
   RefreshCw,
   Save,
+  SkipBack,
+  SkipForward,
   SlidersHorizontal,
   SquareDashedMousePointer,
 } from "@lucide/vue";
 
 import KlineChart from "@/components/kline/KlineChart.vue";
+import ChanlunPanel from "@/components/kline/ChanlunPanel.vue";
+import ChanlunSettings from "@/components/kline/ChanlunSettings.vue";
 import IndicatorParams from "@/components/kline/IndicatorParams.vue";
 import MaSettings from "@/components/kline/MaSettings.vue";
 import RangeStatsPanel from "@/components/kline/RangeStatsPanel.vue";
@@ -34,7 +41,17 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
-import { api, errorMessage, type KlineBundle, type KlinePrefs } from "@/lib/backend";
+import {
+  api,
+  errorMessage,
+  type ChanlunAnalysis,
+  type ChanlunBundle,
+  type ChanlunReplay,
+  type ChanlunReplayStep,
+  type ChanlunRequest,
+  type KlineBundle,
+  type KlinePrefs,
+} from "@/lib/backend";
 import {
   DEFAULT_BOLL,
   DEFAULT_MACD,
@@ -99,6 +116,67 @@ const macdConfig = ref<MacdConfig>({ ...DEFAULT_MACD });
 const showSummary = ref(true);
 const maConfigs = ref<MaConfig[]>(defaultMaConfigs());
 
+// ---- 缠论叠加层 ----
+//
+// 结构全部在后端算（internal/chanlun），前端只消费标注：分型/笔/线段/中枢/背驰/买卖点。
+// 级别是**独立**的：切到周线就是周线自己的一套结构，不是把日线缩放得到的。
+const CHANLUN_LEVELS = [
+  { key: "day-stroke", label: "日线笔" },
+  { key: "day", label: "日线" },
+  { key: "week", label: "周线" },
+  { key: "month", label: "月线" },
+  { key: "year", label: "年线" },
+] as const;
+
+type ChanlunLevel = (typeof CHANLUN_LEVELS)[number]["key"];
+
+const showChanlun = ref(false);
+const chanlunLevel = ref<ChanlunLevel>("day");
+const chanlunBundle = ref<ChanlunBundle | null>(null);
+const chanlunLoading = ref(false);
+const chanlunError = ref("");
+
+// ---- 回放（无未来数据演示）----
+const replayMode = ref(false);
+const replay = ref<ChanlunReplay | null>(null);
+const replayIndex = ref(0);
+const replayPlaying = ref(false);
+const replayError = ref("");
+let replayTimer: number | undefined;
+
+/** 当前回放快照；不在回放模式时为 null */
+const replayStep = computed<ChanlunReplayStep | null>(() => {
+  if (!replayMode.value) return null;
+  const steps = replay.value?.steps ?? [];
+  return steps[replayIndex.value] ?? null;
+});
+
+const replaySteps = computed(() => replay.value?.steps ?? []);
+
+/** 图上要叠加的缠论标注（回放时用该时点的信号构造一个"只有信号"的标注） */
+const chanlunOverlay = computed<ChanlunAnalysis | null>(() => {
+  if (!showChanlun.value) return null;
+  const step = replayStep.value;
+  const base = chanlunBundle.value?.analysis ?? null;
+  if (step && base) {
+    // 回放快照只有状态 / 走势 / 位置 / 信号：笔与中枢不重画，
+    // 因为它们在那时点的完整结构没有随快照返回（避免载荷过大）
+    return {
+      ...base,
+      signals: step.signals,
+      pivots: [],
+      strokes: [],
+      segments: [],
+      fractals: [],
+      divergences: [],
+      trend: step.trend,
+      position: step.position,
+      state: step.state,
+    } as ChanlunAnalysis;
+  }
+  return base;
+});
+
 const configPath = ref("");
 const prefsSaved = ref(false);
 /** 读配置期间不要触发保存，否则会用默认值把已存的配置覆盖掉 */
@@ -128,6 +206,8 @@ function currentPrefs(): KlinePrefs {
     showFlow: showFlow.value,
     showFibonacci: showFibonacci.value,
     showRangeSelect: showRangeSelect.value,
+    showChanlun: showChanlun.value,
+    chanlunLevel: chanlunLevel.value,
     boll: { period: bollConfig.value.period, mult: bollConfig.value.mult },
     macd: {
       fast: macdConfig.value.fast,
@@ -151,6 +231,9 @@ function applyPrefs(stored: KlinePrefs) {
   showFlow.value = stored.showFlow ?? true;
   showFibonacci.value = stored.showFibonacci ?? false;
   showRangeSelect.value = stored.showRangeSelect ?? false;
+  showChanlun.value = stored.showChanlun ?? false;
+  const level = stored.chanlunLevel as ChanlunLevel | undefined;
+  chanlunLevel.value = CHANLUN_LEVELS.some((item) => item.key === level) ? (level as ChanlunLevel) : "day";
   bollConfig.value = normalizeBoll(stored.boll ?? DEFAULT_BOLL);
   macdConfig.value = normalizeMacd(stored.macd ?? DEFAULT_MACD);
 
@@ -209,7 +292,7 @@ function scheduleSave() {
 watch(
   [
     period, adjust, showBoll, showMacd, showVolume, showFlow, showFibonacci,
-    showRangeSelect, bollConfig, macdConfig, maConfigs,
+    showRangeSelect, showChanlun, chanlunLevel, bollConfig, macdConfig, maConfigs,
   ],
   () => scheduleSave(),
   { deep: true },
@@ -219,12 +302,19 @@ watch(
 onBeforeUnmount(() => {
   window.clearTimeout(saveTimer);
   if (prefsReady.value) void flushPrefs();
+  clearReplayTimer();
 });
 
 /** 按当前周期聚合后的蜡烛（纯前端计算，切周期是瞬时的） */
 const displayCandles = computed<Candle[]>(() => {
   const raw = (bundle.value?.candles ?? []) as unknown as Candle[];
-  return aggregate(raw, period.value);
+  const aggregated = aggregate(raw, period.value);
+  // 回放：只显示到当前时点，之后的 K 线根本不参与绘图
+  const step = replayStep.value;
+  if (!step) return aggregated;
+  let cut = aggregated.length;
+  while (cut > 0 && aggregated[cut - 1].date > step.date) cut -= 1;
+  return aggregated.slice(0, cut);
 });
 
 const visibleMaCount = computed(() => maConfigs.value.filter((item) => item.visible).length);
@@ -292,6 +382,139 @@ function reload() {
   if (code.value) void load(code.value, true);
 }
 
+// ---------------------------------------------------------------------------
+// 缠论：加载标注 + 回放
+// ---------------------------------------------------------------------------
+
+function chanlunRequest(): ChanlunRequest {
+  return {
+    code: code.value,
+    adjust: adjust.value,
+    level: chanlunLevel.value,
+    tradeDate: 0,
+    multiLevel: true,
+  } as ChanlunRequest;
+}
+
+async function loadChanlun(): Promise<void> {
+  if (!showChanlun.value || !code.value) return;
+  chanlunLoading.value = true;
+  chanlunError.value = "";
+  try {
+    chanlunBundle.value = await api.chanlun.analyze(chanlunRequest());
+  } catch (err) {
+    chanlunError.value = errorMessage(err);
+    chanlunBundle.value = null;
+  } finally {
+    chanlunLoading.value = false;
+  }
+}
+
+function toggleChanlun() {
+  showChanlun.value = !showChanlun.value;
+  if (!showChanlun.value) {
+    exitReplay();
+    chanlunBundle.value = null;
+    chanlunError.value = "";
+    return;
+  }
+  void loadChanlun();
+}
+
+function setChanlunLevel(level: ChanlunLevel) {
+  chanlunLevel.value = level;
+  if (showChanlun.value) {
+    exitReplay();
+    void loadChanlun();
+  }
+}
+
+/** 缠论设置（阈值/权重）改完后要按新口径重算当前结构 */
+function onChanlunConfigChanged() {
+  if (!showChanlun.value) return;
+  exitReplay();
+  void loadChanlun();
+}
+
+// ---- 回放 ----
+
+function clearReplayTimer() {
+  if (replayTimer !== undefined) {
+    window.clearInterval(replayTimer);
+    replayTimer = undefined;
+  }
+}
+
+function startReplayTimer() {
+  clearReplayTimer();
+  replayTimer = window.setInterval(() => {
+    const total = replaySteps.value.length;
+    if (total === 0) {
+      pauseReplay();
+      return;
+    }
+    if (replayIndex.value >= total - 1) {
+      pauseReplay();
+      return;
+    }
+    replayIndex.value += 1;
+  }, 500);
+}
+
+function playReplay() {
+  if (replaySteps.value.length === 0) return;
+  if (replayIndex.value >= replaySteps.value.length - 1) replayIndex.value = 0;
+  replayPlaying.value = true;
+  startReplayTimer();
+}
+
+function pauseReplay() {
+  replayPlaying.value = false;
+  clearReplayTimer();
+}
+
+function stepReplay(delta: number) {
+  pauseReplay();
+  const total = replaySteps.value.length;
+  if (total === 0) return;
+  replayIndex.value = Math.min(total - 1, Math.max(0, replayIndex.value + delta));
+}
+
+async function toggleReplay() {
+  if (replayMode.value) {
+    exitReplay();
+    return;
+  }
+  replayError.value = "";
+  try {
+    const data = await api.chanlun.replay(chanlunRequest());
+    if (!data || !data.steps || data.steps.length === 0) {
+      replayError.value = "没有可回放的数据（K 线太少或该级别尚未形成结构）";
+      return;
+    }
+    replay.value = data;
+    replayMode.value = true;
+    replayIndex.value = 0;
+    playReplay();
+  } catch (err) {
+    replayError.value = errorMessage(err);
+  }
+}
+
+function exitReplay() {
+  pauseReplay();
+  replayMode.value = false;
+  replay.value = null;
+  replayIndex.value = 0;
+  replayError.value = "";
+}
+
+function onReplaySeek(event: Event) {
+  pauseReplay();
+  const value = Number((event.target as HTMLInputElement).value);
+  if (Number.isFinite(value)) replayIndex.value = value;
+}
+
 onMounted(async () => {
   // 先读配置再取数：复权方式是配置里的，读晚了会先用默认值请求一次
   await loadPrefs();
@@ -317,12 +540,22 @@ watch(
 watch(adjust, () => {
   // 复权方式换了，同一段区间的价格整体变了，旧统计不再成立
   clearRange();
+  // 复权价变了，缠论结构要重算（除权跳空会改变分型与笔）——
+  // 取数完成后 bundle 变化会触发 loadChanlun，这里只需要先退出回放
+  exitReplay();
   if (code.value) void load();
 });
 
 // 切周期后下标区间与统计基准都变了（日线的第 10~20 根 ≠ 周线的第 10~20 根），
 // 留着旧框只会给出对不上的数字，所以直接清掉
 watch(period, () => clearRange());
+
+// 换标的 / 重新取数后，缠论标注跟着重算
+watch(bundle, (value) => {
+  if (!showChanlun.value || !value) return;
+  exitReplay();
+  void loadChanlun();
+});
 </script>
 
 <template>
@@ -435,6 +668,41 @@ watch(period, () => clearRange());
           资金流
         </Button>
 
+        <!-- 缠论：结构分析叠加层（分型 / 笔 / 线段 / 中枢 / 背驰 / 买卖点） -->
+        <Button
+          size="xs"
+          :variant="showChanlun ? 'default' : 'outline'"
+          title="缠论结构标注：每个级别独立画线，买卖点带状态机，仅作参考"
+          @click="toggleChanlun"
+        >
+          <GitBranch />
+          缠论
+        </Button>
+        <template v-if="showChanlun">
+          <div class="flex items-center gap-1">
+            <Button
+              v-for="item in CHANLUN_LEVELS"
+              :key="item.key"
+              size="xs"
+              :variant="chanlunLevel === item.key ? 'default' : 'ghost'"
+              class="h-6 px-1.5 text-[11px]"
+              @click="setChanlunLevel(item.key)"
+            >
+              {{ item.label }}
+            </Button>
+          </div>
+          <Button
+            size="xs"
+            :variant="replayMode ? 'default' : 'outline'"
+            title="逐根推进回放：每个时点都只用当时的 K 线重新分析，未来数据不参与计算"
+            @click="toggleReplay"
+          >
+            <Play v-if="!replayMode" />
+            <Pause v-else />
+            回放
+          </Button>
+        </template>
+
         <div class="ml-auto flex items-center gap-2">
           <span v-if="bundle" class="text-muted-foreground tabular text-xs">
             {{ periodTitle }} · {{ displayCandles.length }} 根 · 数据到
@@ -462,6 +730,7 @@ watch(period, () => clearRange());
           @update:boll="bollConfig = $event"
           @update:macd="macdConfig = $event"
         />
+        <ChanlunSettings @changed="onChanlunConfigChanged" />
         <p
           v-if="configPath"
           class="text-muted-foreground flex items-center gap-1.5 text-[11px]"
@@ -559,14 +828,70 @@ watch(period, () => clearRange());
             缩放/平移请用图表下方的滑条；在图上<b class="text-foreground">双击</b>或点统计面板上的「清除」可以取消框选。
           </span>
         </p>
-      </div>
 
+        <!-- 缠论口径：级别独立画线、先判状态再出信号、只作参考 -->
+        <p
+          v-if="showChanlun"
+          class="text-muted-foreground mt-2 flex items-start gap-1.5 text-[11px]"
+        >
+          <Info class="mt-0.5 size-3 shrink-0" />
+          <span>
+            缠论：<b class="text-foreground">每个级别独立画线</b>（日线笔 / 日线 / 周线 / 月线 / 年线各算各的，
+            大级别只用于印证与压制，不会反推小级别）；<b class="text-foreground">无中枢不背驰</b>、
+            趋势背驰必须先有趋势；买卖点按<b class="text-foreground">候选 → 触发 → 确认 → 失效/过期</b> 的状态机标注。
+            背驰只保证至少回到最后一个中枢，不保证反转；所有标注<b class="text-foreground">仅作参考，不构成投资建议</b>。
+          </span>
+        </p>
+      </div>
       <!-- 框选统计结果：放在图上方的正文流里，不遮挡 K 线 -->
       <div v-if="selectedStats" class="shrink-0 px-5 pt-3">
         <RangeStatsPanel :stats="selectedStats" :is-index="isIndex" @clear="clearRange" />
       </div>
 
-      <div class="flex min-h-0 flex-1 flex-col px-5 py-3">
+      <!-- 回放控制：只显示到当前时点的 K 线，之后的数据不参与绘图与计算 -->
+      <div
+        v-if="replayMode"
+        class="bg-muted/30 mx-5 mt-3 flex shrink-0 flex-wrap items-center gap-2 rounded-lg border px-3 py-2 text-xs"
+      >
+        <Badge variant="secondary" class="text-[10px]">回放</Badge>
+        <Button size="xs" variant="outline" title="上一步" @click="stepReplay(-1)">
+          <SkipBack />
+        </Button>
+        <Button
+          size="xs"
+          variant="outline"
+          :title="replayPlaying ? '暂停' : '播放'"
+          @click="replayPlaying ? pauseReplay() : playReplay()"
+        >
+          <Pause v-if="replayPlaying" />
+          <Play v-else />
+        </Button>
+        <Button size="xs" variant="outline" title="下一步" @click="stepReplay(1)">
+          <SkipForward />
+        </Button>
+        <input
+          type="range"
+          class="accent-primary h-1 min-w-[120px] flex-1"
+          :min="0"
+          :max="Math.max(0, replaySteps.length - 1)"
+          :value="replayIndex"
+          @input="onReplaySeek"
+        />
+        <span class="text-muted-foreground tabular text-[11px]">
+          {{ replaySteps.length ? replayIndex + 1 : 0 }} / {{ replaySteps.length }} ·
+          {{ replayStep ? formatDate(replayStep.date) : "—" }}
+        </span>
+        <Badge v-if="replayStep" variant="outline" class="text-[10px]">
+          {{ replayStep.state.nameCN }}
+        </Badge>
+        <Button size="xs" variant="ghost" @click="exitReplay">退出回放</Button>
+        <p v-if="replayError" class="text-destructive w-full text-[11px]">{{ replayError }}</p>
+        <p class="text-muted-foreground w-full text-[11px]">
+          回放对每个时点单独重算结构：当时还没有的笔、中枢与信号不会提前出现。
+        </p>
+      </div>
+
+      <div class="flex min-h-0 flex-1 gap-3 px-5 py-3">
         <div
           :class="cn('bg-card min-h-0 flex-1 rounded-lg border p-2', loading && 'opacity-60')"
         >
@@ -581,6 +906,7 @@ watch(period, () => clearRange());
             :show-fibonacci="showFibonacci"
             :show-range-select="showRangeSelect"
             :range-selection="rangeSelection"
+            :chanlun="chanlunOverlay"
             :money-flows="bundle.moneyFlows"
             :boll-config="bollConfig"
             :macd-config="macdConfig"
@@ -589,6 +915,13 @@ watch(period, () => clearRange());
             @range-cleared="clearRange"
           />
         </div>
+        <ChanlunPanel
+          v-if="showChanlun"
+          :bundle="chanlunBundle"
+          :step="replayStep"
+          :loading="chanlunLoading"
+          :error="chanlunError"
+        />
       </div>
     </template>
   </div>

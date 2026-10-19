@@ -472,9 +472,15 @@ func TestPercentileIsLowWhenValueIsLow(t *testing.T) {
 
 // TestFairPEDoesNotRewardGrowthAlone 钉住方案 §5.4：
 // "不能简单把高增长率直接转换成高估值" —— 同等增速下，质量差的公司目标 PE 必须更低。
+//
+// ⚠ 本轮口径变了：目标 PE 现在**锚定市场实际倍数**（见 fairPE）。
+// 这条用例的作用相应改成两件事：
+//  1. 同一锚下，质量差的拿到更低的目标倍数（原有的相对关系不变）；
+//  2. 目标倍数**不许脱离锚** —— 这是修掉"银行被给出 20 倍目标 PE"的关键约束。
 func TestFairPEDoesNotRewardGrowthAlone(t *testing.T) {
-	highQuality := fairPE(100, 100)
-	lowQuality := fairPE(100, 0)
+	const anchor = 20.0
+	highQuality, _ := fairPE(100, 100, anchor)
+	lowQuality, _ := fairPE(100, 0, anchor)
 	if lowQuality >= highQuality {
 		t.Errorf("同样成长分 100，质量分 0 的目标 PE（%.1f）必须低于质量分 100 的（%.1f）",
 			lowQuality, highQuality)
@@ -482,8 +488,41 @@ func TestFairPEDoesNotRewardGrowthAlone(t *testing.T) {
 	if highQuality > 40 {
 		t.Errorf("目标 PE 上限应为 40 倍，实际 %.1f —— 无上限会让高增长公司拿到不切实际的估值", highQuality)
 	}
-	if fairPE(0, 0) < 8 {
-		t.Errorf("零成长零质量公司的目标 PE 不应低于 8 倍，实际 %.1f", fairPE(0, 0))
+
+	// 关键约束：相对锚的偏离必须被夹在 ±25% 内。
+	// 没有这一条，低估值行业（银行 PE 5 倍）会被套上成长股的倍数。
+	worst, _ := fairPE(100, 100, 5)
+	if worst > 5*1.25+1e-9 {
+		t.Errorf("锚 5 倍时最好的公司也只能给到 6.25 倍，实际 %.2f —— "+
+			"目标倍数脱离了市场锚，会把低估值行业判成严重低估", worst)
+	}
+	// 上界方向：上限是**相对锚**的（2 倍），不是固定 40 倍。
+	//
+	// 为什么不用固定上限：高估值行业（半导体设备 PE 中位 60~80 倍）里的公司会被
+	// 夹到 40 倍，于是"模型 40 倍 vs 市场 68 倍"被判成方法冲突 —— 那只是上限太低，
+	// 不是估值分歧。相对上限让上限随行业水平浮动。
+	best, _ := fairPE(100, 100, 50)
+	if best != 62.5 {
+		t.Errorf("锚 50 倍时最好的公司应给到 62.5（锚的 1.25 倍，未触 2 倍上限），实际 %.2f", best)
+	}
+	// 触到相对上限的情况：锚 100 倍时上限是 200 倍，但绝对上限 120 倍先生效
+	capped, _ := fairPE(100, 100, 120)
+	if capped != 120 {
+		t.Errorf("锚 120 倍时目标倍数应被绝对上限夹到 120，实际 %.2f", capped)
+	}
+	// 锚在合理范围内时不该触发上限
+	mid, _ := fairPE(100, 100, 24)
+	if mid <= 24 || mid > 30 {
+		t.Errorf("锚 24 倍、基本面最好的公司应给到 24~30 倍之间，实际 %.2f", mid)
+	}
+
+	// 拿不到锚时必须退回默认区间（不能返回 0，否则所有方法一起失效）
+	fallback, note := fairPE(0, 0, 0)
+	if fallback <= 0 {
+		t.Fatalf("拿不到市场锚时应退回默认区间，实际 %.2f", fallback)
+	}
+	if note == "" {
+		t.Error("走降级路径时必须给出说明（界面要显示为什么没做市场锚定）")
 	}
 }
 

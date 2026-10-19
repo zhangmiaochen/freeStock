@@ -156,20 +156,92 @@ func growthDampening(qualityScore float64, horizonKey string) float64 {
 	return base
 }
 
-// fairPE 是"成长调整后的合理 PE"。
+// fairPE 是"成长调整后的合理 PE"—— **锚定在市场实际倍数上**。
 //
-// 这是方案 §5.4 的核心公式。设计意图：
+// ## 为什么改成锚定（这是一次实测驱动的修正）
 //
-//	基础 8 倍        —— 零增长、低质量公司也不该低于这个数（壳价值 + 分红能力）
-//	+ 最多 22 倍     —— 由成长能力分与成长质量分的加权位置决定
-//	上限 40 倍       —— 再高的 PE 需要极强的持续成长支撑，本模型不给
+// 原实现是 `8 + 22 × 位置`（位置 = 成长分 × 55% + 质量分 × 45%），
+// 其中成长分与质量分是**公司相对同行的分位**。把"相对分位"当"绝对倍数"用，
+// 后果是低估值行业被严重高估。实测（修前）：
 //
-// ⚠ 它**不是** PEG：PEG 会把 50% 增速直接换算成 50 倍 PE，本模型通过
-// "质量加权 + 上限"避免这一点。质量差的公司在同样增速下拿到的目标 PE 明显更低。
-func fairPE(growthScore, qualityScore float64) float64 {
-	// 成长与质量的加权位置：两者都满分时得 1，都为 0 时得 0
-	position := (growthScore*0.55 + qualityScore*0.45) / 100
-	return 8 + 22*clamp01(position)
+//	平安银行  市场 PE 5.1 倍  → 模型目标 PE 20.7 倍（推 278% 上行空间）
+//	招商银行  市场 PE 7.1 倍  → 模型目标 PE 23.6 倍
+//	工商银行  市场 PE 8.1 倍  → 模型目标 PE 25.0 倍
+//	贵州茅台  市场 PE 20.2 倍 → 模型目标 PE 24.4 倍
+//
+// 银行与茅台的目标 PE 只差 3.7 倍，而市场给它们的估值差 4 倍以上 ——
+// 模型几乎没有区分能力，还把"市场对银行杠杆与低增长的定价"当成了错价。
+//
+// 更糟的是它会**系统性地制造假冲突**：全市场 338 只样本里 68% 命中
+// "方法冲突"，而冲突时最低的方法永远是 PB、PE 从不是最低方
+// —— 一边倒的分布不可能是市场分歧，只能是模型偏了。
+//
+// ## 新口径
+//
+//	合理 PE = 市场锚 × (1 + 基本面调整)，调整幅度夹在 ±25% 内
+//
+// 锚取**行业 PE 中位数**（行业成分不足时取全市场 PE 中位数）。
+// 成长与质量只决定"相对同行该溢价还是折价"，不再决定绝对倍数：
+// 一家在银行里质量分很高的银行，只该比银行中位数贵一点，
+// 不该拿到白酒的倍数。
+//
+// ⚠ `anchor` 为 0（拿不到任何市场数据）时**退回旧公式**并保守化 ——
+// 不返回零值，否则所有估值方法一起失效。
+func fairPE(growthScore, qualityScore, anchor float64) (float64, string) {
+	const (
+		// maxAdjust 是允许相对市场锚的溢价/折价上限（±25%）。
+		//
+		// 取 25% 的理由：分数是"相对同行的分位"，极端情况（成长与质量都满分、
+		// 同行普遍亏损）下线性外推会给出荒谬倍数；而 25% 的溢价已经足以
+		// 让基本面最好的公司显著高于行业中位。
+		maxAdjust = 0.25
+		// floorMultiple 是绝对下限：再差的公司也有壳价值与分红能力。
+		floorMultiple = 5.0
+		// ceilingMultiple 是**相对上限的倍数**：目标倍数不得高于市场锚的这么多倍。
+		//
+		// ⚠ 这里原本是"绝对上限 40 倍"，修完市场锚定后它开始制造假冲突：
+		// 高估值行业（如半导体设备行业 PE 中位 60~80 倍）里的公司会被夹到 40 倍，
+		// 于是"模型说 40 倍、市场给 68 倍"被判成方法冲突 —— 但那只是上限太低，
+		// 不是估值分歧。改成相对锚的倍数后，上限随行业水平浮动，不再人为制造冲突。
+		ceilingAnchorRatio = 2.0
+		// absoluteCeiling 是极端情况下的硬上限（防止锚本身异常放大）。
+		absoluteCeiling = 120.0
+	)
+
+	position := clamp01((growthScore*0.55 + qualityScore*0.45) / 100)
+	if anchor <= 0 {
+		// 无市场锚：退回旧公式（8~30 倍），并说明这是降级路径
+		fallback := 8 + 22*position
+		note := fmt.Sprintf("拿不到行业与全市场的 PE 中位数，目标倍数退回模型默认区间（成长分 %.0f × 55%% + "+
+			"质量分 %.0f × 45%%），未做市场锚定", growthScore, qualityScore)
+		return clampFloat(fallback, floorMultiple, absoluteCeiling), note
+	}
+
+	// position 0 → −25%，position 0.5 → 0%，position 1 → +25%
+	adjust := (position*2 - 1) * maxAdjust
+	target := anchor * (1 + adjust)
+	target = clampFloat(target, floorMultiple, math.Min(anchor*ceilingAnchorRatio, absoluteCeiling))
+
+	premium := target/anchor - 1
+	direction := "低于"
+	if premium >= 0 {
+		direction = "高于"
+	}
+	note := fmt.Sprintf("以行业 PE 中位数 %.1f 倍为锚（成长分 %.0f × 55%% + 质量分 %.0f × 45%% → "+
+		"基本面位置 %.0f%%），目标倍数%s行业中位 %.0f%%",
+		anchor, growthScore, qualityScore, position*100, direction, math.Abs(premium)*100)
+	return target, note
+}
+
+// clampFloat 把 v 夹到 [low, high]。
+func clampFloat(v, low, high float64) float64 {
+	if v < low {
+		return low
+	}
+	if v > high {
+		return high
+	}
+	return v
 }
 
 // fairPB 是"PB-ROE 框架下的合理 PB"。
@@ -249,8 +321,13 @@ type FairValueInput struct {
 	Industry   IndustryValuation
 	// IndustryAvailable 表示行业聚合是否可用。
 	IndustryAvailable bool
-	Horizon           Horizon
-	Params            Params
+	// PEAnchor 是"市场 PE 锚"：行业 PE 中位数，行业不可用时用全市场 PE 中位数。
+	//
+	// 目标倍数必须锚定在它上面（见 fairPE 的说明）。为 0 表示拿不到市场数据，
+	// 模型退回默认区间并降低置信度。
+	PEAnchor float64
+	Horizon  Horizon
+	Params   Params
 	// PriceSeries 用于算波动率（置信度用）。
 	PriceSeries PriceSeries
 }
@@ -472,7 +549,7 @@ func evaluatePEMethod(input FairValueInput, modelGrowth, baseGrowth, pessimistic
 			asOf.TTM.NetProfit/1e8)
 		return out
 	}
-	target := fairPE(input.Growth.Score, input.Quality.Score)
+	target, anchorNote := fairPE(input.Growth.Score, input.Quality.Score, input.PEAnchor)
 	current := 0.0
 	if asOf.TTM.NetProfit > 0 && input.Shares > 0 && input.Price > 0 {
 		epsTTM := asOf.TTM.NetProfit / input.Shares
@@ -493,9 +570,8 @@ func evaluatePEMethod(input FairValueInput, modelGrowth, baseGrowth, pessimistic
 	out.FairValue = epsBase * target
 	out.Low = math.Max(epsPess*target*0.85, 0)
 	out.High = epsOpt * target * 1.10
-	out.Basis = fmt.Sprintf("预测 TTM 每股收益 %.2f 元 × 目标 PE %.1f 倍"+
-		"（成长分 %.0f × 55%% + 质量分 %.0f × 45%% 映射，8~30 倍区间）",
-		epsBase, target, input.Growth.Score, input.Quality.Score)
+	out.Basis = fmt.Sprintf("预测 TTM 每股收益 %.2f 元 × 目标 PE %.1f 倍（%s）",
+		epsBase, target, anchorNote)
 	if current > 0 && target > 0 {
 		out.Reason = fmt.Sprintf("当前 PE %.1f 倍 → 目标 PE %.1f 倍（%+.0f%%）；"+
 			"盈利预测增速 %.1f%%（%s）", current, target, (target/current-1)*100, baseGrowth*100, input.Horizon.Label)
@@ -536,9 +612,10 @@ func evaluatePBMethod(input FairValueInput, project func(float64) (float64, floa
 	out.Low = bps * target * 0.80
 	out.High = bps * target * 1.20
 	out.Basis = fmt.Sprintf("每股净资产 %.2f 元 × 合理 PB %.2f 倍"+
-		"（PB-ROE：(ROE %.1f%% − g %.1f%%) ÷ (WACC %.1f%% − g %.1f%%)）",
+		"（PB-ROE：TTM ROE %.1f%%，(ROE − g %.1f%%) ÷ (WACC %.1f%% − g %.1f%%) = 稳态合理 PB %.2f；"+
+		"市场当前给 %.2f 倍）",
 		bps, target, roe*100, input.Params.TerminalGrowth*100,
-		input.Params.WACC*100, input.Params.TerminalGrowth*100)
+		input.Params.WACC*100, input.Params.TerminalGrowth*100, target, current)
 	if note != "" {
 		out.Basis += "；" + note
 	}
@@ -567,7 +644,7 @@ func evaluatePSMethod(input FairValueInput, project func(float64) (float64, floa
 		netMargin = asOf.TTM.NetProfit / revenue
 		marginNote = fmt.Sprintf("按当前 TTM 净利率 %.1f%%", netMargin*100)
 	}
-	pe := fairPE(input.Growth.Score, input.Quality.Score)
+	pe, _ := fairPE(input.Growth.Score, input.Quality.Score, input.PEAnchor)
 	target := netMargin * pe
 	if target <= 0 {
 		out.Reason = "推导出的合理 PS 为负，PS 法不适用"
@@ -750,7 +827,8 @@ func evaluateCyclicalMethod(input FairValueInput, project func(float64) (float64
 	if input.Company.SelfAvailable {
 		// SelfPercentile 不给中位数本身，所以这里用 fairPE 作为中枢的代理，
 		// 并对周期股按 0.85 折价（周期中枢的合理倍数应低于成长股）
-		historicalMedian = fairPE(input.Growth.Score, input.Quality.Score) * 0.85
+		anchorPE, _ := fairPE(input.Growth.Score, input.Quality.Score, input.PEAnchor)
+		historicalMedian = anchorPE * 0.85
 	} else {
 		historicalMedian = currentPE * 0.9
 	}

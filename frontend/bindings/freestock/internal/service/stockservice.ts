@@ -12,6 +12,9 @@ import { Call as $Call, CancellablePromise as $CancellablePromise, Create as $Cr
 
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore: Unused imports
+import * as chanlun$0 from "../chanlun/models.js";
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore: Unused imports
 import * as config$0 from "../config/models.js";
 
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
@@ -81,6 +84,28 @@ export function GetBoards(category: string): $CancellablePromise<$models.BoardIn
 }
 
 /**
+ * GetChanlunAnalysis 返回一只标的在指定级别的缠论标注数据包。
+ * 
+ * 返回结构里同时含：
+ *   - `Analysis`：**请求级别**的完整标注（分型/笔/线段/中枢/走势/背驰/买卖点）；
+ *   - `MultiLevel`：更高级别的印证结果（共振 / 区间套 / 大级别压制）。
+ */
+export function GetChanlunAnalysis(req: $models.ChanlunRequest): $CancellablePromise<chanlun$0.Bundle | null> {
+    return $Call.ByID(2872488999, req).then(($result: any) => {
+        return $$createType9($result);
+    });
+}
+
+/**
+ * GetChanlunConfig 读取缠论配置（从未保存过时返回引擎默认值）。
+ */
+export function GetChanlunConfig(): $CancellablePromise<$models.ChanlunConfigInfo> {
+    return $Call.ByID(668295627).then(($result: any) => {
+        return $$createType10($result);
+    });
+}
+
+/**
  * GetConfigPath 返回配置文件路径，供界面展示。
  */
 export function GetConfigPath(): $CancellablePromise<string> {
@@ -92,7 +117,7 @@ export function GetConfigPath(): $CancellablePromise<string> {
  */
 export function GetCurrentDataSource(): $CancellablePromise<$models.DataSourceInfo> {
     return $Call.ByID(214383254).then(($result: any) => {
-        return $$createType8($result);
+        return $$createType11($result);
     });
 }
 
@@ -101,7 +126,7 @@ export function GetCurrentDataSource(): $CancellablePromise<$models.DataSourceIn
  */
 export function GetDataLakeStatus(): $CancellablePromise<$models.DataLakeInfo | null> {
     return $Call.ByID(3218735771).then(($result: any) => {
-        return $$createType10($result);
+        return $$createType13($result);
     });
 }
 
@@ -110,7 +135,7 @@ export function GetDataLakeStatus(): $CancellablePromise<$models.DataLakeInfo | 
  */
 export function GetDataSources(): $CancellablePromise<$models.DataSourceInfo[]> {
     return $Call.ByID(1295824428).then(($result: any) => {
-        return $$createType11($result);
+        return $$createType14($result);
     });
 }
 
@@ -122,7 +147,7 @@ export function GetDataSources(): $CancellablePromise<$models.DataSourceInfo[]> 
  */
 export function GetFinanceSnapshot(code: string): $CancellablePromise<$models.FinanceSnapshot | null> {
     return $Call.ByID(1682549392, code).then(($result: any) => {
-        return $$createType13($result);
+        return $$createType16($result);
     });
 }
 
@@ -135,7 +160,7 @@ export function GetFinanceSnapshot(code: string): $CancellablePromise<$models.Fi
  */
 export function GetFinancialStatements(code: string, limit: number): $CancellablePromise<$models.FinancialStatements | null> {
     return $Call.ByID(4063169287, code, limit).then(($result: any) => {
-        return $$createType15($result);
+        return $$createType18($result);
     });
 }
 
@@ -144,7 +169,7 @@ export function GetFinancialStatements(code: string, limit: number): $Cancellabl
  */
 export function GetIndexValuation(code: string): $CancellablePromise<$models.IndexValuationResult | null> {
     return $Call.ByID(2872662045, code).then(($result: any) => {
-        return $$createType17($result);
+        return $$createType20($result);
     });
 }
 
@@ -153,7 +178,7 @@ export function GetIndexValuation(code: string): $CancellablePromise<$models.Ind
  */
 export function GetIndustryValuation(codeOrName: string): $CancellablePromise<$models.IndustryValuationDetail | null> {
     return $Call.ByID(2372833115, codeOrName).then(($result: any) => {
-        return $$createType19($result);
+        return $$createType22($result);
     });
 }
 
@@ -166,7 +191,7 @@ export function GetIndustryValuation(codeOrName: string): $CancellablePromise<$m
  */
 export function GetKline(code: string, adjust: string, startYear: number): $CancellablePromise<$models.KlineBundle | null> {
     return $Call.ByID(4230615817, code, adjust, startYear).then(($result: any) => {
-        return $$createType21($result);
+        return $$createType24($result);
     });
 }
 
@@ -175,7 +200,7 @@ export function GetKline(code: string, adjust: string, startYear: number): $Canc
  */
 export function GetKlinePrefs(): $CancellablePromise<$models.KlinePrefsInfo> {
     return $Call.ByID(3219711925).then(($result: any) => {
-        return $$createType22($result);
+        return $$createType25($result);
     });
 }
 
@@ -188,7 +213,7 @@ export function GetKlinePrefs(): $CancellablePromise<$models.KlinePrefsInfo> {
  */
 export function GetMarketTemperature(periodDays: number): $CancellablePromise<$models.MarketTemperatureResult | null> {
     return $Call.ByID(2090856712, periodDays).then(($result: any) => {
-        return $$createType24($result);
+        return $$createType27($result);
     });
 }
 
@@ -201,7 +226,7 @@ export function GetMarketTemperature(periodDays: number): $CancellablePromise<$m
  */
 export function GetNamePinyin(names: string[]): $CancellablePromise<{ [_ in string]?: $models.PinyinInfo }> {
     return $Call.ByID(199154296, names).then(($result: any) => {
-        return $$createType26($result);
+        return $$createType29($result);
     });
 }
 
@@ -210,7 +235,7 @@ export function GetNamePinyin(names: string[]): $CancellablePromise<{ [_ in stri
  */
 export function GetScreenCondition(): $CancellablePromise<$models.ScreenConditionInfo> {
     return $Call.ByID(3333010147).then(($result: any) => {
-        return $$createType27($result);
+        return $$createType30($result);
     });
 }
 
@@ -219,7 +244,7 @@ export function GetScreenCondition(): $CancellablePromise<$models.ScreenConditio
  */
 export function GetScreenOptions(): $CancellablePromise<$models.ScreenOptions | null> {
     return $Call.ByID(2659327240).then(($result: any) => {
-        return $$createType29($result);
+        return $$createType32($result);
     });
 }
 
@@ -228,7 +253,7 @@ export function GetScreenOptions(): $CancellablePromise<$models.ScreenOptions | 
  */
 export function GetStockUniverse(refresh: boolean): $CancellablePromise<$models.StockUniverse | null> {
     return $Call.ByID(2542377399, refresh).then(($result: any) => {
-        return $$createType31($result);
+        return $$createType34($result);
     });
 }
 
@@ -241,7 +266,7 @@ export function GetStockUniverse(refresh: boolean): $CancellablePromise<$models.
  */
 export function GetStockValuation(code: string): $CancellablePromise<$models.StockValuation | null> {
     return $Call.ByID(1676028323, code).then(($result: any) => {
-        return $$createType33($result);
+        return $$createType36($result);
     });
 }
 
@@ -250,7 +275,7 @@ export function GetStockValuation(code: string): $CancellablePromise<$models.Sto
  */
 export function GetValuationParams(): $CancellablePromise<$models.ValuationParamsInfo> {
     return $Call.ByID(1866242423).then(($result: any) => {
-        return $$createType34($result);
+        return $$createType37($result);
     });
 }
 
@@ -265,7 +290,7 @@ export function GetValuationParams(): $CancellablePromise<$models.ValuationParam
  */
 export function GetValuationReport(limit: number, refresh: boolean): $CancellablePromise<$models.ValuationReport | null> {
     return $Call.ByID(2806814735, limit, refresh).then(($result: any) => {
-        return $$createType36($result);
+        return $$createType39($result);
     });
 }
 
@@ -286,7 +311,25 @@ export function InvalidateDerivedCaches(): $CancellablePromise<void> {
  */
 export function ListValuationIndices(): $CancellablePromise<$models.ValuationIndexOption[]> {
     return $Call.ByID(189550398).then(($result: any) => {
-        return $$createType38($result);
+        return $$createType41($result);
+    });
+}
+
+/**
+ * ReplayChanlun 返回逐根推进的回放快照（无未来数据验证）。
+ */
+export function ReplayChanlun(req: $models.ChanlunRequest): $CancellablePromise<chanlun$0.Replay | null> {
+    return $Call.ByID(835238812, req).then(($result: any) => {
+        return $$createType43($result);
+    });
+}
+
+/**
+ * SaveChanlunConfig 保存缠论配置并返回落盘后的结果。
+ */
+export function SaveChanlunConfig(prefs: chanlun$0.Config): $CancellablePromise<$models.ChanlunConfigInfo> {
+    return $Call.ByID(699992368, prefs).then(($result: any) => {
+        return $$createType10($result);
     });
 }
 
@@ -295,7 +338,7 @@ export function ListValuationIndices(): $CancellablePromise<$models.ValuationInd
  */
 export function SaveKlinePrefs(prefs: config$0.KlinePrefs): $CancellablePromise<$models.KlinePrefsInfo> {
     return $Call.ByID(4212647476, prefs).then(($result: any) => {
-        return $$createType22($result);
+        return $$createType25($result);
     });
 }
 
@@ -320,7 +363,7 @@ export function ScreenCategories(): $CancellablePromise<$models.BoardCategoryInf
  */
 export function ScreenStocks(cond: $models.ScreenCondition): $CancellablePromise<$models.ScreenResult | null> {
     return $Call.ByID(2366312837, cond).then(($result: any) => {
-        return $$createType40($result);
+        return $$createType45($result);
     });
 }
 
@@ -333,7 +376,7 @@ export function ScreenStocks(cond: $models.ScreenCondition): $CancellablePromise
  */
 export function SearchStocks(keyword: string, limit: number): $CancellablePromise<$models.StockSearchItem[]> {
     return $Call.ByID(264754049, keyword, limit).then(($result: any) => {
-        return $$createType42($result);
+        return $$createType47($result);
     });
 }
 
@@ -342,7 +385,7 @@ export function SearchStocks(keyword: string, limit: number): $CancellablePromis
  */
 export function SetDataLakeRoot(root: string): $CancellablePromise<$models.DataLakeInfo | null> {
     return $Call.ByID(2665271557, root).then(($result: any) => {
-        return $$createType10($result);
+        return $$createType13($result);
     });
 }
 
@@ -351,7 +394,7 @@ export function SetDataLakeRoot(root: string): $CancellablePromise<$models.DataL
  */
 export function SetDataSource(kind: string, rawURL: string): $CancellablePromise<$models.SourceStatus> {
     return $Call.ByID(1745476251, kind, rawURL).then(($result: any) => {
-        return $$createType43($result);
+        return $$createType48($result);
     });
 }
 
@@ -361,7 +404,7 @@ export function SetDataSource(kind: string, rawURL: string): $CancellablePromise
  */
 export function TestDataSource(kind: string, rawURL: string): $CancellablePromise<$models.SourceStatus> {
     return $Call.ByID(2806700859, kind, rawURL).then(($result: any) => {
-        return $$createType43($result);
+        return $$createType48($result);
     });
 }
 
@@ -374,39 +417,44 @@ const $$createType4 = $models.BoardQuoteResult.createFrom;
 const $$createType5 = $Create.Nullable($$createType4);
 const $$createType6 = $models.BoardInfo.createFrom;
 const $$createType7 = $Create.Array($$createType6);
-const $$createType8 = $models.DataSourceInfo.createFrom;
-const $$createType9 = $models.DataLakeInfo.createFrom;
-const $$createType10 = $Create.Nullable($$createType9);
-const $$createType11 = $Create.Array($$createType8);
-const $$createType12 = $models.FinanceSnapshot.createFrom;
+const $$createType8 = chanlun$0.Bundle.createFrom;
+const $$createType9 = $Create.Nullable($$createType8);
+const $$createType10 = $models.ChanlunConfigInfo.createFrom;
+const $$createType11 = $models.DataSourceInfo.createFrom;
+const $$createType12 = $models.DataLakeInfo.createFrom;
 const $$createType13 = $Create.Nullable($$createType12);
-const $$createType14 = $models.FinancialStatements.createFrom;
-const $$createType15 = $Create.Nullable($$createType14);
-const $$createType16 = $models.IndexValuationResult.createFrom;
-const $$createType17 = $Create.Nullable($$createType16);
-const $$createType18 = $models.IndustryValuationDetail.createFrom;
-const $$createType19 = $Create.Nullable($$createType18);
-const $$createType20 = $models.KlineBundle.createFrom;
-const $$createType21 = $Create.Nullable($$createType20);
-const $$createType22 = $models.KlinePrefsInfo.createFrom;
-const $$createType23 = $models.MarketTemperatureResult.createFrom;
+const $$createType14 = $Create.Array($$createType11);
+const $$createType15 = $models.FinanceSnapshot.createFrom;
+const $$createType16 = $Create.Nullable($$createType15);
+const $$createType17 = $models.FinancialStatements.createFrom;
+const $$createType18 = $Create.Nullable($$createType17);
+const $$createType19 = $models.IndexValuationResult.createFrom;
+const $$createType20 = $Create.Nullable($$createType19);
+const $$createType21 = $models.IndustryValuationDetail.createFrom;
+const $$createType22 = $Create.Nullable($$createType21);
+const $$createType23 = $models.KlineBundle.createFrom;
 const $$createType24 = $Create.Nullable($$createType23);
-const $$createType25 = $models.PinyinInfo.createFrom;
-const $$createType26 = $Create.Map($Create.Any, $$createType25);
-const $$createType27 = $models.ScreenConditionInfo.createFrom;
-const $$createType28 = $models.ScreenOptions.createFrom;
-const $$createType29 = $Create.Nullable($$createType28);
-const $$createType30 = $models.StockUniverse.createFrom;
-const $$createType31 = $Create.Nullable($$createType30);
-const $$createType32 = $models.StockValuation.createFrom;
-const $$createType33 = $Create.Nullable($$createType32);
-const $$createType34 = $models.ValuationParamsInfo.createFrom;
-const $$createType35 = $models.ValuationReport.createFrom;
+const $$createType25 = $models.KlinePrefsInfo.createFrom;
+const $$createType26 = $models.MarketTemperatureResult.createFrom;
+const $$createType27 = $Create.Nullable($$createType26);
+const $$createType28 = $models.PinyinInfo.createFrom;
+const $$createType29 = $Create.Map($Create.Any, $$createType28);
+const $$createType30 = $models.ScreenConditionInfo.createFrom;
+const $$createType31 = $models.ScreenOptions.createFrom;
+const $$createType32 = $Create.Nullable($$createType31);
+const $$createType33 = $models.StockUniverse.createFrom;
+const $$createType34 = $Create.Nullable($$createType33);
+const $$createType35 = $models.StockValuation.createFrom;
 const $$createType36 = $Create.Nullable($$createType35);
-const $$createType37 = $models.ValuationIndexOption.createFrom;
-const $$createType38 = $Create.Array($$createType37);
-const $$createType39 = $models.ScreenResult.createFrom;
-const $$createType40 = $Create.Nullable($$createType39);
-const $$createType41 = $models.StockSearchItem.createFrom;
-const $$createType42 = $Create.Array($$createType41);
-const $$createType43 = $models.SourceStatus.createFrom;
+const $$createType37 = $models.ValuationParamsInfo.createFrom;
+const $$createType38 = $models.ValuationReport.createFrom;
+const $$createType39 = $Create.Nullable($$createType38);
+const $$createType40 = $models.ValuationIndexOption.createFrom;
+const $$createType41 = $Create.Array($$createType40);
+const $$createType42 = chanlun$0.Replay.createFrom;
+const $$createType43 = $Create.Nullable($$createType42);
+const $$createType44 = $models.ScreenResult.createFrom;
+const $$createType45 = $Create.Nullable($$createType44);
+const $$createType46 = $models.StockSearchItem.createFrom;
+const $$createType47 = $Create.Array($$createType46);
+const $$createType48 = $models.SourceStatus.createFrom;

@@ -448,10 +448,18 @@ func (s *StockService) GetKline(code, adjust string, startYear int) (*KlineBundl
 		return nil, fmt.Errorf("没有 %s 的日K数据，请确认数据源 %s 已完成同步", code, source.URL)
 	}
 
-	// 复权因子取不到时退化为不复权，不影响出图
+	// 复权因子只用于概要（股息率等）；K 线价格的复权走 AdjustQuotes，
+	// 由数据源按自己那份因子折算（数据湖用 meta/adj_factors_cache，stockdb 用复权表）。
 	factors, factorErr := provider.DividendFactors(ctx, code)
 	if factorErr != nil {
 		slog.Warn("读取复权/分红数据失败，按不复权处理", "code", code, "err", factorErr)
+	}
+
+	// ⚠ 复权只做一次：KlineHistory 给的是原始价，这里按用户选择折算。
+	adjusted, adjustErr := provider.AdjustQuotes(ctx, code, quotes, adjust)
+	if adjustErr != nil {
+		slog.Warn("复权折算失败，按不复权处理", "code", code, "err", adjustErr)
+		adjusted = quotes
 	}
 
 	latest := quotes[len(quotes)-1]
@@ -470,6 +478,15 @@ func (s *StockService) GetKline(code, adjust string, startYear int) (*KlineBundl
 	}
 	if factorErr != nil {
 		notes = append(notes, "未取到复权/分红数据，股息率与复权价格不可用。")
+	}
+	if adjustErr != nil {
+		notes = append(notes, "复权折算失败，K 线按不复权显示。")
+	}
+	switch adjust {
+	case "qfq":
+		notes = append(notes, "K 线为前复权价：最新一根等于原始成交价，历史价格已按分红送转折算。")
+	case "hfq":
+		notes = append(notes, "K 线为后复权价：历史价格连续，但数值高于原始成交价；概要栏为原始价。")
 	}
 
 	// 资金流（本机「资金流」表，缺失时忽略）。
@@ -507,7 +524,7 @@ func (s *StockService) GetKline(code, adjust string, startYear int) (*KlineBundl
 		Name:       latest.Name,
 		Adjust:     adjust,
 		Profile:    profile,
-		Candles:    adjustCandles(quotes, factors, adjust),
+		Candles:    candlesFromQuotes(adjusted),
 		Dividends:  factors,
 		MoneyFlows: moneyFlows,
 		Notes:      notes,
@@ -714,16 +731,18 @@ func indexDisplayName(symbol string) string {
 	return upper
 }
 
-// adjustCandles 按复权因子折算价格。算法与官方 Python SDK 保持一致：
-// 前复权 ratio = f最新 / f当期，后复权 ratio = 1 / f当期，价格 = 原价 / ratio。
-func adjustCandles(quotes []*stockdb.Quote, factors []stockdb.Factor, mode string) []KlineCandle {
-	out := make([]KlineCandle, 0, len(quotes))
-
-	if mode == "none" || len(factors) == 0 {
-		for _, q := range quotes {
-			out = append(out, candleOf(q, 1))
-		}
-		return out
+// adjustQuotes 按复权因子折算整条行情（只改 OHLC 与昨收），返回副本。
+//
+// 口径与官方 Python SDK 一致（`Cum` 是后复权因子 F）：
+//
+//	hfq: price = raw × F(t)
+//	qfq: price = raw × F(t) / F(latest)
+//
+// 所以前复权的最新一根恒等于原始价；后复权才可能明显高于原始价
+// （000969 的 F(latest)≈7.09，14.81 → 104.99 是后复权价，不是前复权）。
+func adjustQuotes(quotes []*stockdb.Quote, factors []stockdb.Factor, mode string) []*stockdb.Quote {
+	if mode == "none" || len(factors) == 0 || len(quotes) == 0 {
+		return quotes
 	}
 
 	latestFactor := factors[len(factors)-1].Cum
@@ -731,39 +750,56 @@ func adjustCandles(quotes []*stockdb.Quote, factors []stockdb.Factor, mode strin
 		latestFactor = 1
 	}
 
+	out := make([]*stockdb.Quote, len(quotes))
 	cursor := 0
-	for _, q := range quotes {
-		for cursor+1 < len(factors) && factors[cursor+1].Date <= q.Date {
+	for i, quote := range quotes {
+		for cursor+1 < len(factors) && factors[cursor+1].Date <= quote.Date {
 			cursor++
 		}
 		current := 1.0
-		if factors[cursor].Date <= q.Date && factors[cursor].Cum != 0 {
+		if factors[cursor].Date <= quote.Date && factors[cursor].Cum != 0 {
 			current = factors[cursor].Cum
 		}
-
-		ratio := latestFactor / current
+		scale := current / latestFactor // qfq
 		if mode == "hfq" {
-			ratio = 1 / current
+			scale = current
 		}
-		out = append(out, candleOf(q, ratio))
+
+		copied := *quote
+		if scale != 1 && scale > 0 {
+			copied.Open = round4(copied.Open * scale)
+			copied.High = round4(copied.High * scale)
+			copied.Low = round4(copied.Low * scale)
+			copied.Close = round4(copied.Close * scale)
+			if copied.PreClose > 0 {
+				copied.PreClose = round4(copied.PreClose * scale)
+			}
+		}
+		out[i] = &copied
 	}
 	return out
 }
 
-func candleOf(q *stockdb.Quote, ratio float64) KlineCandle {
-	if ratio == 0 {
-		ratio = 1
+// candlesFromQuotes 把行情转成绘图用的 K 线（不做复权，复权已在 AdjustQuotes 完成）。
+func candlesFromQuotes(quotes []*stockdb.Quote) []KlineCandle {
+	out := make([]KlineCandle, 0, len(quotes))
+	for _, quote := range quotes {
+		out = append(out, KlineCandle{
+			Date:   quote.Date,
+			Open:   round4(quote.Open),
+			High:   round4(quote.High),
+			Low:    round4(quote.Low),
+			Close:  round4(quote.Close),
+			Volume: quote.Volume,
+			Amount: quote.Amount,
+		})
 	}
-	round := func(v float64) float64 { return math.Round(v/ratio*10000) / 10000 }
-	return KlineCandle{
-		Date:   q.Date,
-		Open:   round(q.Open),
-		High:   round(q.High),
-		Low:    round(q.Low),
-		Close:  round(q.Close),
-		Volume: q.Volume,
-		Amount: q.Amount,
-	}
+	return out
+}
+
+// adjustCandles 保留给"只想拿蜡烛、不要完整行情"的场景（测试与旧调用）。
+func adjustCandles(quotes []*stockdb.Quote, factors []stockdb.Factor, mode string) []KlineCandle {
+	return candlesFromQuotes(adjustQuotes(quotes, factors, mode))
 }
 
 func buildProfile(code string, latest *stockdb.Quote, factors []stockdb.Factor, tradeDate int) StockProfile {

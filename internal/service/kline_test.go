@@ -207,6 +207,59 @@ func TestAdjustCandles(t *testing.T) {
 	}
 }
 
+// 回归：复权只能在出口做一次。
+//
+// 之前的 bug：数据湖的 KlineHistory 已按全局口径（默认 hfq）复权，
+// GetKline 又折算一次，于是"前复权"显示的是后复权价 ——
+// 000969 实际 14.81 显示成 104.99，600519 实际 1258 显示成 11804。
+func TestAdjustQuotesQfqAnchorsLatest(t *testing.T) {
+	quotes := []*stockdb.Quote{
+		{Date: 20240102, Open: 40, High: 41, Low: 39, Close: 40, PreClose: 40},
+		{Date: 20250102, Open: 20, High: 21, Low: 19, Close: 20, PreClose: 20},
+		{Date: 20260102, Open: 10, High: 11, Low: 9, Close: 10, PreClose: 10},
+	}
+	factors := []stockdb.Factor{
+		{Date: 20240102, Cum: 1},
+		{Date: 20250102, Cum: 2},
+		{Date: 20260102, Cum: 4},
+	}
+
+	none := adjustQuotes(quotes, factors, "none")
+	if none[0].Close != 40 || none[2].Close != 10 {
+		t.Fatalf("不复权不应改动价格：%v %v", none[0].Close, none[2].Close)
+	}
+
+	// 前复权：最新一根必须等于原始价（这条就是本次 bug 的判据）
+	qfq := adjustQuotes(quotes, factors, "qfq")
+	for i, want := range []float64{10, 10, 10} {
+		if qfq[i].Close != want {
+			t.Fatalf("前复权第 %d 根应为 %.2f，得到 %.4f", i, want, qfq[i].Close)
+		}
+	}
+	if qfq[2].Close != quotes[2].Close {
+		t.Fatalf("前复权最新一根必须等于原始价：原始 %.4f，得到 %.4f", quotes[2].Close, qfq[2].Close)
+	}
+	if qfq[0].PreClose != 10 {
+		t.Fatalf("昨收也要跟着折算：得到 %.4f", qfq[0].PreClose)
+	}
+
+	// 后复权：历史连续（保持同一水平），且高于原始价
+	hfq := adjustQuotes(quotes, factors, "hfq")
+	for i, want := range []float64{40, 40, 40} {
+		if hfq[i].Close != want {
+			t.Fatalf("后复权第 %d 根应为 %.2f，得到 %.4f", i, want, hfq[i].Close)
+		}
+	}
+	if hfq[2].Close <= quotes[2].Close {
+		t.Fatalf("后复权应高于原始价：原始 %.4f，得到 %.4f", quotes[2].Close, hfq[2].Close)
+	}
+
+	// 纯函数：不能改写入参（调用方可能复用同一份行情）
+	if quotes[0].Close != 40 {
+		t.Fatalf("adjustQuotes 修改了入参：%.4f", quotes[0].Close)
+	}
+}
+
 func TestAdjustCandlesWithoutFactors(t *testing.T) {
 	quotes := []*stockdb.Quote{{Date: 20240102, Open: 10, High: 11, Low: 9, Close: 10}}
 	out := adjustCandles(quotes, nil, "qfq")

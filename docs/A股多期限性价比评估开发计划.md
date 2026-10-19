@@ -1021,6 +1021,244 @@ go test ./internal/valuation/
 # 真实数据端到端（数据湖不可用时自动 skip）
 go test ./internal/service/ -run TestValuation -v -timeout 40m
 
+# 缓存失效链路（用合成湖，不需要真实数据湖）
+go test ./internal/service/ -run 'TestInvalidate|TestOnFinishPath|TestKlineSeesNewTradingDay' -v
+
+# 前端
+cd frontend
+pnpm test tests/valuation.spec.ts
+pnpm run typecheck
+```
+
+---
+
+## 九、"更新结束后显式失效"那条链路（复查 + 补一个真缺口）
+
+> 用户追问：「cne 更新结束时还会显式清一次让"最新"即时到位，这个你是怎么改的，
+> cne 升级了会不会就没用了」
+
+### 9.1 这条链路是怎么接的
+
+```
+cne 进程退出（cmd.Wait() 返回）
+  → internal/cne/runner.go：go func(){ ...; onFinish(job, waitErr) }()
+  → internal/service/cneupdate.go：notifyDataChanged → s.onDataChanged()
+  → main.go:133：cneUpdateService.SetOnDataChanged(stockService.InvalidateDerivedCaches)
+  → internal/service/stock.go：lakeProvider.InvalidateSymbolBars()
+                              + lake.lake.InvalidateDatasetFiles()
+                              + s.invalidateValuationCache()
+```
+
+### 9.2 cne 升级会不会让它失效 —— **不会**
+
+`runner.go` 里那句是关键：
+
+```go
+close(job.done)
+slog.Info("cne 数据更新结束", "kind", kind, "err", waitErr, ...)
+if onFinish != nil {
+    onFinish(job, waitErr)          // ← 无条件，只看 cmd.Wait() 的返回
+}
+```
+
+- **不解析 cne 的 stdout**：全项目没有 `StdoutPipe` / `Scanner` / 对 cne 输出的
+  `json.Unmarshal`（已核实）。回调的触发条件只是"进程退出了"，
+  与 cne 打印什么、加了什么子命令、退出码是 0 还是非 0 **都无关**。
+  非 0 退出也照样回调 —— 这是刻意的：进程失败也可能已经落了一部分数据。
+- **不做版本校验**：唯一与版本相关的假设是"子命令的名字"（`daily` / `backfill`
+  之类，见 `runner.go` 的 `args` 组装）。如果新版把子命令改名，
+  受影响的会是"**发起更新**"这一步（cne 会报未知子命令而失败），
+  但"**更新结束就清缓存**"这一步会照常执行 —— 因为它在 `cmd.Wait()` 之后。
+- **回调里没有一步依赖 cne 的产物布局**：`InvalidateSymbolBars` /
+  `InvalidateDatasetFiles` / `invalidateValuationCache` 都只是丢缓存。
+
+**真正会因升级**受影响的是这三处（都不是这条回调）：
+
+| 升级情形 | 后果 | 严重度 |
+|---|---|---|
+| 可执行文件换路径（如 `cne.exe` 搬家） | `runner.executable()` 的兜底硬编码了 `D:\softInstal\python3.11.3\Scripts\cne.exe`；找不到就报"请在设置里指定 CNEPath" | 中，**报错可见**，不会静默 |
+| 换数据湖根目录 | `s.lake` 在 `lakeHandle()` 里**首次使用时缓存**，跑到一半指向旧根 | 需换源或重启，属既有行为 |
+| 改分区命名（`trade_date=YYYY-MM-DD` → 月分区） | `DateFromTradeDateName` 解析不出日期会退化成"读内容拿日期清单"，**慢但仍正确** | 低，不静默 |
+
+### 9.3 但复查时发现**一个真缺口**（已修）
+
+我原先把 `InvalidateDatasetFiles()` 加进回调时，**只清了 `files` 缓存，
+没清 `barDates` 缓存**：
+
+```go
+// 修前
+func (l *Lake) InvalidateDatasetFiles() {
+    l.files = map[string][]string{}      // DatasetFiles：有哪些 parquet 文件
+    l.filesAt = ...
+    l.filesSeen = ...
+    // ← barDates / barDatesLoaded / barDatesDirMod 没动
+}
+```
+
+而"最新交易日"走的是**另一份缓存**：
+
+```
+LatestTradeDate / LatestPartitionDate
+  → BarPartitionDates  → l.barDates（独立缓存、独立的锁）
+```
+
+后果：文件列表刷新了、**分区日期还是旧的** → `symbolCacheState` 的
+`covered = (SourceThrough >= lakeLatestDate)` 继续成立 → K 线继续读缓存。
+也就是说，我当时说的"更新一结束就让最新即时到位"**只兑现了一半**。
+
+**为什么没被发现**：`BarPartitionDates` 有自己的目录 mtime 探测（第六轮加的），
+所以它**顺带**把新分区发现了 —— 缺口被另一条机制掩盖着。
+这类"两条机制互相兜底"的情况最危险：任何一条被改动，另一条就暴露成 bug。
+
+**修法**：`InvalidateDatasetFiles` 同时清两份缓存（用各自的锁，不嵌套持锁）。
+
+**验证方式（先证明缺口是真的，再证明修好了）**：
+
+1. 关掉 `BarPartitionDates` 的 mtime 探测（临时改成 `&& true`），
+   模拟"只剩显式失效这一条路" → `TestInvalidateDatasetFilesAlsoClearsBarDates`
+   与 `TestOnFinishPathInvalidatesEverything` **两条都失败**，打印出
+   `分区水位应为 20261016，实际 20261015`；
+2. 修 `InvalidateDatasetFiles` → 在探测仍然关闭的情况下两条**都通过**
+   （说明显式失效这条路现在自己是完整的，不再靠探测兜底）；
+3. 恢复探测 → 两条仍通过（两条机制并存）。
+
+### 9.4 新增的两条用例
+
+| 用例 | 钉住什么 |
+|---|---|
+| `TestInvalidateDatasetFilesAlsoClearsBarDates` | 显式失效必须同时清掉文件列表与分区日期两份缓存 |
+| `TestOnFinishPathInvalidatesEverything` | 走**真实回调链路**（配置数据源 → `InvalidateDerivedCaches`），新增分区后服务层立刻看到新交易日 |
+
+第二条的意义：第一条测的是 `InvalidateDatasetFiles` 自身，
+第二条测的是"main.go 接的那根线"是否真的把该清的都清了 ——
+将来若有人往回调链上插一段逻辑，第二条会挡住。
+
+---
+go test ./internal/valuation/
+
+# 真实数据端到端（数据湖不可用时自动 skip）
+go test ./internal/service/ -run TestValuation -v -timeout 40m
+
+# 前端
+cd frontend
+pnpm test tests/valuation.spec.ts
+pnpm run typecheck
+```
+
+---
+
+## 八、目标倍数脱离市场（第七轮修正）
+
+> 用户反馈：「安泰科技、昊华科技、中瓷电子、鼎龙股份这些股票都不错，
+> 但在这个功能里评分都不高，甚至很低。」
+
+### 8.1 先把"为什么低"量化出来，而不是猜
+
+四只票全部命中 `method_conflict`（方法冲突），而冲突的一方**永远是 PB 法**。
+于是拉全市场量化（`TestDiagnoseMethodConflictPattern`，市值前 400）：
+
+```
+样本 338 只，命中方法冲突 229 只（68%）
+冲突时最低的方法是：PB 138 只 / EV-EBITDA 90 只 / PE 0 只 / PS 1 只
+PB 法相对 PE 法的估值折价：中位 −45%（P25 −53%，P75 −39%）
+```
+
+**PE 从不做最低方，PB 从不做最高方** —— 一边倒的分布不可能是"市场分歧"，
+只能是模型偏了。命中冲突的代价是双重的：
+
+```
+命中冲突 → 置信度扣 20 分 → 压到 44~45 分
+   ├─ 触发 data_quality 风险 → 评级封顶
+   └─ 数据质量乘子降到 0.78  → 综合分再乘一次
+```
+
+安泰科技原始分 55.2 → 综合分 43.1（poor），那 12 分差就是乘子。
+
+### 8.2 已修：目标倍数锚定市场实际水平
+
+**症状**（修前实测）：
+
+```
+平安银行  市场 PE 5.1 倍  → 模型目标 PE 20.7 倍（推 278% 上行空间）
+招商银行  市场 PE 7.1 倍  → 模型目标 PE 23.6 倍（推 232%）
+工商银行  市场 PE 8.1 倍  → 模型目标 PE 25.0 倍（推 205%）
+贵州茅台  市场 PE 20.2 倍 → 模型目标 PE 24.4 倍
+```
+
+银行与茅台的目标 PE 只差 3.7 倍，而市场给它们的估值差 4 倍以上。
+根因：`fairPE = 8 + 22 × 位置` 里的"位置"来自**公司相对同行的成长/质量分位** ——
+那是**相对**分数，却被当成**绝对**倍数用。一家在银行里质量分很高的银行
+（工商银行质量分 90）于是拿到了 25 倍目标 PE。
+
+**修法**：
+
+```
+合理 PE = 市场锚 × (1 + 基本面调整)，调整夹在 ±25% 内
+市场锚 = 行业 PE 中位数（行业成分不足时用全市场 PE 中位数）
+```
+
+成长与质量只决定"相对同行该溢价还是折价"，不再决定绝对倍数。
+
+**修后实测**：
+
+```
+平安银行  5.1 倍市场 → 目标 5.73 倍（高于行业中位 4%）  合理价值 11.91（现价 11.41）
+招商银行  7.1 倍市场 → 目标 6.09 倍（高于行业中位 11%） 合理价值 36.46（现价 42.66）
+工商银行  8.1 倍市场 → 目标 9.44 倍（高于行业中位 14%） 合理价值  9.80（现价  8.50）
+贵州茅台 20.2 倍市场 → 目标 27.34 倍                    ── 明显高于银行，区分能力回来了
+```
+
+同时把目标倍数的**硬上限 40 倍改成"相对锚的 2 倍"**：高估值行业
+（半导体设备 PE 中位 60~80 倍）里的公司原本会被夹到 40 倍，于是
+"模型 40 倍 vs 市场 68 倍"被判成方法冲突 —— 那只是上限太低，不是估值分歧。
+
+顺带修掉一个真 bug：`FairValueInput.IndustryAvailable` 与 `PEAnchor` 原先
+只在 `ApplyIndustryEnvironment` 里被设置，而首轮 `EvaluateFairValue`（服务层
+`evaluateOneStock`）没设 —— engine 于是在**首轮**永远加 10 分
+"行业聚合不可用"扣分。现在合理价值统一在拿到行业聚合之后算
+（`service.evaluateFairValues`），锚与可用性一次到位。
+
+### 8.3 **未修**：PB 法对轻资产成长股不适用（冲突率 68% → 66%）
+
+目标倍数修好了，但**冲突率几乎没动**（68% → 66%）。如实记录原因：
+
+PB-ROE 是**稳态框架**：`合理 PB = (ROE − g) ÷ (WACC − g)`。
+它无法为"价值来自未来盈利、净资产很薄"的轻资产成长股定价。实测：
+
+```
+鼎龙股份  TTM ROE 17.0% → 模型认定稳态 ROE 15.9%（**数据是对的**）
+          模型给合理 PB 2.43 倍，市场给 9.31 倍
+中瓷电子  市场 PB 6.82 倍 → 模型合理 PB 1.37 倍
+```
+
+稳态 ROE 与当期 ROE 一致，说明**不是数据错误**。是公式里只有稳态、
+没有成长 —— 市场的钱买的是未来增长。于是 PB 恒定给出远低的值，
+被当成"方法冲突"。
+
+⚠ 需要说明的是：**模型说这几只票贵，这个判断本身可能是对的**。
+中瓷电子 PE 68 倍、鼎龙股份 58.6 倍，模型估出的合理价值分别低于现价
+（−69.9% / −46.5%）。这是估值结论，不该为了让评分好看而改掉。
+
+真正该改的是**"冲突"的口径**：PB 与 PE 对轻资产公司衡量的不是同一件事，
+把它们的差异当成"估值分歧"并倒扣 20 分置信度，会让 66% 的标的都背上
+这个惩罚，于是这个惩罚失去区分力。
+
+可选方案（属于产品判断，未实施）：
+
+1. 轻资产高 PB 公司（如 P/B > 5）**不让 PB 法参与冲突判定**，但仍在
+   方法明细里展示（它仍能提示"市场给了远超稳态 ROE 的溢价"）。
+2. 冲突惩罚改为**分段**：分歧越大扣分越多，而不是一超阈值就固定扣 20 分。
+3. 数据质量的"封顶"与"乘子"去掉一个（现在两处都在扣，等于罚两次）。
+
+`TestConflictRateAndUserStocks` 现在是一道**防回退宽闸门**（>80% 才算跑偏），
+而不是"已修好"的断言 —— 阈值没有调到刚好通过。
+
+---
+go test ./internal/valuation/
+
+# 真实数据端到端（数据湖不可用时自动 skip）
+go test ./internal/service/ -run TestValuation -v -timeout 40m
+
 # 前端
 cd frontend
 pnpm test tests/valuation.spec.ts

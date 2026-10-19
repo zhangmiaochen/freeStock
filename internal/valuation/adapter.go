@@ -136,9 +136,12 @@ func ApplyIndustryEnvironment(previous FairValue, company CompanyValuation, asOf
 		Quality:           quality,
 		Industry:          industry,
 		IndustryAvailable: industry.Available,
-		Horizon:           horizon,
-		Params:            params,
-		PriceSeries:       series,
+		// 市场 PE 锚：行业 PE 中位数。行业成分不足时为 0，
+		// 由调用方在传入前回落到全市场中位数（见 service 侧的 peAnchor）。
+		PEAnchor:    industry.MedianPE,
+		Horizon:     horizon,
+		Params:      params,
+		PriceSeries: series,
 	})
 }
 

@@ -59,6 +59,13 @@ type Provider interface {
 	// 实测第一次打开 K 线 11.9 秒、堆峰值 1.5GB。
 	// 单只全历史另有"按股票"派生缓存，实测 ~2ms 且不占常驻内存。
 	KlineHistory(ctx context.Context, code string, start, end int) ([]*stockdb.Quote, error)
+	// AdjustQuotes 按复权方式（none / qfq / hfq）折算**原始**行情，只改 OHLC 与昨收。
+	//
+	// 复权只能在**出口**做一次：KlineHistory 返回原始价，K 线页按用户选择的
+	// 前复权/后复权/不复权在这里折算。以前数据湖的 KlineHistory 自己按全局
+	// 口径（默认 hfq）复权过一次，GetKline 又折算一次，结果"前复权"显示的是
+	// 后复权价（000969 实际 14.81 显示成 104.99，600519 实际 1258 显示成 11804）。
+	AdjustQuotes(ctx context.Context, code string, quotes []*stockdb.Quote, mode string) ([]*stockdb.Quote, error)
 	// DailyBars 只取 OHLCV（评分算指标只需要这些）。
 	//
 	// **为什么要单独一条路径**：`DailyHistory` 会为**每一根 K 线**组装完整的
@@ -214,6 +221,15 @@ func (p *stockdbProvider) DailyHistory(ctx context.Context, code string, start, 
 // 它是服务端按代码查的键查询，本来就不存在"扫全表"的问题。
 func (p *stockdbProvider) KlineHistory(ctx context.Context, code string, start, end int) ([]*stockdb.Quote, error) {
 	return p.client.DailyHistory(ctx, code, start, end)
+}
+
+// AdjustQuotes 用 free-stockdb 的复权表折算（Cum 即后复权因子）。
+func (p *stockdbProvider) AdjustQuotes(ctx context.Context, code string, quotes []*stockdb.Quote, mode string) ([]*stockdb.Quote, error) {
+	factors, err := p.DividendFactors(ctx, code)
+	if err != nil {
+		return nil, err
+	}
+	return adjustQuotes(quotes, factors, mode), nil
 }
 
 // TradingDates 用两只"从不停牌"的活跃股票推断交易日历。
@@ -932,7 +948,41 @@ func (p *lakeProvider) KlineHistory(ctx context.Context, code string, start, end
 			return nil, fmt.Errorf("读取数据湖 daily_bars 失败：%w", err)
 		}
 	}
-	return p.assembleQuotes(code, p.adjustBars(cnlake.BareSymbol(code), bars), start, end, false), nil
+	// ⚠ 这里**必须返回原始价**：K 线页支持用户切换前复权/后复权/不复权，
+	// 复权统一在 `AdjustQuotes` 里按请求做一次。以前在这里按全局口径
+	// （默认 hfq）复权，GetKline 又折算一次，导致"前复权"显示成后复权价。
+	return p.assembleQuotes(code, bars, start, end, false), nil
+}
+
+// AdjustQuotes 用数据湖的复权因子（`meta/adj_factors_cache` 的 hfq 阶梯）折算。
+//
+// 因子文件缺失时 `AdjScale` 返回 1，等价于不复权 —— 与既有约定一致。
+func (p *lakeProvider) AdjustQuotes(ctx context.Context, code string, quotes []*stockdb.Quote, mode string) ([]*stockdb.Quote, error) {
+	if p.lake == nil || len(quotes) == 0 {
+		return quotes, nil
+	}
+	adj := cnlake.ParseAdjMode(mode)
+	if adj == cnlake.AdjNone {
+		return quotes, nil
+	}
+
+	out := make([]*stockdb.Quote, len(quotes))
+	bare := cnlake.BareSymbol(code)
+	for i, quote := range quotes {
+		copied := *quote
+		scale := p.lake.AdjScale(bare, int64(quote.Date), adj)
+		if scale > 0 && scale != 1 {
+			copied.Open = round4(copied.Open * scale)
+			copied.High = round4(copied.High * scale)
+			copied.Low = round4(copied.Low * scale)
+			copied.Close = round4(copied.Close * scale)
+			if copied.PreClose > 0 {
+				copied.PreClose = round4(copied.PreClose * scale)
+			}
+		}
+		out[i] = &copied
+	}
+	return out, nil
 }
 
 // TradingDates 直接读数据湖的日分区目录名（`trade_date=2026-10-09`）。

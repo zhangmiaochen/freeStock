@@ -12,7 +12,12 @@ import BoardConditionEditor from "@/components/screener/BoardConditionEditor.vue
 import RangeField from "@/components/screener/RangeField.vue";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import type { BoardFilter, ScreenCondition, ScreenOptions } from "@/lib/backend";
+import type {
+  BoardFilter,
+  ChanlunScreenCondition,
+  ScreenCondition,
+  ScreenOptions,
+} from "@/lib/backend";
 import { cn } from "@/lib/utils";
 
 const props = defineProps<{
@@ -22,7 +27,58 @@ const props = defineProps<{
 const emit = defineEmits<{ "update:condition": [ScreenCondition] }>();
 
 /** 分组折叠状态 */
-const open = ref({ date: true, snapshot: true, lake: true, board: true, tech: false, unsupported: false });
+const open = ref({
+  date: true,
+  snapshot: true,
+  lake: true,
+  board: true,
+  tech: false,
+  chanlun: false,
+  unsupported: false,
+});
+
+/** 缠论条件的兜底值：老配置 / 测试夹具里可能没有 chanlun 字段 */
+const CHANLUN_FALLBACK: ChanlunScreenCondition = {
+  enable: false,
+  operLevel: "day",
+  minScore: 0,
+  types: [],
+  states: [],
+  trends: [],
+  requirePivot: false,
+  requireDivergence: false,
+  allowCandidate: true,
+  confirmedOnly: false,
+  excludeConflict: false,
+  multiResonance: false,
+  minAdaptability: 0,
+  lookbackDays: 500,
+} as ChanlunScreenCondition;
+
+const chanlun = computed<ChanlunScreenCondition>(
+  () => props.condition.chanlun ?? CHANLUN_FALLBACK,
+);
+
+/** 缠论买卖点类型 / 信号状态 / 走势状态的可选项（与后端字符串一一对应） */
+const CHANLUN_TYPES = [
+  { key: "buy1", label: "一买" },
+  { key: "buy2", label: "二买" },
+  { key: "buy3", label: "三买" },
+  { key: "sell1", label: "一卖" },
+  { key: "sell2", label: "二卖" },
+  { key: "sell3", label: "三卖" },
+];
+const CHANLUN_STATES = [
+  { key: "candidate", label: "候选" },
+  { key: "triggered", label: "触发" },
+  { key: "confirmed", label: "确认" },
+];
+const CHANLUN_TRENDS = [
+  { key: "down", label: "下跌趋势" },
+  { key: "up", label: "上涨趋势" },
+  { key: "consolidation", label: "盘整" },
+  { key: "none", label: "无中枢" },
+];
 
 /**
  * 数据湖条件的数据集可用性。
@@ -48,6 +104,17 @@ function lakeDataset(name: string): string {
 
 function patch(part: Partial<ScreenCondition>) {
   emit("update:condition", { ...props.condition, ...part });
+}
+
+/** 更新缠论筛选条件（嵌套对象，不能直接整份替换） */
+function patchChanlun(part: Partial<ChanlunScreenCondition>) {
+  patch({ chanlun: { ...chanlun.value, ...part } } as Partial<ScreenCondition>);
+}
+
+/** 多选列表的「点一下切换」 */
+function toggleList(list: string[] | undefined, value: string): string[] {
+  const current = list ?? [];
+  return current.includes(value) ? current.filter((item) => item !== value) : [...current, value];
 }
 
 // ---- 交易日 ----
@@ -570,6 +637,248 @@ function fromDateInput(value: string): number {
             @update:model-value="(v) => patch({ minDrawdown: v[0], maxDrawdown: v[1] })"
           />
         </div>
+      </div>
+    </section>
+
+    <!-- ============ 缠论筛选（最后一层） ============ -->
+    <section class="bg-card rounded-lg border">
+      <button
+        type="button"
+        class="flex w-full items-center gap-2 px-3 py-2"
+        @click="open.chanlun = !open.chanlun"
+      >
+        <ChevronDown :class="cn('size-3.5 transition-transform', !open.chanlun && '-rotate-90')" />
+        <span class="text-sm font-medium">缠论筛选</span>
+        <Badge variant="outline" class="text-[10px]">最后一层</Badge>
+        <Badge v-if="chanlun.enable" variant="default" class="text-[10px]">已启用</Badge>
+      </button>
+
+      <div v-if="open.chanlun" class="space-y-3 border-t px-3 py-2">
+        <p class="text-muted-foreground text-[11px] leading-relaxed">
+          启用后，<b class="text-foreground">所有已有条件执行完成</b>才对候选股票做缠论筛选；
+          <b class="text-foreground">关闭时原流程完全不变</b>，也不会调用缠论模块。
+          缠论不会改变任何已有条件的语义，只做过滤与排序。
+        </p>
+
+        <label class="flex items-center gap-2 text-xs">
+          <input
+            type="checkbox"
+            class="accent-primary size-3.5"
+            :checked="chanlun.enable"
+            @change="patchChanlun({ enable: ($event.target as HTMLInputElement).checked })"
+          />
+          <b>启用缠论筛选</b>
+        </label>
+
+        <template v-if="chanlun.enable">
+          <!-- 操作级别 -->
+          <div>
+            <p class="text-muted-foreground mb-1 text-[11px]">
+              操作级别　<span class="opacity-70">每个级别独立画线，买卖点也在该级别判断</span>
+            </p>
+            <div class="flex flex-wrap gap-1">
+              <button
+                v-for="level in options?.chanlunLevels ?? []"
+                :key="level.key"
+                type="button"
+                class="rounded border px-1.5 py-0.5 text-[11px]"
+                :class="
+                  chanlun.operLevel === level.key
+                    ? 'bg-primary text-primary-foreground border-primary'
+                    : 'hover:bg-muted/50'
+                "
+                @click="patchChanlun({ operLevel: level.key })"
+              >
+                {{ level.name }}
+              </button>
+            </div>
+          </div>
+
+          <!-- 买卖点类型 -->
+          <div>
+            <p class="text-muted-foreground mb-1 text-[11px]">
+              买卖点类型　<span class="opacity-70">不选表示不限（只按走势状态 / 中枢 / 背驰筛）</span>
+            </p>
+            <div class="flex flex-wrap gap-1">
+              <button
+                v-for="item in CHANLUN_TYPES"
+                :key="item.key"
+                type="button"
+                class="rounded border px-1.5 py-0.5 text-[11px]"
+                :class="
+                  chanlun.types.includes(item.key)
+                    ? 'bg-primary text-primary-foreground border-primary'
+                    : 'hover:bg-muted/50'
+                "
+                @click="patchChanlun({ types: toggleList(chanlun.types, item.key) })"
+              >
+                {{ item.label }}
+              </button>
+            </div>
+          </div>
+
+          <!-- 信号状态 -->
+          <div>
+            <p class="text-muted-foreground mb-1 text-[11px]">信号状态</p>
+            <div class="flex flex-wrap gap-1">
+              <button
+                v-for="item in CHANLUN_STATES"
+                :key="item.key"
+                type="button"
+                class="rounded border px-1.5 py-0.5 text-[11px]"
+                :class="
+                  chanlun.states.includes(item.key)
+                    ? 'bg-primary text-primary-foreground border-primary'
+                    : 'hover:bg-muted/50'
+                "
+                @click="patchChanlun({ states: toggleList(chanlun.states, item.key) })"
+              >
+                {{ item.label }}
+              </button>
+            </div>
+          </div>
+
+          <!-- 走势状态 -->
+          <div>
+            <p class="text-muted-foreground mb-1 text-[11px]">当前走势状态</p>
+            <div class="flex flex-wrap gap-1">
+              <button
+                v-for="item in CHANLUN_TRENDS"
+                :key="item.key"
+                type="button"
+                class="rounded border px-1.5 py-0.5 text-[11px]"
+                :class="
+                  chanlun.trends.includes(item.key)
+                    ? 'bg-primary text-primary-foreground border-primary'
+                    : 'hover:bg-muted/50'
+                "
+                @click="patchChanlun({ trends: toggleList(chanlun.trends, item.key) })"
+              >
+                {{ item.label }}
+              </button>
+            </div>
+          </div>
+
+          <!-- 结构开关 -->
+          <div class="space-y-1.5">
+            <label class="flex items-center gap-2 text-xs">
+              <input
+                type="checkbox"
+                class="accent-primary size-3.5"
+                :checked="chanlun.requirePivot"
+                @change="patchChanlun({ requirePivot: ($event.target as HTMLInputElement).checked })"
+              />
+              要求已有中枢（无中枢视为走势未完成）
+            </label>
+            <label class="flex items-center gap-2 text-xs">
+              <input
+                type="checkbox"
+                class="accent-primary size-3.5"
+                :checked="chanlun.requireDivergence"
+                @change="
+                  patchChanlun({ requireDivergence: ($event.target as HTMLInputElement).checked })
+                "
+              />
+              要求出现背驰（趋势背驰 / 盘整背驰）
+            </label>
+            <label class="flex items-center gap-2 text-xs">
+              <input
+                type="checkbox"
+                class="accent-primary size-3.5"
+                :checked="chanlun.allowCandidate"
+                @change="
+                  patchChanlun({ allowCandidate: ($event.target as HTMLInputElement).checked })
+                "
+              />
+              允许候选信号（不勾则只看触发 / 确认）
+            </label>
+            <label class="flex items-center gap-2 text-xs">
+              <input
+                type="checkbox"
+                class="accent-primary size-3.5"
+                :checked="chanlun.confirmedOnly"
+                @change="
+                  patchChanlun({ confirmedOnly: ($event.target as HTMLInputElement).checked })
+                "
+              />
+              只看已确认信号
+            </label>
+            <label class="flex items-center gap-2 text-xs">
+              <input
+                type="checkbox"
+                class="accent-primary size-3.5"
+                :checked="chanlun.excludeConflict"
+                @change="
+                  patchChanlun({ excludeConflict: ($event.target as HTMLInputElement).checked })
+                "
+              />
+              排除结构矛盾（同级别买卖点冲突）
+            </label>
+            <label class="flex items-center gap-2 text-xs">
+              <input
+                type="checkbox"
+                class="accent-primary size-3.5"
+                :checked="chanlun.multiResonance"
+                @change="
+                  patchChanlun({ multiResonance: ($event.target as HTMLInputElement).checked })
+                "
+              />
+              要求多级别共振（需要多算一个级别，较慢）
+            </label>
+          </div>
+
+          <!-- 阈值 -->
+          <div class="space-y-1">
+            <div class="flex items-center gap-2">
+              <span class="w-24 shrink-0 text-xs">综合分 ≥</span>
+              <input
+                class="tabular bg-background h-6 w-16 rounded border px-1.5 text-xs outline-none"
+                :value="chanlun.minScore || ''"
+                placeholder="0"
+                inputmode="decimal"
+                @change="
+                  patchChanlun({ minScore: Number(($event.target as HTMLInputElement).value) || 0 })
+                "
+              />
+              <span class="text-muted-foreground text-[11px]">0 = 不限</span>
+            </div>
+            <div class="flex items-center gap-2">
+              <span class="w-24 shrink-0 text-xs">适配性 ≥</span>
+              <input
+                class="tabular bg-background h-6 w-16 rounded border px-1.5 text-xs outline-none"
+                :value="chanlun.minAdaptability || ''"
+                placeholder="0"
+                inputmode="decimal"
+                @change="
+                  patchChanlun({
+                    minAdaptability: Number(($event.target as HTMLInputElement).value) || 0,
+                  })
+                "
+              />
+              <span class="text-muted-foreground text-[11px]">0 = 不限</span>
+            </div>
+            <div class="flex items-center gap-2">
+              <span class="w-24 shrink-0 text-xs">分析窗口</span>
+              <input
+                class="tabular bg-background h-6 w-16 rounded border px-1.5 text-xs outline-none"
+                :value="chanlun.lookbackDays || ''"
+                placeholder="500"
+                inputmode="numeric"
+                @change="
+                  patchChanlun({
+                    lookbackDays: Number(($event.target as HTMLInputElement).value) || 0,
+                  })
+                "
+              />
+              <span class="text-muted-foreground text-[11px]">根日 K</span>
+            </div>
+          </div>
+
+          <p class="text-muted-foreground text-[11px] leading-relaxed">
+            只有日 K 数据时，最小级别是日线笔，区间套只能在日线内部做，精度有限；
+            买卖点仅作参考，不构成投资建议。
+          </p>
+        </template>
       </div>
     </section>
 

@@ -22,6 +22,7 @@ import {
   api,
   errorMessage,
   onScreenProgress,
+  type ChanlunScreenCondition,
   type ScanProgress,
   type ScreenCondition,
   type ScreenItem,
@@ -38,6 +39,26 @@ const loading = ref(false);
 const error = ref("");
 const progress = ref<ScanProgress | null>(null);
 const conditionSaved = ref(false);
+
+function emptyChanlunCondition(): ChanlunScreenCondition {
+  // 开关默认关闭：缠论是最后一层额外计算，不能悄悄改变原有筛选结果
+  return {
+    enable: false,
+    operLevel: "day",
+    minScore: 0,
+    types: [],
+    states: [],
+    trends: [],
+    requirePivot: false,
+    requireDivergence: false,
+    allowCandidate: true,
+    confirmedOnly: false,
+    excludeConflict: false,
+    multiResonance: false,
+    minAdaptability: 0,
+    lookbackDays: 500,
+  } as ChanlunScreenCondition;
+}
 
 function emptyCondition(): ScreenCondition {
   return {
@@ -68,6 +89,8 @@ function emptyCondition(): ScreenCondition {
     limit: 0,
     // 0 = 用最新交易日
     tradeDate: 0,
+    // 缠论筛选（最后一层）
+    chanlun: emptyChanlunCondition(),
   } as ScreenCondition;
 }
 
@@ -93,6 +116,8 @@ const activeCount = computed(() => {
   if (c.minInstitution !== 0 || c.maxInstitution !== 0) count++;
   if (c.minQuarterGrowth !== 0) count++;
   if (c.enableRelativeStrength) count++;
+  // 缠论是最后一层，启用时也算一项条件
+  if (c.chanlun?.enable) count++;
   return count;
 });
 
@@ -225,7 +250,13 @@ onBeforeUnmount(() => {
         <div class="flex items-center gap-2">
           <LoaderCircle class="size-3.5 animate-spin" />
           <span>
-            {{ progress.phase === "history" ? "正在拉取日线并计算技术条件" : "筛选中" }}
+            {{
+              progress.phase === "history"
+                ? "正在拉取日线并计算技术条件"
+                : progress.phase === "chanlun"
+                  ? "正在计算缠论结构（最后一层）"
+                  : "筛选中"
+            }}
           </span>
           <span class="tabular text-muted-foreground">
             {{ progress.done }} / {{ progress.total }}
@@ -268,6 +299,9 @@ onBeforeUnmount(() => {
         </span>
         <span v-if="result.historyEvaluated" class="text-muted-foreground">
           技术条件后 <b class="text-foreground">{{ result.techPassed }}</b>
+        </span>
+        <span v-if="result.chanlunEvaluated" class="text-muted-foreground">
+          缠论筛选后 <b class="text-foreground">{{ result.chanlunPassed }}</b>
         </span>
         <span>
           命中

@@ -10,6 +10,9 @@ import { Create as $Create } from "@wailsio/runtime";
 import * as backtest$0 from "../backtest/models.js";
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore: Unused imports
+import * as chanlun$0 from "../chanlun/models.js";
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore: Unused imports
 import * as cne$0 from "../cne/models.js";
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore: Unused imports
@@ -1498,6 +1501,526 @@ export class CatchUpInfo {
 }
 
 /**
+ * ChanlunConfigInfo 是缠论配置的读取结果。
+ */
+export class ChanlunConfigInfo {
+    "config": chanlun$0.Config;
+    "saved": boolean;
+    "configPath": string;
+
+    /** Creates a new ChanlunConfigInfo instance. */
+    constructor($$source: Partial<ChanlunConfigInfo> = {}) {
+        if (!("config" in $$source)) {
+            this["config"] = (new chanlun$0.Config());
+        }
+        if (!("saved" in $$source)) {
+            this["saved"] = false;
+        }
+        if (!("configPath" in $$source)) {
+            this["configPath"] = "";
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new ChanlunConfigInfo instance from a string or object.
+     */
+    static createFrom($$source: any = {}): ChanlunConfigInfo {
+        const $$createField0_0 = $$createType32;
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        if ("config" in $$parsedSource) {
+            $$parsedSource["config"] = $$createField0_0($$parsedSource["config"]);
+        }
+        return new ChanlunConfigInfo($$parsedSource as Partial<ChanlunConfigInfo>);
+    }
+}
+
+/**
+ * ChanlunHit 是选股结果里一只股票的缠论命中信息（方案 §10.4）。
+ */
+export class ChanlunHit {
+    "level": string;
+    "levelCn": string;
+    "state": string;
+    "stateCn": string;
+    "trend": string;
+    "trendCn": string;
+    "position": string;
+    "positionCn": string;
+
+    /**
+     * 走势终完美：这段走势走到哪一步了、后续只有哪几种可能
+     */
+    "trendStatus": string;
+    "trendStatusCn": string;
+    "completedDate": number;
+    "outlook": chanlun$0.Scenario[];
+    "pivotCount": number;
+    "pivotZg": number;
+    "pivotZd": number;
+    "divergence": string;
+
+    /**
+     * DivergenceOutcome 是背驰后三种可能里已经确认的那一条；未定为 pending
+     */
+    "divergenceOutcome": string;
+    "divergenceOutcomes": chanlun$0.DivergenceOutcome[];
+    "signals": ChanlunSignalBrief[];
+    "bestType": string;
+    "bestTypeCn": string;
+    "bestState": string;
+    "bestScore": number;
+
+    /**
+     * BestDate 是命中信号的关键日期（确认日优先，其次触发/形成日）。
+     * 表格里显示它，才知道命中的是哪一条 —— 同一个"三买确认"在不同窗口里
+     * 可能是不同年份的两次结构。
+     */
+    "bestDate": number;
+    "reasons": string[];
+    "conflict": boolean;
+    "adaptability": number;
+    "adaptGrade": string;
+    "resonance": boolean;
+    "precision": string;
+    "risk": string;
+
+    /** Creates a new ChanlunHit instance. */
+    constructor($$source: Partial<ChanlunHit> = {}) {
+        if (!("level" in $$source)) {
+            this["level"] = "";
+        }
+        if (!("levelCn" in $$source)) {
+            this["levelCn"] = "";
+        }
+        if (!("state" in $$source)) {
+            this["state"] = "";
+        }
+        if (!("stateCn" in $$source)) {
+            this["stateCn"] = "";
+        }
+        if (!("trend" in $$source)) {
+            this["trend"] = "";
+        }
+        if (!("trendCn" in $$source)) {
+            this["trendCn"] = "";
+        }
+        if (!("position" in $$source)) {
+            this["position"] = "";
+        }
+        if (!("positionCn" in $$source)) {
+            this["positionCn"] = "";
+        }
+        if (!("trendStatus" in $$source)) {
+            this["trendStatus"] = "";
+        }
+        if (!("trendStatusCn" in $$source)) {
+            this["trendStatusCn"] = "";
+        }
+        if (!("completedDate" in $$source)) {
+            this["completedDate"] = 0;
+        }
+        if (!("outlook" in $$source)) {
+            this["outlook"] = [];
+        }
+        if (!("pivotCount" in $$source)) {
+            this["pivotCount"] = 0;
+        }
+        if (!("pivotZg" in $$source)) {
+            this["pivotZg"] = 0;
+        }
+        if (!("pivotZd" in $$source)) {
+            this["pivotZd"] = 0;
+        }
+        if (!("divergence" in $$source)) {
+            this["divergence"] = "";
+        }
+        if (!("divergenceOutcome" in $$source)) {
+            this["divergenceOutcome"] = "";
+        }
+        if (!("divergenceOutcomes" in $$source)) {
+            this["divergenceOutcomes"] = [];
+        }
+        if (!("signals" in $$source)) {
+            this["signals"] = [];
+        }
+        if (!("bestType" in $$source)) {
+            this["bestType"] = "";
+        }
+        if (!("bestTypeCn" in $$source)) {
+            this["bestTypeCn"] = "";
+        }
+        if (!("bestState" in $$source)) {
+            this["bestState"] = "";
+        }
+        if (!("bestScore" in $$source)) {
+            this["bestScore"] = 0;
+        }
+        if (!("bestDate" in $$source)) {
+            this["bestDate"] = 0;
+        }
+        if (!("reasons" in $$source)) {
+            this["reasons"] = [];
+        }
+        if (!("conflict" in $$source)) {
+            this["conflict"] = false;
+        }
+        if (!("adaptability" in $$source)) {
+            this["adaptability"] = 0;
+        }
+        if (!("adaptGrade" in $$source)) {
+            this["adaptGrade"] = "";
+        }
+        if (!("resonance" in $$source)) {
+            this["resonance"] = false;
+        }
+        if (!("precision" in $$source)) {
+            this["precision"] = "";
+        }
+        if (!("risk" in $$source)) {
+            this["risk"] = "";
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new ChanlunHit instance from a string or object.
+     */
+    static createFrom($$source: any = {}): ChanlunHit {
+        const $$createField11_0 = $$createType34;
+        const $$createField17_0 = $$createType36;
+        const $$createField18_0 = $$createType38;
+        const $$createField24_0 = $$createType13;
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        if ("outlook" in $$parsedSource) {
+            $$parsedSource["outlook"] = $$createField11_0($$parsedSource["outlook"]);
+        }
+        if ("divergenceOutcomes" in $$parsedSource) {
+            $$parsedSource["divergenceOutcomes"] = $$createField17_0($$parsedSource["divergenceOutcomes"]);
+        }
+        if ("signals" in $$parsedSource) {
+            $$parsedSource["signals"] = $$createField18_0($$parsedSource["signals"]);
+        }
+        if ("reasons" in $$parsedSource) {
+            $$parsedSource["reasons"] = $$createField24_0($$parsedSource["reasons"]);
+        }
+        return new ChanlunHit($$parsedSource as Partial<ChanlunHit>);
+    }
+}
+
+/**
+ * ChanlunLevelOption 是缠论级别下拉的一项。
+ */
+export class ChanlunLevelOption {
+    "key": string;
+    "name": string;
+
+    /** Creates a new ChanlunLevelOption instance. */
+    constructor($$source: Partial<ChanlunLevelOption> = {}) {
+        if (!("key" in $$source)) {
+            this["key"] = "";
+        }
+        if (!("name" in $$source)) {
+            this["name"] = "";
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new ChanlunLevelOption instance from a string or object.
+     */
+    static createFrom($$source: any = {}): ChanlunLevelOption {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new ChanlunLevelOption($$parsedSource as Partial<ChanlunLevelOption>);
+    }
+}
+
+/**
+ * ChanlunRequest 是单只标的缠论分析的入参。
+ */
+export class ChanlunRequest {
+    "code": string;
+
+    /**
+     * qfq / hfq / none（指数忽略）
+     */
+    "adjust": string;
+
+    /**
+     * Level 分析级别：day-stroke / day / week / month / year
+     */
+    "level": string;
+
+    /**
+     * TradeDate 数据截止日（YYYYMMDD），0 表示最新交易日
+     */
+    "tradeDate": number;
+
+    /**
+     * MultiLevel 是否同时计算更高级别做印证（默认 true）
+     */
+    "multiLevel": boolean;
+
+    /** Creates a new ChanlunRequest instance. */
+    constructor($$source: Partial<ChanlunRequest> = {}) {
+        if (!("code" in $$source)) {
+            this["code"] = "";
+        }
+        if (!("adjust" in $$source)) {
+            this["adjust"] = "";
+        }
+        if (!("level" in $$source)) {
+            this["level"] = "";
+        }
+        if (!("tradeDate" in $$source)) {
+            this["tradeDate"] = 0;
+        }
+        if (!("multiLevel" in $$source)) {
+            this["multiLevel"] = false;
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new ChanlunRequest instance from a string or object.
+     */
+    static createFrom($$source: any = {}): ChanlunRequest {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new ChanlunRequest($$parsedSource as Partial<ChanlunRequest>);
+    }
+}
+
+/**
+ * ChanlunScreenCondition 是"启用缠论筛选"开关与它的筛选字段（方案 §10.2、§10.3）。
+ * 
+ * `Enable=false` 时 `ScreenStocks` **一个分支都不进**，原流程与结果完全不变。
+ */
+export class ChanlunScreenCondition {
+    "enable": boolean;
+
+    /**
+     * OperLevel 操作级别：day-stroke / day / week / month / year
+     */
+    "operLevel": string;
+
+    /**
+     * MinScore 综合分阈值（0 表示不限制）
+     */
+    "minScore": number;
+
+    /**
+     * Types 买卖点类型（buy1/buy2/buy3/sell1/sell2/sell3），空表示不限
+     */
+    "types": string[];
+
+    /**
+     * States 信号状态（candidate/triggered/confirmed），空表示不限
+     */
+    "states": string[];
+
+    /**
+     * Trends 走势状态（consolidation/up/down/none），空表示不限
+     */
+    "trends": string[];
+
+    /**
+     * RequirePivot 要求当前级别已有中枢
+     */
+    "requirePivot": boolean;
+
+    /**
+     * RequireDivergence 要求当前级别出现背驰
+     */
+    "requireDivergence": boolean;
+
+    /**
+     * AllowCandidate 是否允许候选信号
+     */
+    "allowCandidate": boolean;
+
+    /**
+     * ConfirmedOnly 只看已确认信号
+     */
+    "confirmedOnly": boolean;
+
+    /**
+     * ExcludeConflict 排除存在结构矛盾的标的
+     */
+    "excludeConflict": boolean;
+
+    /**
+     * MultiResonance 要求多级别共振
+     */
+    "multiResonance": boolean;
+
+    /**
+     * MinAdaptability 股票适配性阈值（0 表示不限制）
+     */
+    "minAdaptability": number;
+
+    /**
+     * LookbackDays 分析窗口（日 K 根数，默认 500）
+     */
+    "lookbackDays": number;
+
+    /** Creates a new ChanlunScreenCondition instance. */
+    constructor($$source: Partial<ChanlunScreenCondition> = {}) {
+        if (!("enable" in $$source)) {
+            this["enable"] = false;
+        }
+        if (!("operLevel" in $$source)) {
+            this["operLevel"] = "";
+        }
+        if (!("minScore" in $$source)) {
+            this["minScore"] = 0;
+        }
+        if (!("types" in $$source)) {
+            this["types"] = [];
+        }
+        if (!("states" in $$source)) {
+            this["states"] = [];
+        }
+        if (!("trends" in $$source)) {
+            this["trends"] = [];
+        }
+        if (!("requirePivot" in $$source)) {
+            this["requirePivot"] = false;
+        }
+        if (!("requireDivergence" in $$source)) {
+            this["requireDivergence"] = false;
+        }
+        if (!("allowCandidate" in $$source)) {
+            this["allowCandidate"] = false;
+        }
+        if (!("confirmedOnly" in $$source)) {
+            this["confirmedOnly"] = false;
+        }
+        if (!("excludeConflict" in $$source)) {
+            this["excludeConflict"] = false;
+        }
+        if (!("multiResonance" in $$source)) {
+            this["multiResonance"] = false;
+        }
+        if (!("minAdaptability" in $$source)) {
+            this["minAdaptability"] = 0;
+        }
+        if (!("lookbackDays" in $$source)) {
+            this["lookbackDays"] = 0;
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new ChanlunScreenCondition instance from a string or object.
+     */
+    static createFrom($$source: any = {}): ChanlunScreenCondition {
+        const $$createField3_0 = $$createType13;
+        const $$createField4_0 = $$createType13;
+        const $$createField5_0 = $$createType13;
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        if ("types" in $$parsedSource) {
+            $$parsedSource["types"] = $$createField3_0($$parsedSource["types"]);
+        }
+        if ("states" in $$parsedSource) {
+            $$parsedSource["states"] = $$createField4_0($$parsedSource["states"]);
+        }
+        if ("trends" in $$parsedSource) {
+            $$parsedSource["trends"] = $$createField5_0($$parsedSource["trends"]);
+        }
+        return new ChanlunScreenCondition($$parsedSource as Partial<ChanlunScreenCondition>);
+    }
+}
+
+/**
+ * ChanlunSignalBrief 是选股结果里的一条买卖点摘要。
+ */
+export class ChanlunSignalBrief {
+    "type": string;
+    "typeCn": string;
+    "direction": string;
+    "state": string;
+    "stateCn": string;
+    "level": string;
+    "levelCn": string;
+    "price": number;
+    "score": number;
+    "formDate": number;
+    "triggerDate": number;
+    "confirmDate": number;
+    "invalidDate": number;
+    "conflict": boolean;
+    "reasons": string[];
+
+    /** Creates a new ChanlunSignalBrief instance. */
+    constructor($$source: Partial<ChanlunSignalBrief> = {}) {
+        if (!("type" in $$source)) {
+            this["type"] = "";
+        }
+        if (!("typeCn" in $$source)) {
+            this["typeCn"] = "";
+        }
+        if (!("direction" in $$source)) {
+            this["direction"] = "";
+        }
+        if (!("state" in $$source)) {
+            this["state"] = "";
+        }
+        if (!("stateCn" in $$source)) {
+            this["stateCn"] = "";
+        }
+        if (!("level" in $$source)) {
+            this["level"] = "";
+        }
+        if (!("levelCn" in $$source)) {
+            this["levelCn"] = "";
+        }
+        if (!("price" in $$source)) {
+            this["price"] = 0;
+        }
+        if (!("score" in $$source)) {
+            this["score"] = 0;
+        }
+        if (!("formDate" in $$source)) {
+            this["formDate"] = 0;
+        }
+        if (!("triggerDate" in $$source)) {
+            this["triggerDate"] = 0;
+        }
+        if (!("confirmDate" in $$source)) {
+            this["confirmDate"] = 0;
+        }
+        if (!("invalidDate" in $$source)) {
+            this["invalidDate"] = 0;
+        }
+        if (!("conflict" in $$source)) {
+            this["conflict"] = false;
+        }
+        if (!("reasons" in $$source)) {
+            this["reasons"] = [];
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new ChanlunSignalBrief instance from a string or object.
+     */
+    static createFrom($$source: any = {}): ChanlunSignalBrief {
+        const $$createField14_0 = $$createType13;
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        if ("reasons" in $$parsedSource) {
+            $$parsedSource["reasons"] = $$createField14_0($$parsedSource["reasons"]);
+        }
+        return new ChanlunSignalBrief($$parsedSource as Partial<ChanlunSignalBrief>);
+    }
+}
+
+/**
  * DataLakeInfo 是数据湖的整体状态，给「数据源设置」页展示用。
  */
 export class DataLakeInfo {
@@ -1537,7 +2060,7 @@ export class DataLakeInfo {
      */
     static createFrom($$source: any = {}): DataLakeInfo {
         const $$createField3_0 = $$createType13;
-        const $$createField4_0 = $$createType33;
+        const $$createField4_0 = $$createType40;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("datasets" in $$parsedSource) {
             $$parsedSource["datasets"] = $$createField3_0($$parsedSource["datasets"]);
@@ -1751,10 +2274,10 @@ export class EmailPrefsInfo {
      * Creates a new EmailPrefsInfo instance from a string or object.
      */
     static createFrom($$source: any = {}): EmailPrefsInfo {
-        const $$createField0_0 = $$createType34;
+        const $$createField0_0 = $$createType41;
         const $$createField4_0 = $$createType13;
         const $$createField5_0 = $$createType13;
-        const $$createField6_0 = $$createType35;
+        const $$createField6_0 = $$createType42;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("prefs" in $$parsedSource) {
             $$parsedSource["prefs"] = $$createField0_0($$parsedSource["prefs"]);
@@ -2074,10 +2597,10 @@ export class FinanceSnapshot {
      * Creates a new FinanceSnapshot instance from a string or object.
      */
     static createFrom($$source: any = {}): FinanceSnapshot {
-        const $$createField4_0 = $$createType36;
-        const $$createField12_0 = $$createType38;
-        const $$createField13_0 = $$createType39;
-        const $$createField14_0 = $$createType41;
+        const $$createField4_0 = $$createType43;
+        const $$createField12_0 = $$createType45;
+        const $$createField13_0 = $$createType46;
+        const $$createField14_0 = $$createType48;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("derived" in $$parsedSource) {
             $$parsedSource["derived"] = $$createField4_0($$parsedSource["derived"]);
@@ -2246,13 +2769,13 @@ export class FinancialStatements {
      * Creates a new FinancialStatements instance from a string or object.
      */
     static createFrom($$source: any = {}): FinancialStatements {
-        const $$createField5_0 = $$createType33;
+        const $$createField5_0 = $$createType40;
         const $$createField6_0 = $$createType13;
-        const $$createField7_0 = $$createType43;
-        const $$createField8_0 = $$createType45;
-        const $$createField9_0 = $$createType47;
-        const $$createField10_0 = $$createType49;
-        const $$createField12_0 = $$createType50;
+        const $$createField7_0 = $$createType50;
+        const $$createField8_0 = $$createType52;
+        const $$createField9_0 = $$createType54;
+        const $$createField10_0 = $$createType56;
+        const $$createField12_0 = $$createType57;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("datasets" in $$parsedSource) {
             $$parsedSource["datasets"] = $$createField5_0($$parsedSource["datasets"]);
@@ -2311,8 +2834,8 @@ export class IndexValuationResult {
      * Creates a new IndexValuationResult instance from a string or object.
      */
     static createFrom($$source: any = {}): IndexValuationResult {
-        const $$createField2_0 = $$createType51;
-        const $$createField3_0 = $$createType52;
+        const $$createField2_0 = $$createType58;
+        const $$createField3_0 = $$createType59;
         const $$createField4_0 = $$createType13;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("index" in $$parsedSource) {
@@ -2376,7 +2899,7 @@ export class IndustryDistributionRow {
      */
     static createFrom($$source: any = {}): IndustryDistributionRow {
         const $$createField3_0 = $$createType14;
-        const $$createField4_0 = $$createType53;
+        const $$createField4_0 = $$createType60;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("topCounts" in $$parsedSource) {
             $$parsedSource["topCounts"] = $$createField3_0($$parsedSource["topCounts"]);
@@ -2428,9 +2951,9 @@ export class IndustryValuationDetail {
      * Creates a new IndustryValuationDetail instance from a string or object.
      */
     static createFrom($$source: any = {}): IndustryValuationDetail {
-        const $$createField2_0 = $$createType54;
-        const $$createField3_0 = $$createType56;
-        const $$createField4_0 = $$createType52;
+        const $$createField2_0 = $$createType61;
+        const $$createField3_0 = $$createType63;
+        const $$createField4_0 = $$createType59;
         const $$createField5_0 = $$createType13;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("industry" in $$parsedSource) {
@@ -2540,10 +3063,10 @@ export class KlineBundle {
      * Creates a new KlineBundle instance from a string or object.
      */
     static createFrom($$source: any = {}): KlineBundle {
-        const $$createField4_0 = $$createType57;
-        const $$createField5_0 = $$createType59;
-        const $$createField6_0 = $$createType61;
-        const $$createField7_0 = $$createType63;
+        const $$createField4_0 = $$createType64;
+        const $$createField5_0 = $$createType66;
+        const $$createField6_0 = $$createType68;
+        const $$createField7_0 = $$createType70;
         const $$createField8_0 = $$createType13;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("profile" in $$parsedSource) {
@@ -2645,7 +3168,7 @@ export class KlinePrefsInfo {
      * Creates a new KlinePrefsInfo instance from a string or object.
      */
     static createFrom($$source: any = {}): KlinePrefsInfo {
-        const $$createField0_0 = $$createType64;
+        const $$createField0_0 = $$createType71;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("prefs" in $$parsedSource) {
             $$parsedSource["prefs"] = $$createField0_0($$parsedSource["prefs"]);
@@ -2957,8 +3480,8 @@ export class MarketIndexStat {
      * Creates a new MarketIndexStat instance from a string or object.
      */
     static createFrom($$source: any = {}): MarketIndexStat {
-        const $$createField27_0 = $$createType65;
-        const $$createField28_0 = $$createType65;
+        const $$createField27_0 = $$createType72;
+        const $$createField28_0 = $$createType72;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("recent" in $$parsedSource) {
             $$parsedSource["recent"] = $$createField27_0($$parsedSource["recent"]);
@@ -3127,8 +3650,8 @@ export class MarketTemperatureResult {
      * Creates a new MarketTemperatureResult instance from a string or object.
      */
     static createFrom($$source: any = {}): MarketTemperatureResult {
-        const $$createField12_0 = $$createType67;
-        const $$createField13_0 = $$createType69;
+        const $$createField12_0 = $$createType74;
+        const $$createField13_0 = $$createType76;
         const $$createField16_0 = $$createType30;
         const $$createField17_0 = $$createType13;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
@@ -3466,9 +3989,9 @@ export class PlanResult {
      * Creates a new PlanResult instance from a string or object.
      */
     static createFrom($$source: any = {}): PlanResult {
-        const $$createField4_0 = $$createType70;
-        const $$createField5_0 = $$createType71;
-        const $$createField10_0 = $$createType72;
+        const $$createField4_0 = $$createType77;
+        const $$createField5_0 = $$createType78;
+        const $$createField10_0 = $$createType79;
         const $$createField11_0 = $$createType7;
         const $$createField12_0 = $$createType7;
         const $$createField13_0 = $$createType13;
@@ -3575,12 +4098,12 @@ export class PortfolioOptions {
      * Creates a new PortfolioOptions instance from a string or object.
      */
     static createFrom($$source: any = {}): PortfolioOptions {
-        const $$createField0_0 = $$createType74;
-        const $$createField1_0 = $$createType74;
-        const $$createField2_0 = $$createType74;
-        const $$createField3_0 = $$createType74;
-        const $$createField4_0 = $$createType74;
-        const $$createField5_0 = $$createType74;
+        const $$createField0_0 = $$createType81;
+        const $$createField1_0 = $$createType81;
+        const $$createField2_0 = $$createType81;
+        const $$createField3_0 = $$createType81;
+        const $$createField4_0 = $$createType81;
+        const $$createField5_0 = $$createType81;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("types" in $$parsedSource) {
             $$parsedSource["types"] = $$createField0_0($$parsedSource["types"]);
@@ -3655,7 +4178,7 @@ export class RefreshAllResult {
      * Creates a new RefreshAllResult instance from a string or object.
      */
     static createFrom($$source: any = {}): RefreshAllResult {
-        const $$createField4_0 = $$createType76;
+        const $$createField4_0 = $$createType83;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("strategies" in $$parsedSource) {
             $$parsedSource["strategies"] = $$createField4_0($$parsedSource["strategies"]);
@@ -3731,7 +4254,7 @@ export class RefreshResult {
      * Creates a new RefreshResult instance from a string or object.
      */
     static createFrom($$source: any = {}): RefreshResult {
-        const $$createField4_0 = $$createType71;
+        const $$createField4_0 = $$createType78;
         const $$createField5_0 = $$createType13;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("marketState" in $$parsedSource) {
@@ -3857,6 +4380,14 @@ export class ScreenCondition {
      */
     "tradeDate": number;
 
+    /**
+     * ---- 缠论层（最后一层）----
+     * 
+     * **只有 Enable=true 时才会在全部已有条件之后执行**；关闭时原流程完全不变，
+     * 连一个分支都不进。缠论不改变任何已有条件的语义，只对候选集过滤与排序。
+     */
+    "chanlun": ChanlunScreenCondition;
+
     /** Creates a new ScreenCondition instance. */
     constructor($$source: Partial<ScreenCondition> = {}) {
         if (!("minTotalMV" in $$source)) {
@@ -3970,6 +4501,9 @@ export class ScreenCondition {
         if (!("tradeDate" in $$source)) {
             this["tradeDate"] = 0;
         }
+        if (!("chanlun" in $$source)) {
+            this["chanlun"] = (new ChanlunScreenCondition());
+        }
 
         Object.assign(this, $$source);
     }
@@ -3979,8 +4513,9 @@ export class ScreenCondition {
      */
     static createFrom($$source: any = {}): ScreenCondition {
         const $$createField19_0 = $$createType13;
-        const $$createField26_0 = $$createType78;
-        const $$createField27_0 = $$createType80;
+        const $$createField26_0 = $$createType85;
+        const $$createField27_0 = $$createType87;
+        const $$createField37_0 = $$createType88;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("markets" in $$parsedSource) {
             $$parsedSource["markets"] = $$createField19_0($$parsedSource["markets"]);
@@ -3990,6 +4525,9 @@ export class ScreenCondition {
         }
         if ("maConditions" in $$parsedSource) {
             $$parsedSource["maConditions"] = $$createField27_0($$parsedSource["maConditions"]);
+        }
+        if ("chanlun" in $$parsedSource) {
+            $$parsedSource["chanlun"] = $$createField37_0($$parsedSource["chanlun"]);
         }
         return new ScreenCondition($$parsedSource as Partial<ScreenCondition>);
     }
@@ -4023,7 +4561,7 @@ export class ScreenConditionInfo {
      * Creates a new ScreenConditionInfo instance from a string or object.
      */
     static createFrom($$source: any = {}): ScreenConditionInfo {
-        const $$createField0_0 = $$createType81;
+        const $$createField0_0 = $$createType89;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("condition" in $$parsedSource) {
             $$parsedSource["condition"] = $$createField0_0($$parsedSource["condition"]);
@@ -4084,6 +4622,11 @@ export class ScreenItem {
      */
     "drawdownPct": number;
     "maValues": MAValue[];
+
+    /**
+     * Chanlun 是缠论筛选的命中信息（仅启用缠论筛选时填充）
+     */
+    "chanlun"?: ChanlunHit | null;
 
     /** Creates a new ScreenItem instance. */
     constructor($$source: Partial<ScreenItem> = {}) {
@@ -4165,13 +4708,17 @@ export class ScreenItem {
      */
     static createFrom($$source: any = {}): ScreenItem {
         const $$createField20_0 = $$createType13;
-        const $$createField22_0 = $$createType83;
+        const $$createField22_0 = $$createType91;
+        const $$createField23_0 = $$createType93;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("boards" in $$parsedSource) {
             $$parsedSource["boards"] = $$createField20_0($$parsedSource["boards"]);
         }
         if ("maValues" in $$parsedSource) {
             $$parsedSource["maValues"] = $$createField22_0($$parsedSource["maValues"]);
+        }
+        if ("chanlun" in $$parsedSource) {
+            $$parsedSource["chanlun"] = $$createField23_0($$parsedSource["chanlun"]);
         }
         return new ScreenItem($$parsedSource as Partial<ScreenItem>);
     }
@@ -4209,6 +4756,16 @@ export class ScreenOptions {
      */
     "defaults": ScreenCondition;
 
+    /**
+     * ChanlunDefaults 是缠论筛选的默认值（开关默认关闭）
+     */
+    "chanlunDefaults": ChanlunScreenCondition;
+
+    /**
+     * ChanlunLevels 是缠论可用的操作级别
+     */
+    "chanlunLevels": ChanlunLevelOption[];
+
     /** Creates a new ScreenOptions instance. */
     constructor($$source: Partial<ScreenOptions> = {}) {
         if (!("categories" in $$source)) {
@@ -4232,6 +4789,12 @@ export class ScreenOptions {
         if (!("defaults" in $$source)) {
             this["defaults"] = (new ScreenCondition());
         }
+        if (!("chanlunDefaults" in $$source)) {
+            this["chanlunDefaults"] = (new ChanlunScreenCondition());
+        }
+        if (!("chanlunLevels" in $$source)) {
+            this["chanlunLevels"] = [];
+        }
 
         Object.assign(this, $$source);
     }
@@ -4240,11 +4803,13 @@ export class ScreenOptions {
      * Creates a new ScreenOptions instance from a string or object.
      */
     static createFrom($$source: any = {}): ScreenOptions {
-        const $$createField0_0 = $$createType85;
-        const $$createField1_0 = $$createType87;
+        const $$createField0_0 = $$createType95;
+        const $$createField1_0 = $$createType97;
         const $$createField2_0 = $$createType13;
-        const $$createField3_0 = $$createType89;
-        const $$createField6_0 = $$createType81;
+        const $$createField3_0 = $$createType99;
+        const $$createField6_0 = $$createType89;
+        const $$createField7_0 = $$createType88;
+        const $$createField8_0 = $$createType101;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("categories" in $$parsedSource) {
             $$parsedSource["categories"] = $$createField0_0($$parsedSource["categories"]);
@@ -4260,6 +4825,12 @@ export class ScreenOptions {
         }
         if ("defaults" in $$parsedSource) {
             $$parsedSource["defaults"] = $$createField6_0($$parsedSource["defaults"]);
+        }
+        if ("chanlunDefaults" in $$parsedSource) {
+            $$parsedSource["chanlunDefaults"] = $$createField7_0($$parsedSource["chanlunDefaults"]);
+        }
+        if ("chanlunLevels" in $$parsedSource) {
+            $$parsedSource["chanlunLevels"] = $$createField8_0($$parsedSource["chanlunLevels"]);
         }
         return new ScreenOptions($$parsedSource as Partial<ScreenOptions>);
     }
@@ -4302,6 +4873,16 @@ export class ScreenResult {
      * HistoryEvaluated 表示技术层确实执行了（要拉 K 线）
      */
     "historyEvaluated": boolean;
+
+    /**
+     * ChanlunEvaluated 表示缠论层确实执行了（开关打开且走到最后一层）
+     */
+    "chanlunEvaluated": boolean;
+
+    /**
+     * ChanlunPassed 通过缠论筛选的数量（= 启用时的最终命中数）
+     */
+    "chanlunPassed": number;
     "elapsed": string;
 
     /**
@@ -4348,6 +4929,12 @@ export class ScreenResult {
         if (!("historyEvaluated" in $$source)) {
             this["historyEvaluated"] = false;
         }
+        if (!("chanlunEvaluated" in $$source)) {
+            this["chanlunEvaluated"] = false;
+        }
+        if (!("chanlunPassed" in $$source)) {
+            this["chanlunPassed"] = 0;
+        }
         if (!("elapsed" in $$source)) {
             this["elapsed"] = "";
         }
@@ -4368,14 +4955,14 @@ export class ScreenResult {
      * Creates a new ScreenResult instance from a string or object.
      */
     static createFrom($$source: any = {}): ScreenResult {
-        const $$createField0_0 = $$createType91;
-        const $$createField10_0 = $$createType13;
+        const $$createField0_0 = $$createType103;
+        const $$createField12_0 = $$createType13;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("items" in $$parsedSource) {
             $$parsedSource["items"] = $$createField0_0($$parsedSource["items"]);
         }
         if ("notes" in $$parsedSource) {
-            $$parsedSource["notes"] = $$createField10_0($$parsedSource["notes"]);
+            $$parsedSource["notes"] = $$createField12_0($$parsedSource["notes"]);
         }
         return new ScreenResult($$parsedSource as Partial<ScreenResult>);
     }
@@ -5143,8 +5730,8 @@ export class StockUniverse {
      * Creates a new StockUniverse instance from a string or object.
      */
     static createFrom($$source: any = {}): StockUniverse {
-        const $$createField7_0 = $$createType87;
-        const $$createField8_0 = $$createType93;
+        const $$createField7_0 = $$createType97;
+        const $$createField8_0 = $$createType105;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("markets" in $$parsedSource) {
             $$parsedSource["markets"] = $$createField7_0($$parsedSource["markets"]);
@@ -5188,8 +5775,8 @@ export class StockValuation {
      * Creates a new StockValuation instance from a string or object.
      */
     static createFrom($$source: any = {}): StockValuation {
-        const $$createField2_0 = $$createType94;
-        const $$createField3_0 = $$createType52;
+        const $$createField2_0 = $$createType106;
+        const $$createField3_0 = $$createType59;
         const $$createField4_0 = $$createType13;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("stock" in $$parsedSource) {
@@ -5444,7 +6031,7 @@ export class UpdatePrefsInfo {
      * Creates a new UpdatePrefsInfo instance from a string or object.
      */
     static createFrom($$source: any = {}): UpdatePrefsInfo {
-        const $$createField0_0 = $$createType95;
+        const $$createField0_0 = $$createType107;
         const $$createField3_0 = $$createType13;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("prefs" in $$parsedSource) {
@@ -5545,10 +6132,10 @@ export class ValuationParamsInfo {
      * Creates a new ValuationParamsInfo instance from a string or object.
      */
     static createFrom($$source: any = {}): ValuationParamsInfo {
-        const $$createField1_0 = $$createType97;
-        const $$createField2_0 = $$createType99;
-        const $$createField3_0 = $$createType100;
-        const $$createField7_0 = $$createType101;
+        const $$createField1_0 = $$createType109;
+        const $$createField2_0 = $$createType111;
+        const $$createField3_0 = $$createType112;
+        const $$createField7_0 = $$createType113;
         const $$createField8_0 = $$createType13;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("horizons" in $$parsedSource) {
@@ -5685,13 +6272,13 @@ export class ValuationReport {
      * Creates a new ValuationReport instance from a string or object.
      */
     static createFrom($$source: any = {}): ValuationReport {
-        const $$createField2_0 = $$createType52;
-        const $$createField3_0 = $$createType103;
-        const $$createField4_0 = $$createType104;
-        const $$createField5_0 = $$createType105;
-        const $$createField6_0 = $$createType107;
-        const $$createField7_0 = $$createType109;
-        const $$createField11_0 = $$createType111;
+        const $$createField2_0 = $$createType59;
+        const $$createField3_0 = $$createType115;
+        const $$createField4_0 = $$createType116;
+        const $$createField5_0 = $$createType117;
+        const $$createField6_0 = $$createType119;
+        const $$createField7_0 = $$createType121;
+        const $$createField11_0 = $$createType123;
         const $$createField12_0 = $$createType13;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("snapshot" in $$parsedSource) {
@@ -5755,83 +6342,95 @@ const $$createType28 = BoardPeriodWindow.createFrom;
 const $$createType29 = $Create.Array($$createType28);
 const $$createType30 = $Create.Array($Create.Any);
 const $$createType31 = cne$0.CatchUpState.createFrom;
-const $$createType32 = cnlake$0.DatasetStatus.createFrom;
-const $$createType33 = $Create.Array($$createType32);
-const $$createType34 = config$0.EmailPrefs.createFrom;
-const $$createType35 = EmailScheduleInfo.createFrom;
-const $$createType36 = DerivedFundamentals.createFrom;
-const $$createType37 = MoneyFlowSummary.createFrom;
-const $$createType38 = $Create.Nullable($$createType37);
-const $$createType39 = FinancialStatements.createFrom;
-const $$createType40 = FinanceSourceStatus.createFrom;
-const $$createType41 = $Create.Array($$createType40);
-const $$createType42 = cnlake$0.StatementItem.createFrom;
-const $$createType43 = $Create.Array($$createType42);
-const $$createType44 = ShareStructureItem.createFrom;
-const $$createType45 = $Create.Array($$createType44);
-const $$createType46 = ShareholderCountItem.createFrom;
-const $$createType47 = $Create.Array($$createType46);
-const $$createType48 = TopHolderItem.createFrom;
-const $$createType49 = $Create.Array($$createType48);
-const $$createType50 = $Create.Map($Create.Any, $Create.Any);
-const $$createType51 = valuation$0.IndexEvaluation.createFrom;
-const $$createType52 = valuation$0.Snapshot.createFrom;
-const $$createType53 = $Create.Map($Create.Any, $Create.Any);
-const $$createType54 = valuation$0.IndustryValuation.createFrom;
-const $$createType55 = valuation$0.RankRow.createFrom;
+const $$createType32 = chanlun$0.Config.createFrom;
+const $$createType33 = chanlun$0.Scenario.createFrom;
+const $$createType34 = $Create.Array($$createType33);
+const $$createType35 = chanlun$0.DivergenceOutcome.createFrom;
+const $$createType36 = $Create.Array($$createType35);
+const $$createType37 = ChanlunSignalBrief.createFrom;
+const $$createType38 = $Create.Array($$createType37);
+const $$createType39 = cnlake$0.DatasetStatus.createFrom;
+const $$createType40 = $Create.Array($$createType39);
+const $$createType41 = config$0.EmailPrefs.createFrom;
+const $$createType42 = EmailScheduleInfo.createFrom;
+const $$createType43 = DerivedFundamentals.createFrom;
+const $$createType44 = MoneyFlowSummary.createFrom;
+const $$createType45 = $Create.Nullable($$createType44);
+const $$createType46 = FinancialStatements.createFrom;
+const $$createType47 = FinanceSourceStatus.createFrom;
+const $$createType48 = $Create.Array($$createType47);
+const $$createType49 = cnlake$0.StatementItem.createFrom;
+const $$createType50 = $Create.Array($$createType49);
+const $$createType51 = ShareStructureItem.createFrom;
+const $$createType52 = $Create.Array($$createType51);
+const $$createType53 = ShareholderCountItem.createFrom;
+const $$createType54 = $Create.Array($$createType53);
+const $$createType55 = TopHolderItem.createFrom;
 const $$createType56 = $Create.Array($$createType55);
-const $$createType57 = StockProfile.createFrom;
-const $$createType58 = KlineCandle.createFrom;
-const $$createType59 = $Create.Array($$createType58);
-const $$createType60 = stockdb$0.Factor.createFrom;
-const $$createType61 = $Create.Array($$createType60);
-const $$createType62 = MoneyFlowPoint.createFrom;
+const $$createType57 = $Create.Map($Create.Any, $Create.Any);
+const $$createType58 = valuation$0.IndexEvaluation.createFrom;
+const $$createType59 = valuation$0.Snapshot.createFrom;
+const $$createType60 = $Create.Map($Create.Any, $Create.Any);
+const $$createType61 = valuation$0.IndustryValuation.createFrom;
+const $$createType62 = valuation$0.RankRow.createFrom;
 const $$createType63 = $Create.Array($$createType62);
-const $$createType64 = config$0.KlinePrefs.createFrom;
-const $$createType65 = $Create.Array($Create.Any);
-const $$createType66 = TemperatureFactor.createFrom;
-const $$createType67 = $Create.Array($$createType66);
-const $$createType68 = MarketIndexStat.createFrom;
-const $$createType69 = $Create.Array($$createType68);
-const $$createType70 = score$0.StrategyConfig.createFrom;
-const $$createType71 = score$0.MarketState.createFrom;
-const $$createType72 = score$0.RotationPlan.createFrom;
-const $$createType73 = PortfolioOption.createFrom;
+const $$createType64 = StockProfile.createFrom;
+const $$createType65 = KlineCandle.createFrom;
+const $$createType66 = $Create.Array($$createType65);
+const $$createType67 = stockdb$0.Factor.createFrom;
+const $$createType68 = $Create.Array($$createType67);
+const $$createType69 = MoneyFlowPoint.createFrom;
+const $$createType70 = $Create.Array($$createType69);
+const $$createType71 = config$0.KlinePrefs.createFrom;
+const $$createType72 = $Create.Array($Create.Any);
+const $$createType73 = TemperatureFactor.createFrom;
 const $$createType74 = $Create.Array($$createType73);
-const $$createType75 = StrategyRefresh.createFrom;
+const $$createType75 = MarketIndexStat.createFrom;
 const $$createType76 = $Create.Array($$createType75);
-const $$createType77 = BoardFilter.createFrom;
-const $$createType78 = $Create.Array($$createType77);
-const $$createType79 = MACondition.createFrom;
-const $$createType80 = $Create.Array($$createType79);
-const $$createType81 = ScreenCondition.createFrom;
-const $$createType82 = MAValue.createFrom;
+const $$createType77 = score$0.StrategyConfig.createFrom;
+const $$createType78 = score$0.MarketState.createFrom;
+const $$createType79 = score$0.RotationPlan.createFrom;
+const $$createType80 = PortfolioOption.createFrom;
+const $$createType81 = $Create.Array($$createType80);
+const $$createType82 = StrategyRefresh.createFrom;
 const $$createType83 = $Create.Array($$createType82);
-const $$createType84 = BoardCategoryInfo.createFrom;
+const $$createType84 = BoardFilter.createFrom;
 const $$createType85 = $Create.Array($$createType84);
-const $$createType86 = MarketInfo.createFrom;
+const $$createType86 = MACondition.createFrom;
 const $$createType87 = $Create.Array($$createType86);
-const $$createType88 = LakeScreenCondition.createFrom;
-const $$createType89 = $Create.Array($$createType88);
-const $$createType90 = ScreenItem.createFrom;
+const $$createType88 = ChanlunScreenCondition.createFrom;
+const $$createType89 = ScreenCondition.createFrom;
+const $$createType90 = MAValue.createFrom;
 const $$createType91 = $Create.Array($$createType90);
-const $$createType92 = StockItem.createFrom;
-const $$createType93 = $Create.Array($$createType92);
-const $$createType94 = valuation$0.StockScore.createFrom;
-const $$createType95 = config$0.UpdatePrefs.createFrom;
-const $$createType96 = valuation$0.Horizon.createFrom;
+const $$createType92 = ChanlunHit.createFrom;
+const $$createType93 = $Create.Nullable($$createType92);
+const $$createType94 = BoardCategoryInfo.createFrom;
+const $$createType95 = $Create.Array($$createType94);
+const $$createType96 = MarketInfo.createFrom;
 const $$createType97 = $Create.Array($$createType96);
-const $$createType98 = $Create.Map($Create.Any, $Create.Any);
-const $$createType99 = $Create.Map($Create.Any, $$createType98);
-const $$createType100 = $Create.Map($Create.Any, $Create.Any);
-const $$createType101 = valuation$0.RatingThresholds.createFrom;
-const $$createType102 = valuation$0.HorizonRanking.createFrom;
+const $$createType98 = LakeScreenCondition.createFrom;
+const $$createType99 = $Create.Array($$createType98);
+const $$createType100 = ChanlunLevelOption.createFrom;
+const $$createType101 = $Create.Array($$createType100);
+const $$createType102 = ScreenItem.createFrom;
 const $$createType103 = $Create.Array($$createType102);
-const $$createType104 = $Create.Array($$createType54);
-const $$createType105 = $Create.Array($$createType51);
-const $$createType106 = valuation$0.ScoreDistribution.createFrom;
-const $$createType107 = $Create.Map($Create.Any, $$createType106);
-const $$createType108 = IndustryDistributionRow.createFrom;
+const $$createType104 = StockItem.createFrom;
+const $$createType105 = $Create.Array($$createType104);
+const $$createType106 = valuation$0.StockScore.createFrom;
+const $$createType107 = config$0.UpdatePrefs.createFrom;
+const $$createType108 = valuation$0.Horizon.createFrom;
 const $$createType109 = $Create.Array($$createType108);
-const $$createType110 = PhaseTiming.createFrom;
-const $$createType111 = $Create.Array($$createType110);
+const $$createType110 = $Create.Map($Create.Any, $Create.Any);
+const $$createType111 = $Create.Map($Create.Any, $$createType110);
+const $$createType112 = $Create.Map($Create.Any, $Create.Any);
+const $$createType113 = valuation$0.RatingThresholds.createFrom;
+const $$createType114 = valuation$0.HorizonRanking.createFrom;
+const $$createType115 = $Create.Array($$createType114);
+const $$createType116 = $Create.Array($$createType61);
+const $$createType117 = $Create.Array($$createType58);
+const $$createType118 = valuation$0.ScoreDistribution.createFrom;
+const $$createType119 = $Create.Map($Create.Any, $$createType118);
+const $$createType120 = IndustryDistributionRow.createFrom;
+const $$createType121 = $Create.Array($$createType120);
+const $$createType122 = PhaseTiming.createFrom;
+const $$createType123 = $Create.Array($$createType122);

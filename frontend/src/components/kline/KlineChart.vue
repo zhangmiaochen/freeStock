@@ -19,24 +19,10 @@
  *     （见 rangeFromBrushArea）；
  *   - 统计与口径在 lib/rangeStats，这里只负责把像素区间换成下标区间。
  */
-import { BarChart, CandlestickChart, LineChart } from "echarts/charts";
-import {
-  AxisPointerComponent,
-  BrushComponent,
-  DataZoomComponent,
-  GridComponent,
-  LegendComponent,
-  // ⚠ 少了这个：markLine（斐波那契辅助线）不会画出来，而且**不报错**，
-  // 只是图上什么都没有 —— 由 tests/fibonacci.spec.ts 的 SSR 用例盯着
-  MarkLineComponent,
-  // ⚠ 同理：少了它，框选后的区间高亮（markArea）会**静默消失**，
-  // 由 tests/rangeSelectChart.spec.ts 的 SSR 用例盯着
-  MarkAreaComponent,
-  TooltipComponent,
-} from "echarts/components";
-import * as echarts from "echarts/core";
-import { CanvasRenderer } from "echarts/renderers";
+import type { ECharts, EChartsCoreOption } from "echarts/core";
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+
+import { echarts } from "@/lib/echarts";
 
 import {
   DEFAULT_BOLL,
@@ -54,27 +40,14 @@ import {
   type Period,
 } from "@/lib/indicators";
 import { fibMarkLine } from "@/lib/fibonacci";
+import { buildChanlunLayers, signalsOnDate } from "@/lib/chanlun";
 import { formatAmount, formatDate } from "@/lib/format";
+import type { ChanlunAnalysis } from "@/lib/backend";
 import {
   axisValuesFromCoordRange,
   selectionFromAxisValues,
   type RangeSelection,
 } from "@/lib/rangeStats";
-
-echarts.use([
-  CandlestickChart,
-  LineChart,
-  BarChart,
-  GridComponent,
-  TooltipComponent,
-  DataZoomComponent,
-  AxisPointerComponent,
-  LegendComponent,
-  MarkAreaComponent,
-  MarkLineComponent,
-  BrushComponent,
-  CanvasRenderer,
-]);
 
 const props = withDefaults(
   defineProps<{
@@ -92,6 +65,14 @@ const props = withDefaults(
     showRangeSelect?: boolean;
     /** 已选中的区间（下标，半开区间）：画一层高亮，让用户知道统计的是哪一段 */
     rangeSelection?: RangeSelection | null;
+    /**
+     * 缠论标注（后端分析结果）。
+     *
+     * **图只消费数据**：分型/笔/线段/中枢/背驰/买卖点都已经在 `internal/chanlun`
+     * 里算好，这里只把它们映射成 ECharts 图层（见 lib/chanlun.ts）。
+     * 传空时与原图表完全一致。
+     */
+    chanlun?: ChanlunAnalysis | null;
     /** 资金流序列（与后端 MoneyFlowPoint 对应） */
     moneyFlows?: MoneyFlowPoint[];
     bollConfig?: BollConfig;
@@ -109,6 +90,7 @@ const props = withDefaults(
     showFibonacci: false,
     showRangeSelect: false,
     rangeSelection: null,
+    chanlun: null,
     moneyFlows: () => [],
     bollConfig: () => ({ ...DEFAULT_BOLL }),
     macdConfig: () => ({ ...DEFAULT_MACD }),
@@ -149,7 +131,7 @@ const HIGHLIGHT_FILL = "rgba(59,130,246,0.12)";
 const HIGHLIGHT_BORDER = "#3b82f6";
 
 const container = ref<HTMLElement | null>(null);
-let chart: echarts.ECharts | null = null;
+let chart: ECharts | null = null;
 let observer: ResizeObserver | null = null;
 
 const zoom = ref({ start: 0, end: 100 });
@@ -199,9 +181,16 @@ function rangeHighlight(): Record<string, unknown> | null {
   return {
     silent: true,
     animation: false,
-    itemStyle: { color: HIGHLIGHT_FILL, borderColor: HIGHLIGHT_BORDER, borderWidth: 1 },
-    label: { show: false },
-    data: [[{ xAxis: start.date }, { xAxis: end.date }]],
+    data: [
+      [
+        {
+          xAxis: start.date,
+          itemStyle: { color: HIGHLIGHT_FILL, borderColor: HIGHLIGHT_BORDER, borderWidth: 1 },
+          label: { show: false },
+        },
+        { xAxis: end.date },
+      ],
+    ],
   };
 }
 
@@ -254,7 +243,7 @@ function layout(height: number) {
   return result;
 }
 
-function buildOption(): echarts.EChartsCoreOption {
+function buildOption(): EChartsCoreOption {
   const candles = props.candles;
   const dates = candles.map((c) => c.date);
   const closes = candles.map((c) => c.close);
@@ -312,7 +301,17 @@ function buildOption(): echarts.EChartsCoreOption {
 
   const series: Record<string, unknown>[] = [];
 
-  // 主图：蜡烛（挂斐波那契辅助线 + 框选高亮）
+  // 缠论图层（关闭时为空；标注全部由后端给出，这里只做映射）
+  const chanlunLayers = buildChanlunLayers(candles, props.chanlun);
+
+  // 主图的高亮区域：框选统计 + 缠论中枢/背驰段。
+  // 两者都用 markArea：框选那层只盖主图，缠论那层也只盖主图，合并成一个 series 更省事。
+  const markAreaData: unknown[] = [];
+  const highlight = rangeHighlight();
+  if (highlight) markAreaData.push(...(highlight.data as unknown[]));
+  markAreaData.push(...chanlunLayers.markAreas);
+
+  // 主图：蜡烛（挂斐波那契辅助线 + 框选/缠论高亮）
   series.push({
     name: "K线",
     type: "candlestick",
@@ -326,7 +325,9 @@ function buildOption(): echarts.EChartsCoreOption {
       borderColor0: DOWN,
     },
     ...(props.showFibonacci ? { markLine: fibonacciMarkLine() } : {}),
-    ...(rangeHighlight() ? { markArea: rangeHighlight() } : {}),
+    ...(markAreaData.length
+      ? { markArea: { silent: true, animation: false, data: markAreaData } }
+      : {}),
   });
 
   // 均线（算一次，图例 / tooltip 共用）
@@ -389,6 +390,11 @@ function buildOption(): echarts.EChartsCoreOption {
       itemStyle: { color: BOLL_BAND },
       z: 2,
     });
+  }
+
+  // 缠论：笔 / 线段 / 分型 / 买卖点（主图叠加，全部 silent，不抢十字光标）
+  for (const item of chanlunLayers.series) {
+    series.push(item);
   }
 
   // 成交量
@@ -487,6 +493,10 @@ function buildOption(): echarts.EChartsCoreOption {
     if (config.visible) legendNames.push(`MA${config.period}`);
   }
   if (props.showBoll) legendNames.push("BOLL上轨", "BOLL中轨", "BOLL下轨");
+  // 缠论的笔 / 线段 / 买卖点也进图例，作为颜色对照
+  for (const name of chanlunLayers.legendNames) {
+    if (!legendNames.includes(name)) legendNames.push(name);
+  }
 
   return {
     animation: false,
@@ -574,6 +584,28 @@ function buildOption(): echarts.EChartsCoreOption {
             );
           }
         }
+
+        // 缠论：把这一根 K 线上的信号直接写进悬浮提示，
+        // 图上的标签只放类型名（避免遮挡），依据放到提示与右侧面板里。
+        //
+        // ⚠ 提示里的日期是**这根 K 线的日期**（信号的形成/触发点），不是确认日；
+        // 而选股结果里显示的是"确认/触发/形成"中最贴近当前状态的那一天。
+        // 两者是**同一条信号的不同阶段**，所以这里把三个阶段都写出来。
+        const chanlunSignals = signalsOnDate(props.chanlun, candle.date);
+        for (const signal of chanlunSignals) {
+          const color = signal.direction === "buy" ? UP : DOWN;
+          const when: string[] = [];
+          if (signal.formDate) when.push(`形成 ${formatDate(signal.formDate)}`);
+          if (signal.triggerDate && signal.triggerDate !== signal.formDate) {
+            when.push(`触发 ${formatDate(signal.triggerDate)}`);
+          }
+          if (signal.confirmDate) when.push(`确认 ${formatDate(signal.confirmDate)}`);
+          rows.push(
+            `<div style="margin-top:4px;color:${color}">${signal.typeCN} · ${signal.stateCN}` +
+              (when.length ? `　${when.join(" · ")}` : "") +
+              `　综合分 ${signal.score.toFixed(1)}</div>`,
+          );
+        }
         return rows.join("");
       },
     },
@@ -608,7 +640,19 @@ function buildOption(): echarts.EChartsCoreOption {
 
 function render() {
   if (!chart) return;
-  chart.setOption(buildOption(), { notMerge: true, lazyUpdate: false });
+  try {
+    chart.setOption(buildOption(), { notMerge: true, lazyUpdate: false });
+  } catch (err) {
+    // ECharts 的 update 抛错后会把内部「正在更新」的标志留在 true 上，
+    // 之后所有 setOption / resize 都会静默失效。这里重建实例把它救回来。
+    // 最常见的原因是 series / 组件没有在 lib/echarts.ts 里注册。
+    console.error(
+      "[KlineChart] 图表更新失败，重建 ECharts 实例。请检查 lib/echarts.ts 是否注册了用到的 series/组件",
+      err,
+    );
+    resetChart();
+    return;
+  }
   // ⚠ 每次都同步一次画笔状态：notMerge 会重建 brush 视图与 controller，
   // 而"光写 option"并不会真的启用/停用画笔（见 enableBrush / disableBrush）
   syncBrushEnabled();
@@ -804,6 +848,39 @@ function applyResetIfNeeded() {
 onMounted(() => {
   if (!container.value) return;
   chart = echarts.init(container.value, undefined, { renderer: "canvas" });
+  bindChartEvents();
+
+  observer = new ResizeObserver(() => {
+    // 尺寸以容器的实际布局为准。**不要**只调一次 resize 就走：
+    // ECharts 内部一旦有过一次 update 抛错，会把"正在更新"的标志留在 true 上，
+    // 之后所有 resize 直接 return（表现为"窗口缩放图不跟着变"）。
+    // 这里用"resize 之后尺寸是否真的等于容器"来判断，必要时重建实例。
+    const width = container.value?.clientWidth ?? 0;
+    const height = container.value?.clientHeight ?? 0;
+    if (chart && width > 0 && height > 0) {
+      chart.resize();
+      if (Math.abs(chart.getWidth() - width) > 1 || Math.abs(chart.getHeight() - height) > 1) {
+        console.warn("[KlineChart] 图表尺寸未能跟随容器，重建 ECharts 实例");
+        resetChart();
+        return;
+      }
+    }
+    render();
+  });
+  observer.observe(container.value);
+
+  applyResetIfNeeded();
+  render();
+  applyRangeSelectMode();
+  // 再兜一次：applyRangeSelectMode 里的 dataZoom 动作也会触发 brush 视图重绘，
+  // 顺序上必须先让它跑完（见上面 datazoom 监听里的说明）
+  syncBrushEnabled();
+});
+
+/** 绑定与图表实例相关的事件（重建实例后要重新绑一次）。 */
+function bindChartEvents() {
+  if (!chart) return;
+
   chart.on("datazoom", () => {
     const option = chart?.getOption() as { dataZoom?: { start?: number; end?: number }[] } | undefined;
     const item = option?.dataZoom?.[0];
@@ -847,20 +924,27 @@ onMounted(() => {
     clearBrushVisual();
     emit("rangeCleared");
   });
+}
 
-  observer = new ResizeObserver(() => {
-    chart?.resize();
+/** 重建 ECharts 实例（尺寸不跟随 / 更新抛错后的兜底）。 */
+let rebuilding = false;
+function resetChart() {
+  if (!container.value || rebuilding) return;
+  rebuilding = true;
+  try {
+    chart?.dispose();
+    chart = null;
+    container.value.innerHTML = "";
+    chart = echarts.init(container.value, undefined, { renderer: "canvas" });
+    bindChartEvents();
+    applyResetIfNeeded();
     render();
-  });
-  observer.observe(container.value);
-
-  applyResetIfNeeded();
-  render();
-  applyRangeSelectMode();
-  // 再兜一次：applyRangeSelectMode 里的 dataZoom 动作也会触发 brush 视图重绘，
-  // 顺序上必须先让它跑完（见上面 datazoom 监听里的说明）
-  syncBrushEnabled();
-});
+    applyRangeSelectMode();
+    syncBrushEnabled();
+  } finally {
+    rebuilding = false;
+  }
+}
 
 onBeforeUnmount(() => {
   observer?.disconnect();
@@ -880,6 +964,12 @@ watch(
 
 watch(
   () => [props.showBoll, props.showMacd, props.showVolume, props.showFlow, props.showFibonacci, props.period],
+  () => render(),
+);
+
+// 缠论标注到达 / 变化时重绘（保留当前缩放）
+watch(
+  () => props.chanlun,
   () => render(),
 );
 

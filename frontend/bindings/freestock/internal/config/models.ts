@@ -262,6 +262,15 @@ export class KlinePrefs {
      * 后端同样只需要记住这个开关。
      */
     "showRangeSelect": boolean;
+
+    /**
+     * ShowChanlun 是 K 线页「缠论」叠加层的开关；ChanlunLevel 是它的分析级别。
+     * 
+     * 缠论结构全部在后端算（internal/chanlun），前端只消费标注数据；
+     * 这里只记住"要不要画"和"画哪个级别"。
+     */
+    "showChanlun": boolean;
+    "chanlunLevel": string;
     "boll": BollPrefs;
     "macd": MacdPrefs;
     "maConfigs": MaPrefs[];
@@ -292,6 +301,12 @@ export class KlinePrefs {
         if (!("showRangeSelect" in $$source)) {
             this["showRangeSelect"] = false;
         }
+        if (!("showChanlun" in $$source)) {
+            this["showChanlun"] = false;
+        }
+        if (!("chanlunLevel" in $$source)) {
+            this["chanlunLevel"] = "";
+        }
         if (!("boll" in $$source)) {
             this["boll"] = (new BollPrefs());
         }
@@ -309,18 +324,18 @@ export class KlinePrefs {
      * Creates a new KlinePrefs instance from a string or object.
      */
     static createFrom($$source: any = {}): KlinePrefs {
-        const $$createField8_0 = $$createType1;
-        const $$createField9_0 = $$createType2;
-        const $$createField10_0 = $$createType4;
+        const $$createField10_0 = $$createType1;
+        const $$createField11_0 = $$createType2;
+        const $$createField12_0 = $$createType4;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("boll" in $$parsedSource) {
-            $$parsedSource["boll"] = $$createField8_0($$parsedSource["boll"]);
+            $$parsedSource["boll"] = $$createField10_0($$parsedSource["boll"]);
         }
         if ("macd" in $$parsedSource) {
-            $$parsedSource["macd"] = $$createField9_0($$parsedSource["macd"]);
+            $$parsedSource["macd"] = $$createField11_0($$parsedSource["macd"]);
         }
         if ("maConfigs" in $$parsedSource) {
-            $$parsedSource["maConfigs"] = $$createField10_0($$parsedSource["maConfigs"]);
+            $$parsedSource["maConfigs"] = $$createField12_0($$parsedSource["maConfigs"]);
         }
         return new KlinePrefs($$parsedSource as Partial<KlinePrefs>);
     }

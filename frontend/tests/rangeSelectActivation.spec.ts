@@ -52,7 +52,7 @@ vi.mock("echarts/core", () => ({
   init: () => mocks.chart,
 }));
 vi.mock("echarts/charts", () => ({
-  BarChart: {}, CandlestickChart: {}, LineChart: {},
+  BarChart: {}, CandlestickChart: {}, LineChart: {}, ScatterChart: {},
 }));
 vi.mock("echarts/components", () => ({
   AxisPointerComponent: {}, BrushComponent: {}, DataZoomComponent: {}, GridComponent: {},

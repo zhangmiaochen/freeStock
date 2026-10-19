@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"freestock/internal/chanlun"
 	"freestock/internal/cnlake"
 	"freestock/internal/market"
 	"freestock/internal/stockdb"
@@ -131,6 +132,12 @@ type ScreenCondition struct {
 	// 用户填的那天可能不是交易日，更常见的是当天数据还没同步，
 	// 这时按"指定日期或之前"取数才有意义。
 	TradeDate int64 `json:"tradeDate"`
+
+	// ---- 缠论层（最后一层）----
+	//
+	// **只有 Enable=true 时才会在全部已有条件之后执行**；关闭时原流程完全不变，
+	// 连一个分支都不进。缠论不改变任何已有条件的语义，只对候选集过滤与排序。
+	Chanlun ChanlunScreenCondition `json:"chanlun"`
 }
 
 // MAValue 均线取值，用切片而不是 map —— Wails 生成 map 绑定的体验很差。
@@ -172,6 +179,9 @@ type ScreenItem struct {
 	// 技术层指标（仅在启用对应条件时计算）
 	DrawdownPct float64   `json:"drawdownPct"`
 	MAValues    []MAValue `json:"maValues"`
+
+	// Chanlun 是缠论筛选的命中信息（仅启用缠论筛选时填充）
+	Chanlun *ChanlunHit `json:"chanlun,omitempty"`
 }
 
 // ScreenResult 是一次筛选的完整结果。
@@ -192,6 +202,11 @@ type ScreenResult struct {
 	Matched    int `json:"matched"`
 	// HistoryEvaluated 表示技术层确实执行了（要拉 K 线）
 	HistoryEvaluated bool `json:"historyEvaluated"`
+
+	// ChanlunEvaluated 表示缠论层确实执行了（开关打开且走到最后一层）
+	ChanlunEvaluated bool `json:"chanlunEvaluated"`
+	// ChanlunPassed 通过缠论筛选的数量（= 启用时的最终命中数）
+	ChanlunPassed int `json:"chanlunPassed"`
 
 	Elapsed string `json:"elapsed"`
 	// Notes 说明哪些条件没有生效、为什么 —— 不能静默忽略
@@ -386,6 +401,19 @@ func (s *StockService) ScreenStocks(cond ScreenCondition) (*ScreenResult, error)
 	}
 	result.TechPassed = len(passed)
 
+	// ---- 第 5 层：缠论筛选（**最后一层**，方案 §10.1）----
+	//
+	// 只有开关打开时才执行；关闭时一个分支都不进，原流程与结果完全不变。
+	// 它不改变任何已有条件的语义，只对已通过全部条件的候选做过滤与排序。
+	var chanlunHits map[string]*ChanlunHit
+	if cond.Chanlun.Enable {
+		var chanlunNotes []string
+		passed, chanlunHits, chanlunNotes = s.applyChanlunFilter(ctx, provider, passed, cond, tradeDate)
+		result.Notes = append(result.Notes, chanlunNotes...)
+		result.ChanlunEvaluated = true
+		result.ChanlunPassed = len(passed)
+	}
+
 	// ---- 结果股票的板块名（与筛选条件无关，纯粹是展示信息）----
 	//
 	// 只对最终命中的股票建索引，不对全市场做 —— 命中数通常远小于 7500。
@@ -435,12 +463,20 @@ func (s *StockService) ScreenStocks(cond ScreenCondition) (*ScreenResult, error)
 			row.RelativeStrength = tech.relativeStrength
 			row.Benchmark = tech.benchmark
 		}
+		if hit, ok := chanlunHits[item.Code]; ok {
+			row.Chanlun = hit
+		}
 		items = append(items, row)
 	}
 
 	// 原项目的 filter_stocks 不做排序，结果按代码升序。
-	// 这里保持同样的确定性顺序，界面自己提供交互排序。
-	sort.Slice(items, func(i, j int) bool { return items[i].Code < items[j].Code })
+	// 启用缠论筛选时按缠论综合分降序（方案 §10.4 要求给优先级），
+	// 未启用时保持原来的确定性顺序，行为完全不变。
+	if cond.Chanlun.Enable {
+		sortScreenItemsByChanlun(items, chanlunHits)
+	} else {
+		sort.Slice(items, func(i, j int) bool { return items[i].Code < items[j].Code })
+	}
 
 	result.Matched = len(items)
 	if cond.Limit > 0 && len(items) > cond.Limit {
@@ -1266,7 +1302,10 @@ type ScreenConditionInfo struct {
 
 // GetScreenCondition 读取上次使用的筛选条件；从未保存过时返回默认值。
 func (s *StockService) GetScreenCondition() ScreenConditionInfo {
-	defaults := ScreenCondition{ExcludeST: true, HasQuoteOnly: true, DrawdownDays: 30}
+	defaults := ScreenCondition{
+		ExcludeST: true, HasQuoteOnly: true, DrawdownDays: 30,
+		Chanlun: defaultChanlunScreenCondition(),
+	}
 	if s.cfg == nil {
 		return ScreenConditionInfo{Condition: defaults}
 	}
@@ -1278,6 +1317,13 @@ func (s *StockService) GetScreenCondition() ScreenConditionInfo {
 	if err := json.Unmarshal(raw, &cond); err != nil {
 		slog.Warn("筛选条件解析失败，回退默认值", "err", err)
 		return ScreenConditionInfo{Condition: defaults}
+	}
+	// 旧版本的配置里没有 chanlun 段：补上默认级别与窗口，界面上不会出现"没选中任何级别"
+	if !chanlun.ValidLevel(chanlun.Level(cond.Chanlun.OperLevel)) {
+		cond.Chanlun.OperLevel = defaults.Chanlun.OperLevel
+	}
+	if cond.Chanlun.LookbackDays <= 0 {
+		cond.Chanlun.LookbackDays = defaults.Chanlun.LookbackDays
 	}
 	return ScreenConditionInfo{Condition: cond, Saved: true}
 }
@@ -1314,6 +1360,16 @@ type ScreenOptions struct {
 	LakeRoot string `json:"lakeRoot"`
 	// Defaults 是首次使用时的默认条件
 	Defaults ScreenCondition `json:"defaults"`
+	// ChanlunDefaults 是缠论筛选的默认值（开关默认关闭）
+	ChanlunDefaults ChanlunScreenCondition `json:"chanlunDefaults"`
+	// ChanlunLevels 是缠论可用的操作级别
+	ChanlunLevels []ChanlunLevelOption `json:"chanlunLevels"`
+}
+
+// ChanlunLevelOption 是缠论级别下拉的一项。
+type ChanlunLevelOption struct {
+	Key  string `json:"key"`
+	Name string `json:"name"`
 }
 
 // GetScreenOptions 返回条件选股界面需要的元信息。
@@ -1334,7 +1390,15 @@ func (s *StockService) GetScreenOptions() (*ScreenOptions, error) {
 			ExcludeST:    true,
 			HasQuoteOnly: true,
 			DrawdownDays: 30,
+			Chanlun:      defaultChanlunScreenCondition(),
 		},
+		ChanlunDefaults: defaultChanlunScreenCondition(),
+	}
+	for _, level := range chanlun.LevelOrder {
+		out.ChanlunLevels = append(out.ChanlunLevels, ChanlunLevelOption{
+			Key:  string(level),
+			Name: chanlun.LevelCN(level),
+		})
 	}
 	for _, item := range UnsupportedScreenConditions {
 		out.Unsupported = append(out.Unsupported, item.Name+"："+item.Reason)
@@ -1356,4 +1420,17 @@ func marketInfos() []MarketInfo {
 		out = append(out, MarketInfo{Key: def.Key, Name: def.Name, Group: def.Group})
 	}
 	return out
+}
+
+// defaultChanlunScreenCondition 返回缠论筛选的默认值。
+//
+// **开关默认关闭**：缠论是最后一层额外计算，不该在用户没要求时改变选股结果。
+func defaultChanlunScreenCondition() ChanlunScreenCondition {
+	cfg := chanlun.DefaultConfig()
+	return ChanlunScreenCondition{
+		Enable:         false,
+		OperLevel:      string(cfg.OperLevel),
+		AllowCandidate: true,
+		LookbackDays:   500,
+	}
 }

@@ -5,18 +5,32 @@
  * 原项目 filter_stocks 不做排序（结果按代码升序），排序交给界面 ——
  * 这里保持一致：默认按代码升序，用户点表头才排序。
  */
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import { ArrowUpDown } from "@lucide/vue";
 
 import { Badge } from "@/components/ui/badge";
 import type { ScreenItem } from "@/lib/backend";
-import { formatAmount, formatLargeNumber, formatPercent } from "@/lib/format";
+import { formatAmount, formatDate, formatLargeNumber, formatPercent } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 const props = defineProps<{ items: ScreenItem[] }>();
 const emit = defineEmits<{ select: [ScreenItem] }>();
 
-type SortKey = "code" | "pctChg" | "totalMV" | "peTTM" | "pb" | "roe" | "turnover" | "drawdownPct" | "ps" | "institution" | "quarterGrowth" | "relativeStrength";
+type SortKey =
+  | "code"
+  | "pctChg"
+  | "totalMV"
+  | "peTTM"
+  | "pb"
+  | "roe"
+  | "turnover"
+  | "drawdownPct"
+  | "ps"
+  | "institution"
+  | "quarterGrowth"
+  | "relativeStrength"
+  | "chanlunScore"
+  | "adaptability";
 
 /**
  * 数据湖指标的列按需出现：数据集没入库时这些字段全是 0，
@@ -26,9 +40,24 @@ const hasPS = computed(() => props.items.some((item) => item.ps !== 0));
 const hasInstitution = computed(() => props.items.some((item) => item.institution !== 0));
 const hasGrowth = computed(() => props.items.some((item) => item.quarterGrowth !== 0));
 const hasRS = computed(() => props.items.some((item) => item.relativeStrength !== 0));
+/** 启用缠论筛选时后端会填充 chanlun 字段；没启用时不显示这些列 */
+const hasChanlun = computed(() => props.items.some((item) => item.chanlun));
 
 const sortKey = ref<SortKey>("code");
 const sortAsc = ref(true);
+let chanlunDefaultApplied = false;
+
+// 缠论启用时后端已按综合分降序返回，表格默认也按综合分排，避免一进来就被代码序打乱
+watch(
+  hasChanlun,
+  (value) => {
+    if (!value || chanlunDefaultApplied) return;
+    chanlunDefaultApplied = true;
+    sortKey.value = "chanlunScore";
+    sortAsc.value = false;
+  },
+  { immediate: true },
+);
 
 function toggleSort(key: SortKey) {
   if (sortKey.value === key) {
@@ -40,14 +69,30 @@ function toggleSort(key: SortKey) {
   sortAsc.value = key === "code";
 }
 
+/** 取值：缠论相关列是嵌套字段，单独映射 */
+function sortValue(item: ScreenItem, key: SortKey): number | string {
+  switch (key) {
+    case "code":
+      return item.code;
+    case "chanlunScore":
+      return item.chanlun?.bestScore ?? 0;
+    case "adaptability":
+      return item.chanlun?.adaptability ?? 0;
+    default:
+      return (item[key] as number) ?? 0;
+  }
+}
+
 const sorted = computed(() => {
   const list = [...props.items];
   const direction = sortAsc.value ? 1 : -1;
   list.sort((a, b) => {
-    if (sortKey.value === "code") {
-      return a.code.localeCompare(b.code) * direction;
+    const left = sortValue(a, sortKey.value);
+    const right = sortValue(b, sortKey.value);
+    if (typeof left === "string" || typeof right === "string") {
+      return String(left).localeCompare(String(right)) * direction;
     }
-    return ((a[sortKey.value] as number) - (b[sortKey.value] as number)) * direction;
+    return (left - right) * direction;
   });
   return list;
 });
@@ -75,6 +120,45 @@ const lakeColumns = computed(() => {
 function pctClass(value: number) {
   if (!Number.isFinite(value) || value === 0) return "text-flat";
   return value > 0 ? "text-up" : "text-down";
+}
+
+// ---- 缠论列 ----
+const STATE_LABEL: Record<string, string> = {
+  candidate: "候选",
+  triggered: "触发",
+  confirmed: "确认",
+  invalid: "失效",
+  expired: "过期",
+};
+
+function chanlunStateLabel(item: ScreenItem): string {
+  const state = item.chanlun?.bestState;
+  return state ? STATE_LABEL[state] ?? state : "";
+}
+
+/** 命中原因（悬停查看）：后端已经写好，这里只负责展示 */
+function chanlunTitle(item: ScreenItem): string {
+  return item.chanlun?.reasons?.join("\n") ?? "";
+}
+
+/** 命中日期要带上是哪一天：确认/触发/形成，和 K 线提示里的阶段对得上 */
+function bestDateLabel(item: ScreenItem): string {
+  const chanlun = item.chanlun;
+  if (!chanlun?.bestDate) return "";
+  const prefix =
+    chanlun.bestState === "confirmed"
+      ? "确认"
+      : chanlun.bestState === "triggered"
+        ? "触发"
+        : "形成";
+  return `${prefix} ${formatDate(chanlun.bestDate)}`;
+}
+
+/** 买点用上涨色、卖点用下跌色（与全站红涨绿跌一致） */
+function chanlunClass(item: ScreenItem): string {
+  const type = item.chanlun?.bestType ?? "";
+  if (!type) return "text-muted-foreground";
+  return type.startsWith("buy") ? "text-up" : "text-down";
 }
 </script>
 
@@ -109,6 +193,26 @@ function pctClass(value: number) {
                 <ArrowUpDown v-if="sortKey === column.key" class="size-3" :class="sortAsc ? 'rotate-180' : ''" />
               </span>
             </th>
+            <template v-if="hasChanlun">
+              <th
+                class="cursor-pointer px-2.5 py-2 text-left font-medium select-none"
+                @click="toggleSort('chanlunScore')"
+              >
+                <span class="inline-flex items-center gap-1">
+                  缠论信号
+                  <ArrowUpDown v-if="sortKey === 'chanlunScore'" class="size-3" :class="sortAsc ? 'rotate-180' : ''" />
+                </span>
+              </th>
+              <th
+                class="cursor-pointer px-2.5 py-2 text-right font-medium select-none"
+                @click="toggleSort('adaptability')"
+              >
+                <span class="inline-flex items-center gap-1">
+                  适配性
+                  <ArrowUpDown v-if="sortKey === 'adaptability'" class="size-3" :class="sortAsc ? 'rotate-180' : ''" />
+                </span>
+              </th>
+            </template>
             <th class="px-2.5 py-2 text-left font-medium">板块</th>
           </tr>
         </thead>
@@ -167,6 +271,36 @@ function pctClass(value: number) {
             >
               {{ formatPercent(item.relativeStrength) }}
             </td>
+            <template v-if="hasChanlun">
+              <td class="px-2.5 py-1.5" :title="chanlunTitle(item)">
+                <span v-if="item.chanlun" class="inline-flex flex-wrap items-center gap-1">
+                  <span class="font-medium" :class="chanlunClass(item)">
+                    {{ item.chanlun.bestTypeCn || item.chanlun.stateCn }}
+                  </span>
+                  <Badge v-if="item.chanlun.bestState" variant="outline" class="px-1 py-0 text-[10px]">
+                    {{ chanlunStateLabel(item) }}
+                  </Badge>
+                  <span v-if="item.chanlun.conflict" class="text-destructive text-[10px]">矛盾</span>
+                  <span class="text-muted-foreground text-[10px]">
+                    {{ item.chanlun.bestScore ? item.chanlun.bestScore.toFixed(1) : "" }}
+                  </span>
+                  <!-- 命中日期：同一个"三买确认"在不同分析窗口里可能是不同年份的结构 -->
+                  <span v-if="item.chanlun.bestDate" class="text-muted-foreground/70 text-[9px]">
+                    {{ bestDateLabel(item) }}
+                  </span>
+                </span>
+                <span v-else class="text-muted-foreground">—</span>
+              </td>
+              <td class="tabular px-2.5 py-1.5 text-right">
+                <span v-if="item.chanlun">
+                  {{ item.chanlun.adaptGrade }}
+                  <span class="text-muted-foreground text-[10px]">
+                    {{ item.chanlun.adaptability.toFixed(0) }}
+                  </span>
+                </span>
+                <span v-else class="text-muted-foreground">—</span>
+              </td>
+            </template>
             <td class="px-2.5 py-1.5">
               <span v-if="item.boards?.length" class="text-muted-foreground text-[11px]">
                 {{ item.boards.slice(0, 3).join("、") }}

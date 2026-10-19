@@ -288,6 +288,12 @@ type valuationDataset struct {
 	// 理由见 loadValuationDataset 的说明。
 	focus map[string]bool
 
+	// marketPEAnchor 是全市场 PE 中位数，作为"行业成分不足时"的兜底锚。
+	//
+	// 目标倍数必须锚定市场实际水平（见 valuation.fairPE），总不能因为有行业
+	// 就拿不到锚就退回默认区间 —— 那正是银行被给出 20 倍目标 PE 的原因之一。
+	marketPEAnchor float64
+
 	// industrySystem 是本次评估实际采用的行业分类体系（sw / eastmoney）。
 	// industryExcluded 列出了其它体系及"为什么没用"，两者都进溯源信息。
 	industrySystem   string
@@ -445,6 +451,13 @@ type stockEvaluation struct {
 	// confidence 是估值置信度（12 个月口径，作为整体置信度的代表）。
 	confidence valuation.Confidence
 	volatility float64
+
+	// 下面四项是"第一遍算合理价值"需要的输入：合理价值要等拿到行业聚合
+	// 之后才算（目标 PE 锚定行业 PE 中位数），所以先把它们存下来。
+	price       float64
+	totalShares float64
+	prevShares  float64
+	horizons    []valuation.Horizon
 }
 
 // ---------------------------------------------------------------------------
@@ -542,8 +555,11 @@ func (s *StockService) GetStockValuation(code string) (*StockValuation, error) {
 	relative := valuation.EvaluateRelativeValuation(eval.company, industry, members, peers, params)
 	relative.ComparableNote = peerNote
 
-	// 用行业环境重算合理价值，再评分
-	eval.fair = s.applyIndustry(eval, industry, params)
+	// 拿到行业之后才算合理价值 —— 目标 PE 要锚定行业 PE 中位数
+	// （见 valuation.fairPE 的说明：不锚定会把银行判成"该涨 4 倍"）。
+	// 首遍：锚定行业 PE 中位数算合理价值（拿不到行业时兜底全市场锚）。
+	// 详情页有 5 档，所以这里一次算全。
+	s.evaluateFairValues(&eval, industry, data.marketPEAnchor, params)
 	sharePoint, _ := eval.shares.Latest()
 
 	score, scoreErr := valuation.EvaluateScore(valuation.ScoreInput{
@@ -1420,7 +1436,7 @@ func valuationWorkers() int {
 // （见 evaluateOneStock），并且按代次缓存。
 //
 // 两条路在行业聚合用到的字段上**逐个一致**，由 TestProfileMatchesSnapshot 钉住。
-func (s *StockService) buildSnapshotUniverse(data *valuationDataset, params valuation.Params) (map[string]companySnapshot, map[string][]string) {
+func (s *StockService) buildSnapshotUniverse(data *valuationDataset, params valuation.Params) (map[string]companySnapshot, map[string][]string, float64) {
 	candidates := make([]string, 0, len(data.bars))
 	for code := range data.bars {
 		// 只算股票：ETF/基金没有财报，估值模型不适用
@@ -1469,9 +1485,19 @@ func (s *StockService) buildSnapshotUniverse(data *valuationDataset, params valu
 		byCode[code] = item.snapshot
 		groups[item.snapshot.tag.Code] = append(groups[item.snapshot.tag.Code], code)
 	}
+	// 市场 PE 中位数：作为"行业成分不足"时的兜底锚。
+	// 先缩尾再取中位：中位数本身抗极端值，缩尾让"合理 PB/PE"不被千倍 PE 拉爆。
+	pes := make([]float64, 0, len(byCode))
+	for _, snapshot := range byCode {
+		if snapshot.company.PE > 0 {
+			pes = append(pes, snapshot.company.PE)
+		}
+	}
+	marketAnchor := valuation.Median(valuation.Winsorize(pes, 0.02, 0.98))
 	slog.Debug("估值评估：全市场行业基准就绪",
-		"标的数", len(byCode), "行业数", len(groups), "跳过", skipped)
-	return byCode, groups
+		"标的数", len(byCode), "行业数", len(groups), "跳过", skipped,
+		"市场PE中位", fmt.Sprintf("%.1f", marketAnchor))
+	return byCode, groups, marketAnchor
 }
 
 // evaluateOneStock 评估一只标的（价格序列在这里按需构造并缓存）。
@@ -1563,47 +1589,74 @@ func (s *StockService) evaluateOneStock(data *valuationDataset, code string, par
 	}
 
 	// ---- 合理价值 ----
+	//
+	// ⚠ 这里**只做占位**，真正的合理价值由 `applyIndustry` 在拿到行业聚合之后算。
+	//
+	// 原因是本轮的实测修正：目标 PE 必须锚定在"行业 PE 中位数"上（见 fairPE 的
+	// 说明），而行业聚合要等全部标的评估完才能算出来。如果在这里就算，
+	// 只能拿到 PEAnchor=0，于是目标倍数退回默认区间 —— 银行会被给出 20 倍目标 PE。
+	//
+	// 同理 `IndustryAvailable` 也只有那时才知道，early 算会把"行业聚合不可用"
+	// 的 10 分扣分永久写进置信度（这个 bug 之前一直在生效）。
 	horizons := valuation.Horizons
 	if !withFair {
 		horizons = []valuation.Horizon{valuation.Horizons[3]} // 只算 12 个月
 	}
 	out.fair = map[string]valuation.FairValue{}
 	sharePoint, _ := snapshot.shares.Latest()
-	for _, horizon := range horizons {
+	out.price = current.Close
+	out.totalShares = sharePoint.TotalShares
+	out.prevShares = previousShares(current.Date, snapshot.shares)
+	out.horizons = horizons
+	return out, true
+}
+
+// evaluateFairValues 在拿到行业聚合之后算合理价值（锚定行业 PE 中位数）。
+//
+// 与 `applyIndustry` 的分工：这个函数负责"第一遍"，用行业聚合或全市场锚；
+// `applyIndustry` 负责"已经有合理价值之后的重算"（界面上的行业环境修正）。
+func (s *StockService) evaluateFairValues(eval *stockEvaluation, industry valuation.IndustryValuation,
+	marketAnchor float64, params valuation.Params) {
+
+	anchor, anchorSource := industry.MedianPE, "行业"
+	if anchor <= 0 {
+		anchor, anchorSource = marketAnchor, "全市场"
+	}
+	_ = anchorSource
+	for _, horizon := range eval.horizons {
 		fair := valuation.EvaluateFairValue(valuation.FairValueInput{
-			Company: out.company,
-			AsOf:    asOf,
-			// ⚠ 不复权价：市值与每股价值口径必须是真实成交价
-			Price:       current.Close,
-			Shares:      sharePoint.TotalShares,
-			PrevShares:  previousShares(current.Date, snapshot.shares),
-			Growth:      growth,
-			Quality:     quality,
-			Horizon:     horizon,
-			Params:      params,
-			PriceSeries: snapshot.series,
+			Company:           eval.company,
+			AsOf:              eval.asOf,
+			Price:             eval.price,
+			Shares:            eval.totalShares,
+			PrevShares:        eval.prevShares,
+			Growth:            eval.growth,
+			Quality:           eval.quality,
+			Industry:          industry,
+			IndustryAvailable: industry.Available,
+			PEAnchor:          anchor,
+			Horizon:           horizon,
+			Params:            params,
+			PriceSeries:       eval.series,
 		})
-		out.fair[horizon.Key] = fair
+		eval.fair[horizon.Key] = fair
 		if horizon.Key == "12m" {
-			out.confidence = fair.Confidence
+			eval.confidence = fair.Confidence
 		}
 	}
-	if !withFair {
-		// 全市场评估只算了 12 个月；其它档位用同一份结果占位，
-		// 保证 ScoreInput 里取 fair 不会拿到零值（评分里只有 DimMargin 用到 12m）。
-		for _, horizon := range valuation.Horizons {
-			if _, ok := out.fair[horizon.Key]; !ok {
-				out.fair[horizon.Key] = out.fair["12m"]
-			}
+	// 全市场评估只算了 12 个月；其它档位用同一份结果占位，
+	// 保证 ScoreInput 里取 fair 不会拿到零值（评分里只有 DimMargin 用到 12m）。
+	for _, horizon := range valuation.Horizons {
+		if _, ok := eval.fair[horizon.Key]; !ok {
+			eval.fair[horizon.Key] = eval.fair["12m"]
 		}
 	}
-	if out.confidence.Score == 0 {
-		out.confidence = valuation.Confidence{
+	if eval.confidence.Score == 0 {
+		eval.confidence = valuation.Confidence{
 			Score: 40, Level: "low",
 			Reasons: []string{"合理价值测算未给出置信度（数据不足）"},
 		}
 	}
-	return out, true
 }
 
 // applyIndustry 用行业环境重算各期限的合理价值。
@@ -1756,7 +1809,8 @@ func (s *StockService) buildValuationReport(lake *cnlake.Lake, params valuation.
 		relative := valuation.EvaluateRelativeValuation(eval.company, industry, industryMembers, peers, params)
 		relative.ComparableNote = peerNote
 
-		fair := s.applyIndustry(*eval, industry, params)
+		// 首遍：用行业 PE 中位数为锚算合理价值（拿不到行业时兜底全市场锚）
+		s.evaluateFairValues(eval, industry, data.marketPEAnchor, params)
 		sharePoint, _ := eval.shares.Latest()
 
 		score, scoreErr := valuation.EvaluateScore(valuation.ScoreInput{
@@ -1776,7 +1830,7 @@ func (s *StockService) buildValuationReport(lake *cnlake.Lake, params valuation.
 			PriceLength:   eval.series.Len(),
 			PriceAdjusted: eval.series.Adjusted,
 			Confidence:    eval.confidence,
-			FairByHorizon: fair,
+			FairByHorizon: eval.fair,
 			Params:        params,
 		})
 		if scoreErr != nil {
@@ -2167,7 +2221,10 @@ func (s *StockService) snapshotUniverse(data *valuationDataset, params valuation
 		return cached
 	}
 
-	byCode, groups := s.buildSnapshotUniverse(data, params)
+	byCode, groups, marketAnchor := s.buildSnapshotUniverse(data, params)
+	// 把锚写到数据集上：详情页（GetStockValuation）不经过 universe 缓存，
+	// 但它需要同一个锚来算合理价值。
+	data.marketPEAnchor = marketAnchor
 	entry := &valuationUniverseEntry{gen: gen, evalDate: data.evalDate, byCode: byCode, groups: groups}
 
 	s.valMu.Lock()

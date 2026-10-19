@@ -129,6 +129,44 @@ import type {
   ValuationBand,
   ValuationPoint,
 } from "../../bindings/freestock/internal/valuation/models";
+// 缠论引擎：结构类型定义在 chanlun 包里，Wails 按包生成模型
+import type {
+  Adaptability as ChanlunAdaptability,
+  Analysis as ChanlunAnalysis,
+  Bundle as ChanlunBundle,
+  Config as ChanlunConfig,
+  DimScore as ChanlunDimScore,
+  Divergence as ChanlunDivergence,
+  DivergenceOutcome as ChanlunDivergenceOutcome,
+  Fractal as ChanlunFractal,
+  Level as ChanlunLevel,
+  LevelSummary as ChanlunLevelSummary,
+  MergedBarInfo as ChanlunMergedBar,
+  MultiLevel as ChanlunMultiLevel,
+  Pivot as ChanlunPivot,
+  Position as ChanlunPosition,
+  Replay as ChanlunReplay,
+  ReplayStep as ChanlunReplayStep,
+  Scenario as ChanlunScenario,
+  ScoreFactor as ChanlunScoreFactor,
+  Segment as ChanlunSegment,
+  Signal as ChanlunSignal,
+  SignalState as ChanlunSignalState,
+  SignalType as ChanlunSignalType,
+  StateInfo as ChanlunState,
+  Stroke as ChanlunStroke,
+  Trend as ChanlunTrend,
+  TrendType as ChanlunTrendType,
+} from "../../bindings/freestock/internal/chanlun/models";
+// 缠论的服务层入参/出参
+import type {
+  ChanlunConfigInfo,
+  ChanlunHit,
+  ChanlunLevelOption,
+  ChanlunRequest,
+  ChanlunScreenCondition,
+  ChanlunSignalBrief,
+} from "../../bindings/freestock/internal/service/models";
 import * as StockService from "../../bindings/freestock/internal/service/stockservice";
 import * as CneUpdateService from "../../bindings/freestock/internal/service/cneupdateservice";
 import * as PortfolioService from "../../bindings/freestock/internal/service/portfolioservice";
@@ -205,6 +243,42 @@ export type {
   ScoreRow,
   StrategyConfig,
   StrengthSummary,
+};
+
+// 缠论相关类型（引擎侧 + 服务层）
+export type {
+  ChanlunAdaptability,
+  ChanlunAnalysis,
+  ChanlunBundle,
+  ChanlunConfig,
+  ChanlunDimScore,
+  ChanlunDivergence,
+  ChanlunDivergenceOutcome,
+  ChanlunFractal,
+  ChanlunLevel,
+  ChanlunLevelSummary,
+  ChanlunMergedBar,
+  ChanlunMultiLevel,
+  ChanlunPivot,
+  ChanlunPosition,
+  ChanlunReplay,
+  ChanlunReplayStep,
+  ChanlunScenario,
+  ChanlunScoreFactor,
+  ChanlunSegment,
+  ChanlunSignal,
+  ChanlunSignalState,
+  ChanlunSignalType,
+  ChanlunState,
+  ChanlunStroke,
+  ChanlunTrend,
+  ChanlunTrendType,
+  ChanlunConfigInfo,
+  ChanlunHit,
+  ChanlunLevelOption,
+  ChanlunRequest,
+  ChanlunScreenCondition,
+  ChanlunSignalBrief,
 };
 
 export type {
@@ -491,6 +565,25 @@ export const api = {
     StockService.GetScreenCondition() as Promise<ScreenConditionInfo | null>,
   saveScreenCondition: (cond: ScreenCondition) =>
     StockService.SaveScreenCondition(cond) as Promise<void>,
+
+  // ---- 缠论（见 docs/缠论功能开发方案.md 与 docs/缠论功能开发计划.md）----
+  //
+  // 口径要点：
+  //  · 每个级别**独立**算分型/笔/线段/中枢/走势，大级别只用于印证与压制；
+  //  · 无中枢不背驰、无趋势不做趋势背驰，买卖点带状态机且仅作参考；
+  //  · 回到前端的标注全部按**日期**给出（不是下标），图只消费数据、不重算缠论。
+  chanlun: {
+    /** 单只标的在指定级别的完整分析（含多级别印证） */
+    analyze: (req: ChanlunRequest) =>
+      StockService.GetChanlunAnalysis(req) as Promise<ChanlunBundle | null>,
+    /** 读取 / 保存缠论配置（级别权重、类型权重、背驰力度、阈值） */
+    getConfig: () => StockService.GetChanlunConfig() as Promise<ChanlunConfigInfo>,
+    saveConfig: (prefs: ChanlunConfig) =>
+      StockService.SaveChanlunConfig(prefs) as Promise<ChanlunConfigInfo>,
+    /** 逐根推进的回放快照（无未来数据验证） */
+    replay: (req: ChanlunRequest) =>
+      StockService.ReplayChanlun(req) as Promise<ChanlunReplay | null>,
+  },
 
   // ---- 组合管理 ----
   portfolio: {

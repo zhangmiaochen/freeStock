@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"freestock/internal/chanlun"
 )
 
 // DataSource 描述一个数据源。
@@ -99,9 +101,15 @@ type KlinePrefs struct {
 	// 所以是两个独立的开关，可以同时开。统计全部在前端算（见 lib/rangeStats），
 	// 后端同样只需要记住这个开关。
 	ShowRangeSelect bool      `json:"showRangeSelect"`
-	Boll            BollPrefs `json:"boll"`
-	Macd            MacdPrefs `json:"macd"`
-	MaConfigs       []MaPrefs `json:"maConfigs"`
+	// ShowChanlun 是 K 线页「缠论」叠加层的开关；ChanlunLevel 是它的分析级别。
+	//
+	// 缠论结构全部在后端算（internal/chanlun），前端只消费标注数据；
+	// 这里只记住"要不要画"和"画哪个级别"。
+	ShowChanlun   bool      `json:"showChanlun"`
+	ChanlunLevel  string    `json:"chanlunLevel"`
+	Boll          BollPrefs `json:"boll"`
+	Macd          MacdPrefs `json:"macd"`
+	MaConfigs     []MaPrefs `json:"maConfigs"`
 }
 
 // DefaultKlinePrefs 返回首次使用时的默认值（与界面默认一致）。
@@ -127,6 +135,8 @@ func DefaultKlinePrefs() KlinePrefs {
 		// 框选统计默认关闭：开启后左键拖拽变成框选（不再平移），
 		// 会改变默认操作手感，必须由用户显式打开
 		ShowRangeSelect: false,
+		ShowChanlun:     false,
+		ChanlunLevel:    string(chanlun.LevelDay),
 		Boll:            BollPrefs{Period: 20, Mult: 2},
 		Macd:            MacdPrefs{Fast: 12, Slow: 26, Signal: 9},
 		MaConfigs:       mas,
@@ -159,6 +169,11 @@ func (p KlinePrefs) Sanitize() KlinePrefs {
 	case "qfq", "hfq", "none":
 	default:
 		p.Adjust = def.Adjust
+	}
+
+	// 缠论级别：只允许引擎认识的级别，非法值回落到日线
+	if !chanlun.ValidLevel(chanlun.Level(p.ChanlunLevel)) {
+		p.ChanlunLevel = def.ChanlunLevel
 	}
 
 	p.Boll.Period = clampInt(p.Boll.Period, 2, 250, def.Boll.Period)
@@ -208,6 +223,11 @@ type fileData struct {
 	UpdatePrefs *UpdatePrefs `json:"updatePrefs,omitempty"`
 	// EmailPrefs 是组合调仓日报的邮件设置。
 	EmailPrefs *EmailPrefs `json:"emailPrefs,omitempty"`
+	// ChanlunPrefs 是缠论引擎的配置（级别权重、类型权重、背驰力度、阈值等）。
+	//
+	// 直接存引擎的 Config：它是纯值结构、自带 Sanitize，没有反向依赖
+	//（chanlun 包不 import config / service），所以不需要再写一层映射。
+	ChanlunPrefs *chanlun.Config `json:"chanlunPrefs,omitempty"`
 }
 
 // Store 管理配置文件。
@@ -415,6 +435,30 @@ func (s *Store) SetKlinePrefs(prefs KlinePrefs) {
 	sanitized := prefs.Sanitize()
 	s.mu.Lock()
 	s.data.KlinePrefs = &sanitized
+	path := s.path
+	payload, err := json.MarshalIndent(s.data, "", "  ")
+	s.mu.Unlock()
+	s.write(path, payload, err)
+}
+
+// ChanlunPrefs 返回已保存的缠论配置。
+//
+// 第二个返回值为 false 表示从未保存过（首次使用），调用方用引擎默认值。
+// 读到的手工改坏的配置会被 Sanitize 纠正，不会让界面崩掉。
+func (s *Store) ChanlunPrefs() (chanlun.Config, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.data.ChanlunPrefs == nil {
+		return chanlun.DefaultConfig(), false
+	}
+	return s.data.ChanlunPrefs.Sanitize(), true
+}
+
+// SetChanlunPrefs 保存缠论配置。
+func (s *Store) SetChanlunPrefs(prefs chanlun.Config) {
+	sanitized := prefs.Sanitize()
+	s.mu.Lock()
+	s.data.ChanlunPrefs = &sanitized
 	path := s.path
 	payload, err := json.MarshalIndent(s.data, "", "  ")
 	s.mu.Unlock()
