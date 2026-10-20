@@ -53,6 +53,7 @@ const CHANLUN_FALLBACK: ChanlunScreenCondition = {
   multiResonance: false,
   minAdaptability: 0,
   lookbackDays: 500,
+  maxSignalAge: 60,
 } as ChanlunScreenCondition;
 
 const chanlun = computed<ChanlunScreenCondition>(
@@ -871,6 +872,23 @@ function fromDateInput(value: string): number {
                 "
               />
               <span class="text-muted-foreground text-[11px]">根日 K</span>
+            </div>
+            <div class="flex items-center gap-2">
+              <span class="w-24 shrink-0 text-xs">信号新鲜度</span>
+              <input
+                class="tabular bg-background h-6 w-16 rounded border px-1.5 text-xs outline-none"
+                :value="chanlun.maxSignalAge ?? 60"
+                placeholder="60"
+                inputmode="numeric"
+                @change="
+                  patchChanlun({
+                    maxSignalAge: Math.max(0, Number(($event.target as HTMLInputElement).value) || 0),
+                  })
+                "
+              />
+              <span class="text-muted-foreground text-[11px]">
+                根 K 线内确认/触发，0 = 不限
+              </span>
             </div>
           </div>
 

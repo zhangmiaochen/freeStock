@@ -151,7 +151,15 @@ function bestDateLabel(item: ScreenItem): string {
       : chanlun.bestState === "triggered"
         ? "触发"
         : "形成";
-  return `${prefix} ${formatDate(chanlun.bestDate)}`;
+  return `${prefix} ${formatDate(chanlun.bestDate)}${ageLabel(chanlun.bestAgeDays)}`;
+}
+
+/** 信号有多旧：15 个月前确认的三买，不该被当成今天的机会 */
+function ageLabel(days: number | undefined): string {
+  if (!days || days <= 0) return "";
+  if (days < 30) return ` · ${days}天前`;
+  if (days < 365) return ` · ${Math.round(days / 30)}个月前`;
+  return ` · ${(days / 365).toFixed(1)}年前`;
 }
 
 /** 买点用上涨色、卖点用下跌色（与全站红涨绿跌一致） */

@@ -7,11 +7,14 @@ import (
 	"log/slog"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"freestock/internal/backtest"
+	"freestock/internal/chanlun"
+	"freestock/internal/chanlunassist"
 	"freestock/internal/portfolio"
 	"freestock/internal/score"
 )
@@ -31,6 +34,11 @@ type BacktestRequest struct {
 	TargetPositionCount int     `json:"targetPositionCount"`
 	MaxStockCount       int     `json:"maxStockCount"`
 	BenchmarkCode       string  `json:"benchmarkCode"`
+	// ChanlunAssist 非空且 Enable 时，在调仓计划上叠加缠论辅助：
+	// 确认二买/三买加 1/2 层、确认一卖/二卖/三卖分批减 1/1/2 层。
+	//
+	// nil / Enable=false 时行为与既有回测**完全一致**（不会多取一次日线、也不改计划）。
+	ChanlunAssist *chanlunassist.Config `json:"chanlunAssist,omitempty"`
 }
 
 // BacktestRunResult 是回测完成后的摘要。
@@ -274,6 +282,48 @@ func (s *PortfolioService) CreateBacktest(req BacktestRequest) (runResult *Backt
 		}
 	}
 	buildPlan := s.backtestPlanBuilder(item, store, marketStateByDate(store, days), targetCount, maxStocks, indexGates, readyByDate)
+
+	// ★ 缠论辅助（可选）：在计划生成之后、引擎执行之前叠加。
+	//
+	// 为什么放在 PlanBuilder 这一层而不是改引擎：引擎只负责撮合，选股与层数来自计划；
+	// 在这里叠加可以保证「基线 / 实验组」共用同一套评分、撮合、费用与现金约束，
+	// 差异只来自缠论信号本身。
+	var (
+		assistCfg   chanlunassist.Config
+		assistState *chanlunassist.State
+	)
+	if req.ChanlunAssist != nil && req.ChanlunAssist.Enable {
+		assistCfg = req.ChanlunAssist.Sanitized()
+		// 单股上限不能超过引擎自己的上限（低吸是总层数，其余是 3）。
+		if cfg.MaxLayersPerStock > 0 && assistCfg.MaxLayersPerStock > cfg.MaxLayersPerStock {
+			assistCfg.MaxLayersPerStock = cfg.MaxLayersPerStock
+		}
+		// 缠论结构需要「计划日之前」的历史：向前多取约 550 个自然日（≈370 个交易日）。
+		warmStart := shiftBack(req.StartDate, 550)
+		assistBegan := time.Now()
+		chanBars, err := s.loadChanlunBars(codes, warmStart, req.EndDate)
+		if err != nil {
+			return nil, fmt.Errorf("缠论辅助取日线失败：%w", err)
+		}
+		if len(chanBars) == 0 {
+			return nil, fmt.Errorf("缠论辅助已启用，但区间内没有可用的日线（%d~%d）", warmStart, req.EndDate)
+		}
+		analyzer := chanlunassist.NewAnalyzer(chanBars, chanlun.DefaultConfig(), assistCfg)
+		assistState = chanlunassist.NewState()
+		basePlanBuilder := buildPlan
+		buildPlan = func(held []score.Row, day backtest.StrengthDay) score.RotationPlan {
+			plan := basePlanBuilder(held, day)
+			asOf, convErr := strconv.Atoi(day.Date)
+			if convErr != nil {
+				return plan
+			}
+			return chanlunassist.Apply(plan, held, asOf, analyzer, assistCfg, assistState)
+		}
+		slog.Info("缠论辅助已启用",
+			"股票数", len(codes), "有日线", analyzer.CodeCount(),
+			"预热起点", warmStart, "配置", assistCfg,
+			"取日线耗时", time.Since(assistBegan).Round(time.Millisecond))
+	}
 	// ★ 评分日与价格日**必须有交集**，否则整个回测一条计划都产不出来。
 	//
 	// 原实现直接抛错（portfolio_service.py:1011-1018
@@ -334,6 +384,25 @@ func (s *PortfolioService) CreateBacktest(req BacktestRequest) (runResult *Backt
 	// 引擎与指标、落库三处必须是同一个数。
 	metrics := backtest.CalculateMetrics(result.Snapshots, result.Trades, cfg.InitialCapital)
 	metrics.ScopeWarning = s.backtestScopeWarning(codes, len(result.Trades), days, req.StartDate, req.EndDate)
+	if assistState != nil {
+		assistState.Stats.SortEvents()
+		metrics.Extra = map[string]any{
+			"chanlunAssist": map[string]any{
+				"config": assistCfg,
+				"stats":  assistState.Stats,
+			},
+		}
+		slog.Info("缠论辅助统计",
+			"买入加层", assistState.Stats.BuyLayersAdded,
+			"二买", assistState.Stats.Buy2Boosts, "三买", assistState.Stats.Buy3Boosts,
+			"卖出减层", assistState.Stats.SellLayersSold,
+			"一卖", assistState.Stats.Sell1Reduces, "二卖", assistState.Stats.Sell2Reduces,
+			"三卖", assistState.Stats.Sell3Reduces,
+			"跳过", map[string]int{
+				"上限": assistState.Stats.SkippedCapped, "冲突": assistState.Stats.SkippedConflict,
+				"重复": assistState.Stats.SkippedDuplicate, "已退出": assistState.Stats.SkippedAlreadyExit,
+			})
+	}
 
 	// ⑤ 落库
 	runID := portfolio.NewBacktestRunID()
@@ -628,6 +697,69 @@ func (s *PortfolioService) loadBacktestBars(codes []string, start, end int) ([]b
 				}
 				mu.Lock()
 				out = append(out, local...)
+				mu.Unlock()
+			}
+		}()
+	}
+	for _, code := range codes {
+		jobs <- job{code: code}
+	}
+	close(jobs)
+	wg.Wait()
+	return out, nil
+}
+
+// loadChanlunBars 取缠论所需的 OHLCV（含预热窗口），按代码分组。
+//
+// 与 `loadBacktestBars` 的差别：
+//   - 这里要 High/Low（分型、笔、中枢都依赖它），`PriceBar` 只有 Open/Close；
+//   - 区间要覆盖 StartDate **之前**的一段，否则回测头几天没有结构可判；
+//   - 价格口径与回测撮合一致（同走 `DailyHistory` 的复权口径），
+//     避免「缠论用复权价、撮合用不复权价」这种静默错位。
+func (s *PortfolioService) loadChanlunBars(
+	codes []string, start, end int,
+) (map[string][]chanlun.Bar, error) {
+	if s.stock == nil {
+		return nil, fmt.Errorf("缺少股票服务依赖")
+	}
+	provider, _ := s.stock.snapshot()
+	if provider == nil {
+		return nil, fmt.Errorf("数据源未就绪")
+	}
+	if cache := s.backfillCacheFor(provider, start, end); cache != nil {
+		provider = cache
+		slog.Info("缠论辅助复用回填时的日线缓存", "codes", len(codes), "from", start, "to", end)
+	}
+
+	type job struct{ code string }
+	jobs := make(chan job)
+	var (
+		mu  sync.Mutex
+		out = make(map[string][]chanlun.Bar, len(codes))
+		wg  sync.WaitGroup
+	)
+	workers := scoreWorkers
+	if workers > len(codes) {
+		workers = len(codes)
+	}
+	if workers < 1 {
+		workers = 1
+	}
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := range jobs {
+				quotes, err := provider.DailyHistory(context.Background(), j.code, start, end)
+				if err != nil || len(quotes) == 0 {
+					continue
+				}
+				bars := chanlunBarsFromQuotes(quotes)
+				if len(bars) == 0 {
+					continue
+				}
+				mu.Lock()
+				out[j.code] = bars
 				mu.Unlock()
 			}
 		}()
@@ -1071,7 +1203,7 @@ func rowToStrength(row score.Row, industry string) portfolio.StrengthRow {
 // （portfolio_service.py:1059-1068 写 total_commission / total_tax /
 // total_transaction_cost 与费率），便于对账手续费。
 func metricsToJSON(m backtest.Metrics, trades []backtest.Trade) string {
-	raw, err := json.Marshal(map[string]any{
+	payload := map[string]any{
 		"total_return": m.TotalReturn, "annual_return": m.AnnualReturn,
 		"max_drawdown": m.MaxDrawdown, "volatility": m.Volatility,
 		"sharpe_ratio": m.SharpeRatio, "calmar_ratio": m.CalmarRatio,
@@ -1094,7 +1226,12 @@ func metricsToJSON(m backtest.Metrics, trades []backtest.Trade) string {
 		// 回填范围过小的提示 —— **蛇形键**，前端读的就是这个
 		"scope_warning": m.ScopeWarning,
 		"scopeWarning":  m.ScopeWarning,
-	})
+	}
+	// 扩展指标（例如缠论辅助统计）：原样并入摘要，键名由调用方负责唯一。
+	for key, value := range m.Extra {
+		payload[key] = value
+	}
+	raw, err := json.Marshal(payload)
 	if err != nil {
 		return "{}"
 	}

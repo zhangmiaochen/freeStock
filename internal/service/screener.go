@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -1325,6 +1326,11 @@ func (s *StockService) GetScreenCondition() ScreenConditionInfo {
 	if cond.Chanlun.LookbackDays <= 0 {
 		cond.Chanlun.LookbackDays = defaults.Chanlun.LookbackDays
 	}
+	// 旧配置没有 maxSignalAge 字段：补默认的新鲜度窗口。
+	// 不能用"==0 就补"，因为 0 是用户显式选择的"不限"。
+	if !bytes.Contains(raw, []byte(`"maxSignalAge"`)) {
+		cond.Chanlun.MaxSignalAge = defaults.Chanlun.MaxSignalAge
+	}
 	return ScreenConditionInfo{Condition: cond, Saved: true}
 }
 
@@ -1432,5 +1438,8 @@ func defaultChanlunScreenCondition() ChanlunScreenCondition {
 		OperLevel:      string(cfg.OperLevel),
 		AllowCandidate: true,
 		LookbackDays:   500,
+		// 只认最近 60 根 K 线内确认/触发的信号：再老的"confirmed"只是还没失效，
+		// 不代表现在还有进场机会。
+		MaxSignalAge: 60,
 	}
 }

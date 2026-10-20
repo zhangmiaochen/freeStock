@@ -1578,6 +1578,11 @@ export class ChanlunHit {
      * 可能是不同年份的两次结构。
      */
     "bestDate": number;
+
+    /**
+     * BestAgeDays 是命中日期距最新交易日的自然日数，用来提示"信号有多旧"。
+     */
+    "bestAgeDays": number;
     "reasons": string[];
     "conflict": boolean;
     "adaptability": number;
@@ -1660,6 +1665,9 @@ export class ChanlunHit {
         if (!("bestDate" in $$source)) {
             this["bestDate"] = 0;
         }
+        if (!("bestAgeDays" in $$source)) {
+            this["bestAgeDays"] = 0;
+        }
         if (!("reasons" in $$source)) {
             this["reasons"] = [];
         }
@@ -1692,7 +1700,7 @@ export class ChanlunHit {
         const $$createField11_0 = $$createType34;
         const $$createField17_0 = $$createType36;
         const $$createField18_0 = $$createType38;
-        const $$createField24_0 = $$createType13;
+        const $$createField25_0 = $$createType13;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("outlook" in $$parsedSource) {
             $$parsedSource["outlook"] = $$createField11_0($$parsedSource["outlook"]);
@@ -1704,7 +1712,7 @@ export class ChanlunHit {
             $$parsedSource["signals"] = $$createField18_0($$parsedSource["signals"]);
         }
         if ("reasons" in $$parsedSource) {
-            $$parsedSource["reasons"] = $$createField24_0($$parsedSource["reasons"]);
+            $$parsedSource["reasons"] = $$createField25_0($$parsedSource["reasons"]);
         }
         return new ChanlunHit($$parsedSource as Partial<ChanlunHit>);
     }
@@ -1867,6 +1875,15 @@ export class ChanlunScreenCondition {
      */
     "lookbackDays": number;
 
+    /**
+     * MaxSignalAge 信号新鲜度：只保留"确认/触发/形成"发生在最近 N 根 K 线内的信号
+     * （按分析级别计；0 表示不限）。默认 60。
+     * 
+     * 没有这一条时，一个 2025-07 确认、之后价格一路走高从没触发失效的三买，
+     * 到 2026-10 仍会被当成"当前机会"选出来 —— 这是典型的"信号还活着，但机会早过了"。
+     */
+    "maxSignalAge": number;
+
     /** Creates a new ChanlunScreenCondition instance. */
     constructor($$source: Partial<ChanlunScreenCondition> = {}) {
         if (!("enable" in $$source)) {
@@ -1910,6 +1927,9 @@ export class ChanlunScreenCondition {
         }
         if (!("lookbackDays" in $$source)) {
             this["lookbackDays"] = 0;
+        }
+        if (!("maxSignalAge" in $$source)) {
+            this["maxSignalAge"] = 0;
         }
 
         Object.assign(this, $$source);

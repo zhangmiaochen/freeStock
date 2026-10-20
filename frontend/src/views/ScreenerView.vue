@@ -57,6 +57,7 @@ function emptyChanlunCondition(): ChanlunScreenCondition {
     multiResonance: false,
     minAdaptability: 0,
     lookbackDays: 500,
+    maxSignalAge: 60,
   } as ChanlunScreenCondition;
 }
 

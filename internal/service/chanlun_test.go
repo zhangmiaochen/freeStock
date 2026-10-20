@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"math"
 	"testing"
@@ -218,4 +219,51 @@ func TestChanlunScreenLookbackByLevel(t *testing.T) {
 	if got := chanlunScreenLookback(chanlun.LevelDay, 2000); got != 2000 {
 		t.Fatalf("用户指定更大窗口时应以用户为准，得到 %d", got)
 	}
+}
+
+// 信号新鲜度：15 个月前确认、之后一直没失效的三买，不是"当前机会"。
+func TestSignalFresh(t *testing.T) {
+	// 最新 K 线下标 400，确认发生在 100 根之前
+	old := chanlun.Signal{State: chanlun.StateConfirmed, FormIndex: 280, TriggerIndex: 290, ConfirmIndex: 300}
+	if signalFresh(old, 400, 0) != true {
+		t.Fatal("0 应表示不限")
+	}
+	if signalFresh(old, 400, 60) {
+		t.Fatal("100 根前确认的信号不应算新鲜")
+	}
+	if !signalFresh(old, 400, 120) {
+		t.Fatal("120 根窗口内应算新鲜")
+	}
+
+	// 同一信号：确认很旧，但触发刚发生（状态为触发）→ 按触发算，是新鲜的
+	freshTrigger := chanlun.Signal{State: chanlun.StateTriggered, FormIndex: 280, TriggerIndex: 395, ConfirmIndex: -1}
+	if !signalFresh(freshTrigger, 400, 60) {
+		t.Fatal("刚触发的信号应按触发日算新鲜")
+	}
+
+	// 候选还没触发，按形成日算
+	candidate := chanlun.Signal{State: chanlun.StateCandidate, FormIndex: 300, TriggerIndex: -1, ConfirmIndex: -1}
+	if signalFresh(candidate, 400, 60) {
+		t.Fatal("候选按形成日算，100 根前已不新鲜")
+	}
+}
+
+// 旧配置没有 maxSignalAge 字段时应补默认窗口；但 0 是用户显式的"不限"，不能被覆盖。
+func TestScreenConditionMaxSignalAgeMigration(t *testing.T) {
+	defaults := defaultChanlunScreenCondition()
+	if defaults.MaxSignalAge != 60 {
+		t.Fatalf("默认新鲜度窗口应为 60，得到 %d", defaults.MaxSignalAge)
+	}
+	// 这里只验证"缺字段"的判据本身：旧 raw 不含该键
+	if bytesContainsKey([]byte(`{"chanlun":{"enable":true,"lookbackDays":500}}`), "maxSignalAge") {
+		t.Fatal("旧配置不应被识别为包含 maxSignalAge")
+	}
+	if !bytesContainsKey([]byte(`{"chanlun":{"enable":true,"maxSignalAge":0}}`), "maxSignalAge") {
+		t.Fatal("显式写 0 的配置应被识别为包含 maxSignalAge")
+	}
+}
+
+// bytesContainsKey 与 GetScreenCondition 里的迁移判据保持一致。
+func bytesContainsKey(raw []byte, key string) bool {
+	return bytes.Contains(raw, []byte(`"`+key+`"`))
 }

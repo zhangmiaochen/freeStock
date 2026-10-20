@@ -58,6 +58,9 @@ type Metrics struct {
 	// 进而删光所有买入信号（回测零成交的常见原因）。
 	// 见 service 侧的 backtestScopeWarning。
 	ScopeWarning string `json:"scopeWarning"`
+	// Extra 是可选的扩展指标（例如缠论辅助的加/减层统计）。
+	// 随 summary_json 一起落库；为空时不改变既有摘要结构。
+	Extra map[string]any `json:"extra,omitempty"`
 }
 
 // CalculateMetrics 计算全部指标。

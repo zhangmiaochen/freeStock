@@ -410,6 +410,12 @@ type ChanlunScreenCondition struct {
 	MinAdaptability float64 `json:"minAdaptability"`
 	// LookbackDays 分析窗口（日 K 根数，默认 500）
 	LookbackDays int `json:"lookbackDays"`
+	// MaxSignalAge 信号新鲜度：只保留"确认/触发/形成"发生在最近 N 根 K 线内的信号
+	// （按分析级别计；0 表示不限）。默认 60。
+	//
+	// 没有这一条时，一个 2025-07 确认、之后价格一路走高从没触发失效的三买，
+	// 到 2026-10 仍会被当成"当前机会"选出来 —— 这是典型的"信号还活着，但机会早过了"。
+	MaxSignalAge int `json:"maxSignalAge"`
 }
 
 // ChanlunSignalBrief 是选股结果里的一条买卖点摘要。
@@ -466,6 +472,8 @@ type ChanlunHit struct {
 	// 表格里显示它，才知道命中的是哪一条 —— 同一个"三买确认"在不同窗口里
 	// 可能是不同年份的两次结构。
 	BestDate int `json:"bestDate"`
+	// BestAgeDays 是命中日期距最新交易日的自然日数，用来提示"信号有多旧"。
+	BestAgeDays int `json:"bestAgeDays"`
 
 	Reasons      []string `json:"reasons"`
 	Conflict     bool     `json:"conflict"`
@@ -553,6 +561,11 @@ func (s *StockService) applyChanlunFilter(
 	notes = append(notes, fmt.Sprintf(
 		"缠论分析窗口：%d ~ %d（配置 %d 个交易日，另加取数缓冲）；K 线页是全历史分析，同一只票的结构可能不同",
 		start, tradeDate, lookback))
+	if filter.MaxSignalAge > 0 {
+		notes = append(notes, fmt.Sprintf(
+			"信号新鲜度：只保留最近 %d 根%s K 线内确认/触发的信号（再老的「确认」只是还没失效，不等于现在有进场机会；0 = 不限）",
+			filter.MaxSignalAge, chanlun.LevelCN(level)))
+	}
 	if failed > 0 {
 		notes = append(notes, fmt.Sprintf(
 			"%d 只股票没有取到日线（停牌 / 退市 / 未同步），已排除在缠论筛选之外", failed))
@@ -615,6 +628,7 @@ func evaluateChanlunStock(
 	}
 
 	// ---- 挑选符合条件的信号 ----
+	lastBar := len(bars) - 1
 	selected := make([]chanlun.Signal, 0, len(analysis.Signals))
 	conflict := false
 	for _, sig := range analysis.Signals {
@@ -624,6 +638,11 @@ func evaluateChanlunStock(
 			if !chanlunContains(filter.States, string(sig.State)) {
 				continue
 			}
+		}
+		// 新鲜度：一个 15 个月前确认、之后一直没失效的三买不是"当前机会"。
+		// 这一条放在 conflict 之前：旧信号不该把整只票标成"结构矛盾"。
+		if !signalFresh(sig, lastBar, filter.MaxSignalAge) {
+			continue
 		}
 		if sig.Conflict {
 			conflict = true
@@ -722,6 +741,9 @@ func evaluateChanlunStock(
 		if hit.BestDate == 0 {
 			hit.BestDate = best.FormDate
 		}
+		if hit.BestDate > 0 && lastBar >= 0 {
+			hit.BestAgeDays = daysBetween(hit.BestDate, int(bars[lastBar].Date))
+		}
 	}
 
 	hit.Reasons = buildChanlunHitReasons(analysis, best, resonance)
@@ -788,6 +810,42 @@ func buildChanlunHitReasons(analysis *chanlun.Analysis, best chanlun.Signal, res
 	return reasons
 }
 
+// signalStateIndex 返回信号"当前状态"对应的 K 线下标：确认优先，其次触发，最后形成。
+func signalStateIndex(sig chanlun.Signal) int {
+	if sig.ConfirmIndex >= 0 {
+		return sig.ConfirmIndex
+	}
+	if sig.TriggerIndex >= 0 {
+		return sig.TriggerIndex
+	}
+	return sig.FormIndex
+}
+
+// signalFresh 判断信号是否够"新"：状态日期距最新 K 线不超过 maxAge 根。
+//
+// maxAge <= 0 表示不限。只按**分析级别**的 K 线计数（日线 60 根 ≈ 3 个月，
+// 周线 60 根 ≈ 14 个月），所以界面把它标成"根 K 线"而不是自然日。
+func signalFresh(sig chanlun.Signal, lastIndex, maxAge int) bool {
+	if maxAge <= 0 {
+		return true
+	}
+	idx := signalStateIndex(sig)
+	if idx < 0 || idx > lastIndex || lastIndex < 0 {
+		return false
+	}
+	return lastIndex-idx <= maxAge
+}
+
+// daysBetween 返回两个 YYYYMMDD 之间的自然日数。
+func daysBetween(from, to int) int {
+	if from <= 0 || to <= 0 {
+		return 0
+	}
+	f := time.Date(from/10000, time.Month((from/100)%100), from%100, 0, 0, 0, 0, time.UTC)
+	t := time.Date(to/10000, time.Month((to/100)%100), to%100, 0, 0, 0, 0, time.UTC)
+	return int(t.Sub(f).Hours() / 24)
+}
+
 // summarizeDivergence 把背驰压成一句话（带背驰后的判定）。
 func summarizeDivergence(divs []chanlun.Divergence) string {
 	if len(divs) == 0 {
@@ -819,6 +877,9 @@ func normalizeChanlunScreenCondition(
 	}
 	if filter.MinAdaptability < 0 {
 		filter.MinAdaptability = 0
+	}
+	if filter.MaxSignalAge < 0 {
+		filter.MaxSignalAge = 0
 	}
 	// 没显式要求"只看确认"时，候选信号默认允许（与方案 §10.2 的开关一致）
 	if !filter.ConfirmedOnly && !filter.AllowCandidate {

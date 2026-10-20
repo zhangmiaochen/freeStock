@@ -230,6 +230,17 @@ function timeline(signal: {
             <AlertTriangle class="mt-0.5 size-3 shrink-0 text-amber-400" />
             <span>{{ precision }}</span>
           </p>
+          <!-- 年线/月线常见：样本太少，笔与中枢根本长不出来 -->
+          <p
+            v-if="analysis.data.bars < 60"
+            class="mt-1 flex items-start gap-1 text-[11px] text-amber-400/90"
+          >
+            <AlertTriangle class="mt-0.5 size-3 shrink-0" />
+            <span>
+              当前级别只有 {{ analysis.data.bars }} 根 K 线，笔/中枢样本不足
+              （年线通常需要 30 年以上数据），结论仅供参考。
+            </span>
+          </p>
         </section>
 
         <!-- 中枢 / 背驰 -->
