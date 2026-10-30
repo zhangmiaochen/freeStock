@@ -62,6 +62,12 @@ export class Metrics {
      */
     "scopeWarning": string;
 
+    /**
+     * Extra 是可选的扩展指标（例如缠论辅助的加/减层统计）。
+     * 随 summary_json 一起落库；为空时不改变既有摘要结构。
+     */
+    "extra"?: { [_ in string]?: any };
+
     /** Creates a new Metrics instance. */
     constructor($$source: Partial<Metrics> = {}) {
         if (!("totalReturn" in $$source)) {
@@ -159,7 +165,14 @@ export class Metrics {
      * Creates a new Metrics instance from a string or object.
      */
     static createFrom($$source: any = {}): Metrics {
+        const $$createField29_0 = $$createType0;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        if ("extra" in $$parsedSource) {
+            $$parsedSource["extra"] = $$createField29_0($$parsedSource["extra"]);
+        }
         return new Metrics($$parsedSource as Partial<Metrics>);
     }
 }
+
+// Private type creation functions
+const $$createType0 = $Create.Map($Create.Any, $Create.Any);

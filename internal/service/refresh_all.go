@@ -81,6 +81,8 @@ type RefreshAllResult struct {
 	Force      bool              `json:"force"`
 	Elapsed    string            `json:"elapsed"`
 	Strategies []StrategyRefresh `json:"strategies"`
+	// SkippedStrategies 是不参与 stock_strength 评分的策略（质量成长）
+	SkippedStrategies []string `json:"skippedStrategies,omitempty"`
 	// Saved / Reused / Total 是各策略的合计，方便界面一句话说明
 	Saved  int `json:"saved"`
 	Reused int `json:"reused"`
@@ -111,6 +113,11 @@ func (s *PortfolioService) RefreshBackfillAll(startDate, endDate, limit int, for
 	}
 	began := time.Now()
 	for _, id := range ids {
+		// 质量成长不写 stock_strength，跳过（否则会按别的策略口径白算一遍）
+		if !portfolio.StrategyUsesStrength(id) {
+			out.SkippedStrategies = append(out.SkippedStrategies, score.StrategyLabelOf(id))
+			continue
+		}
 		entry := BackfillStrategy{StrategyID: id, StrategyLabel: score.StrategyLabelOf(id)}
 		result, err := s.RefreshBackfill(id, startDate, endDate, limit, force)
 		if err != nil {
@@ -168,6 +175,9 @@ type BackfillAllResult struct {
 	Total      int                `json:"total"`
 	Dates      []int              `json:"dates"`
 	Strategies []BackfillStrategy `json:"strategies"`
+	// SkippedStrategies 是不参与 stock_strength 评分的策略（质量成长），
+	// 只做提示，不计入 Strategies。
+	SkippedStrategies []string `json:"skippedStrategies,omitempty"`
 }
 
 // RefreshStrengthAll 刷新所有活跃策略的评分（原版 `refresh_latest` 的语义）。
@@ -187,6 +197,11 @@ func (s *PortfolioService) RefreshStrengthAll(limit int, force bool) (*RefreshAl
 	out := &RefreshAllResult{Limit: limit, Force: force, Strategies: make([]StrategyRefresh, 0, len(ids))}
 	began := time.Now()
 	for _, id := range ids {
+		// 质量成长不写 stock_strength，跳过
+		if !portfolio.StrategyUsesStrength(id) {
+			out.SkippedStrategies = append(out.SkippedStrategies, score.StrategyLabelOf(id))
+			continue
+		}
 		entry := StrategyRefresh{StrategyID: id, StrategyLabel: score.StrategyLabelOf(id)}
 		result, err := s.RefreshStrength(id, limit, force)
 		if err != nil {

@@ -414,10 +414,12 @@ func (s *PortfolioService) GetPortfolioOptions() *PortfolioOptions {
 			{Key: portfolio.TypeAuto, Label: "自动组合", Description: "可直接应用建议"},
 		},
 		Strategies: []PortfolioOption{
-			{Key: portfolio.StrategyTrendGrowth, Label: "趋势成长"},
-			{Key: portfolio.StrategyTrendLowBuy, Label: "趋势低吸"},
-			{Key: portfolio.StrategyOversold, Label: "超跌反弹"},
-			{Key: portfolio.StrategyExpert, Label: "高手模拟"},
+			{Key: portfolio.StrategyTrendGrowth, Label: "趋势成长", Scored: true},
+			{Key: portfolio.StrategyTrendLowBuy, Label: "趋势低吸", Scored: true},
+			{Key: portfolio.StrategyQualityGrowth, Label: "质量成长·趋势回调", Scored: false,
+				Description: "独立取数（PIT 财报 + 日线），不依赖 stock_strength 评分"},
+			{Key: portfolio.StrategyOversold, Label: "超跌反弹", Scored: true},
+			{Key: portfolio.StrategyExpert, Label: "高手模拟", Scored: true},
 		},
 		Statuses: []PortfolioOption{
 			{Key: portfolio.StatusActive, Label: "运行中"},
@@ -450,6 +452,9 @@ type PortfolioOption struct {
 	Key         string `json:"key"`
 	Label       string `json:"label"`
 	Description string `json:"description,omitempty"`
+	// Scored 表示该策略是否依赖 stock_strength 评分（"刷新评分/全量重算"是否覆盖它）。
+	// 质量成长·趋势回调是独立取数策略，Scored=false。
+	Scored bool `json:"scored"`
 }
 
 // PortfolioOptions 是组合界面的元信息。

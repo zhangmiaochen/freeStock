@@ -98,12 +98,13 @@ const refreshLimit = ref(0);
  * 用到的策略去重后一次刷完）。这里把范围显式讲出来，避免用户以为
  * 只刷了当前组合、或者以为没生效。
  */
-const activeStrategies = ref<string[]>([]);
-
 /** 策略 ID → 中文名（options 里带 label，取不到就退回 ID） */
 function strategyLabelOf(id: string): string {
   const found = options.value?.strategies?.find(
-    (item) => (item as { value?: string }).value === id || (item as { id?: string }).id === id,
+    (item) =>
+      item.key === id ||
+      (item as { value?: string }).value === id ||
+      (item as { id?: string }).id === id,
   );
   return found?.label ?? id;
 }
@@ -111,29 +112,39 @@ function strategyLabelOf(id: string): string {
 /**
  * 刷新范围提示。
  *
- * ⚠ 要说清"**按策略去重**"这件事：用户可能有多个组合但都用同一个策略，
- * 这时只显示"1 个活跃策略"会让他以为漏了。原版 `_active_strategy_ids`
- * 也是按策略去重的，所以这里把"几个组合共用几个策略"一并讲出来。
+ * 直接从组合列表推导，避免"新建组合后提示还停留在旧策略数"：
+ * 之前用的是挂载时拉一次的 activeStrategyIds，新建组合不会刷新，
+ * 于是出现"3 个组合共用这 1 个策略"的错觉。
+ *
+ * 质量成长·趋势回调不写 stock_strength（Scored=false），不参与"刷新评分"，
+ * 单独提示，避免用户以为漏刷。
  */
 const refreshScopeHint = computed(() => {
-  const ids = activeStrategies.value;
   const scope = refreshLimit.value > 0 ? `前 ${refreshLimit.value} 只` : "全市场";
-  if (ids.length === 0) return `统一刷新全部活跃组合用到的策略（${scope}）`;
-  const labels = ids.map(strategyLabelOf).join("、");
   const active = (list.value ?? []).filter((item) => item.status !== "archived");
-  const shared =
-    active.length > ids.length ? `（${active.length} 个组合共用这 ${ids.length} 个策略）` : "";
-  return `统一刷新 ${labels}${shared}（${scope}）`;
+  const ids = [
+    ...new Set(active.map((item) => item.strategyId).filter((v): v is string => !!v)),
+  ];
+  if (ids.length === 0) return `统一刷新全部活跃组合用到的策略（${scope}）`;
+  const isScored = (id: string) => {
+    const opt = (options.value?.strategies ?? []).find((item) => item.key === id) as
+      | { scored?: boolean }
+      | undefined;
+    return opt?.scored !== false;
+  };
+  const scored = ids.filter(isScored);
+  const skipped = ids.filter((id) => !isScored(id));
+  const labels = scored.length ? scored.map(strategyLabelOf).join("、") : "（无）";
+  const notes: string[] = [];
+  if (active.length > ids.length) notes.push(`${active.length} 个组合共用这 ${ids.length} 个策略`);
+  if (skipped.length) notes.push(`${skipped.map(strategyLabelOf).join("、")} 不参与评分`);
+  const suffix = notes.length ? `（${notes.join("；")}）` : "";
+  return `统一刷新 ${labels}${suffix}（${scope}）`;
 });
 
-/** 拉一次活跃策略列表（非归档组合用到的策略，去重） */
-async function loadActiveStrategies() {
-  try {
-    activeStrategies.value = (await api.portfolio.activeStrategyIds()) as string[];
-  } catch {
-    activeStrategies.value = [];
-  }
-} // **默认全市场** —— 广度闸门按全市场统计，只评一部分会判成「广度不足」并删光买入信号
+// 刷新范围直接从组合列表（list）推导，不再额外缓存活跃策略列表 ——
+// 缓存在新建/编辑组合后不会自动更新，曾导致"3 个组合共用 1 个策略"的错觉。
+
 
 // ---- 指定区间刷新 ----
 //
@@ -189,11 +200,13 @@ async function refreshRange(force = false) {
     )) as unknown as {
       days: number; scored: number; reused: number; total: number; elapsed: string;
       strategies: { strategyLabel: string; scored: number; reused: number; error?: string }[];
+      skippedStrategies?: string[];
     };
     await loadStrength();
     await loadPlan();
     const scope = refreshLimit.value > 0 ? `前 ${refreshLimit.value} 只` : "全市场";
     const failed = (result.strategies ?? []).filter((s) => s.error);
+    const skipped = (result.skippedStrategies ?? []).join("、");
     const perStrategy = (result.strategies ?? [])
       .map((s) =>
         s.error ? `${s.strategyLabel}✗` : `${s.strategyLabel} ${s.scored} 天`,
@@ -202,6 +215,7 @@ async function refreshRange(force = false) {
     applyResult.value =
       `区间评分完成（${scope}）：${result.days} 个交易日、` +
       `${result.strategies?.length ?? 0} 个活跃策略` +
+      (skipped ? `（${skipped} 不参与评分）` : "") +
       `（实算 ${result.scored} 天、复用 ${result.reused} 条，耗时 ${result.elapsed}）` +
       (perStrategy ? `：${perStrategy}` : "");
     if (failed.length > 0) {
@@ -343,8 +357,10 @@ async function refreshStrength(force = false) {
             : `${s.strategyLabel} 新算 ${s.saved}${s.reused > 0 ? `/复用 ${s.reused}` : ""}`,
         )
         .join("，");
+      const skipped = ((result as unknown as { skippedStrategies?: string[] }).skippedStrategies ?? []).join("、");
       applyResult.value =
         `评分完成：${result.tradeDate}，共 ${result.strategies?.length ?? 0} 个活跃策略` +
+        (skipped ? `（${skipped} 不参与评分）` : "") +
         `（新算 ${result.saved} 条、复用 ${result.reused} 条、合计 ${result.total} 条，耗时 ${result.elapsed}）` +
         (perStrategy ? `：${perStrategy}` : "");
     }
@@ -498,9 +514,6 @@ function openKline(code: string) {
 onMounted(async () => {
   await loadOptions();
   await loadList();
-  // 活跃策略列表只用来给「刷新评分（全部策略）」按钮显示范围，
-  // 失败不影响主流程
-  void loadActiveStrategies();
 });
 </script>
 

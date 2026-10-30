@@ -114,6 +114,12 @@ func (s *PortfolioService) CreateBacktest(req BacktestRequest) (runResult *Backt
 		return nil, fmt.Errorf("回测区间格式错误，应为 YYYYMMDD 且开始日不能晚于结束日")
 	}
 
+	// 质量成长策略不走 stock_strength：它直接从数据湖取 PIT 财报 + 日线现算，
+	// 用独立的计划构建器（权重制，TotalLayers=100）。见 reports/fund_strategy/开发说明_v3.md。
+	if item.StrategyID == portfolio.StrategyQualityGrowth {
+		return s.createQualityGrowthBacktest(req, item)
+	}
+
 	// ① 区间内的评分（回测的前提：先做过历史回填）
 	//
 	// ⚠ 下面这些阶段计时是**为了定位"回测很慢"**加的：单看总耗时分不清

@@ -162,8 +162,17 @@ func TestPortfolioServiceOverviewAndOptions(t *testing.T) {
 	if len(options.Types) != 3 {
 		t.Errorf("组合类型应有 3 种: %d", len(options.Types))
 	}
-	if len(options.Strategies) != 4 {
-		t.Errorf("策略应有 4 种: %d", len(options.Strategies))
+	if len(options.Strategies) != 5 {
+		t.Errorf("策略应有 5 种: %d", len(options.Strategies))
+	}
+	foundQuality := false
+	for _, item := range options.Strategies {
+		if item.Key == portfolio.StrategyQualityGrowth {
+			foundQuality = true
+		}
+	}
+	if !foundQuality {
+		t.Error("缺少质量成长策略选项")
 	}
 	if len(options.HoldingTypes) == 0 || len(options.ScopeTypes) == 0 || len(options.Markets) == 0 {
 		t.Error("范围/市场/仓位性质不该为空")

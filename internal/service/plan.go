@@ -401,6 +401,12 @@ func (s *PortfolioService) BuildPlan(portfolioID string) (*PlanResult, error) {
 		return nil, err
 	}
 
+	// 质量成长走独立的数据与计划口径（PIT 财报 + 权重制），不复用低吸的
+	// stock_strength 轮动逻辑。
+	if item.StrategyID == portfolio.StrategyQualityGrowth {
+		return s.buildQualityGrowthPlan(item, store)
+	}
+
 	strategyID := item.StrategyID
 	// ⚠ **全表**最新评分日，不是该策略自己的 —— 原实现
 	// `get_rotation_payload`（portfolio_service.py:839）与 `apply_rotation`（:862）

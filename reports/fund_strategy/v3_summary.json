@@ -1,0 +1,45 @@
+{
+ "params": {
+  "n": 8,
+  "trend_ma": 200,
+  "pullback": true,
+  "min_roe": 8,
+  "min_rev_yoy": 0,
+  "min_np_yoy": 0,
+  "min_gm": 15,
+  "max_debt": 70,
+  "min_ocf": 0.3,
+  "dd_hi": -2,
+  "dd_lo": -20,
+  "min_amount": 30000000.0,
+  "min_listed": 250,
+  "value": false,
+  "cost": 0.0023,
+  "every": 1,
+  "bear_exposure": 0.5,
+  "weight_mode": "score2",
+  "max_weight": 0.15
+ },
+ "metrics": {
+  "total": 636.05,
+  "cagr": 15.64,
+  "maxdd": -47.57,
+  "vol": 26.92,
+  "sharpe": 0.62,
+  "years": 13.74
+ },
+ "segs": {
+  "2013-2018": 113.0,
+  "2019-2021": 80.9,
+  "2022-2023": -20.9,
+  "2024-2026": 140.7
+ },
+ "oos": {
+  "total": 9.55,
+  "cagr": 4.17,
+  "maxdd": -25.29,
+  "vol": 16.3,
+  "sharpe": 0.22,
+  "years": 2.23
+ }
+}

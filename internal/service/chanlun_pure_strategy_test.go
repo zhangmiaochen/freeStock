@@ -149,9 +149,22 @@ type pureEvent struct {
 	expire  int
 }
 
+type pureCandidate struct {
+	event pureEvent
+	age   int
+}
+
+// dirPoint 是某一周/月结束时、**当时**能确认的大周期方向。
+type dirPoint struct {
+	date    int
+	up      bool
+	notDown bool
+}
+
 type pureData struct {
 	start, end int
 	dates      []int
+	dateIndex  map[int]int
 	codes      []string
 	names      map[string]string
 	market     map[string]string
@@ -163,6 +176,10 @@ type pureData struct {
 	equity     map[string][]equityPoint
 	quarters   map[string][]quarterPoint
 	closes     map[string]map[int]float64
+	weeklyDir  map[string][]dirPoint
+	monthlyDir map[string][]dirPoint
+	weeklySig  map[string][]dirPoint
+	monthlySig map[string][]dirPoint
 }
 
 type pureCase struct {
@@ -172,6 +189,9 @@ type pureCase struct {
 	exit       string // sell3/sell123
 	positions  int
 	layersEach int
+	freshBars  int    // 0 = 只在确认日当天买；N = 确认后 N 个交易日内仍可买
+	timeMode   string // ""/W_up/M_up/WM_up/W_notdown/M_notdown/W_sig/M_sig/WM_sig
+	sizeMode   string // ""/W_up_half/W_sig_half/M_up_half：大周期向上满仓，否则半仓
 }
 
 func (c pureCase) String() string { return c.name }
@@ -199,6 +219,57 @@ func pureCases() []pureCase {
 			market: "all", entry: entry, exit: "sell123",
 			positions: 10, layersEach: 1,
 		})
+	}
+	// 新鲜度：确认后 N 个交易日内仍允许买入（0 = 只在确认日当天）。
+	for _, fresh := range []int{3, 5, 10, 20} {
+		for _, market := range markets {
+			cases = append(cases, pureCase{
+				name:   fmt.Sprintf("%s|buy23|sell123|5|f%d", market, fresh),
+				market: market, entry: "buy23", exit: "sell123",
+				positions: 5, layersEach: 2, freshBars: fresh,
+			})
+		}
+		for _, entry := range []string{"buy3", "buy123"} {
+			cases = append(cases, pureCase{
+				name:   fmt.Sprintf("all|%s|sell123|5|f%d", entry, fresh),
+				market: "all", entry: entry, exit: "sell123",
+				positions: 5, layersEach: 2, freshBars: fresh,
+			})
+		}
+	}
+	// 多周期：大周期（周/月）定方向，小周期（日线）定买卖点。
+	for _, mode := range []string{"W_up", "M_up", "WM_up", "W_notdown", "M_notdown", "W_sig", "M_sig", "WM_sig"} {
+		for _, market := range markets {
+			cases = append(cases, pureCase{
+				name:   fmt.Sprintf("%s|buy23|sell123|5|f10|%s", market, mode),
+				market: market, entry: "buy23", exit: "sell123",
+				positions: 5, layersEach: 2, freshBars: 10, timeMode: mode,
+			})
+		}
+		for _, entry := range []string{"buy3", "buy123"} {
+			cases = append(cases, pureCase{
+				name:   fmt.Sprintf("all|%s|sell123|5|f10|%s", entry, mode),
+				market: "all", entry: entry, exit: "sell123",
+				positions: 5, layersEach: 2, freshBars: 10, timeMode: mode,
+			})
+		}
+	}
+	// 大周期方向做仓位：向上 2 层，否则 1 层（不直接否决日线买点）。
+	for _, sizeMode := range []string{"W_up_half", "W_sig_half", "M_up_half"} {
+		for _, market := range markets {
+			cases = append(cases, pureCase{
+				name:   fmt.Sprintf("%s|buy23|sell123|5|f10|%s", market, sizeMode),
+				market: market, entry: "buy23", exit: "sell123",
+				positions: 5, layersEach: 2, freshBars: 10, sizeMode: sizeMode,
+			})
+		}
+		for _, entry := range []string{"buy3", "buy123"} {
+			cases = append(cases, pureCase{
+				name:   fmt.Sprintf("all|%s|sell123|5|f10|%s", entry, sizeMode),
+				market: "all", entry: entry, exit: "sell123",
+				positions: 5, layersEach: 2, freshBars: 10, sizeMode: sizeMode,
+			})
+		}
 	}
 	return cases
 }
@@ -230,6 +301,9 @@ func buildPureData(t *testing.T, svc *PortfolioService, start, end int) *pureDat
 		buyEvents: map[int][]pureEvent{}, sellEvents: map[string]map[int]pureEvent{},
 		shares: map[string][]sharePoint{}, equity: map[string][]equityPoint{},
 		quarters: map[string][]quarterPoint{}, closes: map[string]map[int]float64{},
+		dateIndex: map[int]int{},
+		weeklyDir: map[string][]dirPoint{}, monthlyDir: map[string][]dirPoint{},
+		weeklySig: map[string][]dirPoint{}, monthlySig: map[string][]dirPoint{},
 	}
 	var codes []string
 	for _, item := range instruments {
@@ -256,7 +330,7 @@ func buildPureData(t *testing.T, svc *PortfolioService, start, end int) *pureDat
 	t.Logf("标的池 %d 只（主板/创业板/科创板）", len(codes))
 
 	// 日线（含 550 天预热）
-	barsByCode, err := svc.loadChanlunBars(codes, shiftBack(start, 550), end)
+	barsByCode, err := svc.loadChanlunBars(codes, shiftBack(start, 1700), end)
 	if err != nil {
 		t.Fatalf("取日线失败：%v", err)
 	}
@@ -315,6 +389,12 @@ func buildPureData(t *testing.T, svc *PortfolioService, start, end int) *pureDat
 			})
 		}
 		analysis := chanlun.Analyze(bars, chanlun.LevelDay, chanlun.DefaultConfig(), chanlun.AdaptInfo{})
+		weeklyBars := aggregateBars(bars, "week")
+		monthlyBars := aggregateBars(bars, "month")
+		data.weeklyDir[code] = replayDirection(weeklyBars, chanlun.LevelWeek)
+		data.monthlyDir[code] = replayDirection(monthlyBars, chanlun.LevelMonth)
+		data.weeklySig[code] = signalDirection(weeklyBars, chanlun.LevelWeek)
+		data.monthlySig[code] = signalDirection(monthlyBars, chanlun.LevelMonth)
 		for _, sig := range analysis.Signals {
 			if sig.ConfirmDate < start || sig.ConfirmDate > end || sig.ConfirmIndex < 0 {
 				continue
@@ -370,6 +450,21 @@ func buildPureData(t *testing.T, svc *PortfolioService, start, end int) *pureDat
 	}
 	if len(data.dates) == 0 {
 		t.Fatal("区间内没有交易日")
+	}
+	for idx, date := range data.dates {
+		data.dateIndex[date] = idx
+	}
+	if codes, points, up := dirStats(data.weeklyDir); codes > 0 {
+		t.Logf("周线趋势方向：%d 只 / %d 个点 / 向上 %.0f%%", codes, points, float64(up)/float64(points)*100)
+	}
+	if codes, points, up := dirStats(data.monthlyDir); codes > 0 {
+		t.Logf("月线趋势方向：%d 只 / %d 个点 / 向上 %.0f%%", codes, points, float64(up)/float64(points)*100)
+	}
+	if codes, points, up := dirStats(data.weeklySig); codes > 0 {
+		t.Logf("周线买卖点方向：%d 只 / %d 个点 / 多头 %.0f%%", codes, points, float64(up)/float64(points)*100)
+	}
+	if codes, points, up := dirStats(data.monthlySig); codes > 0 {
+		t.Logf("月线买卖点方向：%d 只 / %d 个点 / 多头 %.0f%%", codes, points, float64(up)/float64(points)*100)
 	}
 	// 基准
 	if svc.stock != nil {
@@ -560,6 +655,176 @@ func parsePeriod(period string) (int, int, bool) {
 	return year, quarter, true
 }
 
+// aggregateBars 把日线聚合成周线/月线（OHLCV 标准聚合，日期取区间最后一个交易日）。
+func aggregateBars(bars []chanlun.Bar, period string) []chanlun.Bar {
+	if len(bars) == 0 {
+		return nil
+	}
+	out := make([]chanlun.Bar, 0, len(bars)/5+1)
+	var key string
+	var cur chanlun.Bar
+	flush := func() {
+		if cur.Date > 0 {
+			out = append(out, cur)
+		}
+	}
+	for _, bar := range bars {
+		parsed, err := time.Parse("20060102", strconv.Itoa(bar.Date))
+		if err != nil {
+			continue
+		}
+		var bucket string
+		if period == "week" {
+			year, week := parsed.ISOWeek()
+			bucket = fmt.Sprintf("%d-%02d", year, week)
+		} else {
+			bucket = fmt.Sprintf("%d-%02d", parsed.Year(), int(parsed.Month()))
+		}
+		if bucket != key {
+			flush()
+			key = bucket
+			cur = bar
+			continue
+		}
+		if bar.High > cur.High {
+			cur.High = bar.High
+		}
+		if bar.Low < cur.Low {
+			cur.Low = bar.Low
+		}
+		cur.Close = bar.Close
+		cur.Date = bar.Date
+		cur.Volume += bar.Volume
+		cur.Amount += bar.Amount
+	}
+	flush()
+	return out
+}
+
+// replayDirection 用逐段重算（BuildReplay）得到「每一周/月结束时、当时能确认」的方向。
+// 返回的 date 是该周期最后一个交易日；使用方只取 date < 当日 的状态，避免用未走完的周期。
+// 入参 bars 必须是已经聚合好的周线/月线。
+func replayDirection(bars []chanlun.Bar, level chanlun.Level) []dirPoint {
+	step := 2
+	maxSteps := 120
+	if level == chanlun.LevelMonth {
+		step = 1
+		maxSteps = 40
+	}
+	if len(bars) < 35 {
+		return nil
+	}
+	cfg := chanlun.DefaultConfig()
+	cfg.ReplayStep = step
+	cfg.ReplayMaxSteps = maxSteps
+	replay := chanlun.BuildReplay(bars, level, cfg, chanlun.AdaptInfo{})
+	out := make([]dirPoint, 0, len(replay.Steps))
+	for _, snapshot := range replay.Steps {
+		up := snapshot.Trend.Type == chanlun.TrendUp || snapshot.State.Name == chanlun.StateReverseUp
+		notDown := snapshot.Trend.Type != chanlun.TrendDown && snapshot.State.Name != chanlun.StateReverseDown
+		out = append(out, dirPoint{date: snapshot.Date, up: up, notDown: notDown})
+	}
+	return out
+}
+
+// signalDirection 用周线/月线**最近一个确认买卖点**定方向：
+// 最近确认的是买点 → 多；是卖点 → 空。比「趋势类型=上涨」更宽松，也更贴近
+// “大周期定方向”的实战用法。
+func signalDirection(bars []chanlun.Bar, level chanlun.Level) []dirPoint {
+	if len(bars) < 35 {
+		return nil
+	}
+	analysis := chanlun.Analyze(bars, level, chanlun.DefaultConfig(), chanlun.AdaptInfo{})
+	byDate := map[int]bool{} // date -> up（卖点优先）
+	for _, signal := range analysis.Signals {
+		if signal.ConfirmDate <= 0 {
+			continue
+		}
+		up := signal.Direction == "buy"
+		if old, ok := byDate[signal.ConfirmDate]; ok {
+			// 同一天多空都有时，按空处理（风险优先）
+			byDate[signal.ConfirmDate] = old && up
+			continue
+		}
+		byDate[signal.ConfirmDate] = up
+	}
+	dates := make([]int, 0, len(byDate))
+	for date := range byDate {
+		dates = append(dates, date)
+	}
+	sort.Ints(dates)
+	out := make([]dirPoint, 0, len(dates))
+	for _, date := range dates {
+		up := byDate[date]
+		out = append(out, dirPoint{date: date, up: up, notDown: up})
+	}
+	return out
+}
+
+func (d *pureData) directionOK(code string, date int, mode string) bool {
+	switch mode {
+	case "":
+		return true
+	}
+	switch mode {
+	case "W_sig":
+		point, ok := latestDir(d.weeklySig[code], date)
+		return ok && point.up
+	case "M_sig":
+		point, ok := latestDir(d.monthlySig[code], date)
+		return ok && point.up
+	case "WM_sig":
+		weekly, okW := latestDir(d.weeklySig[code], date)
+		monthly, okM := latestDir(d.monthlySig[code], date)
+		return okW && okM && weekly.up && monthly.up
+	}
+	weekly, okW := latestDir(d.weeklyDir[code], date)
+	monthly, okM := latestDir(d.monthlyDir[code], date)
+	switch mode {
+	case "W_up":
+		return okW && weekly.up
+	case "M_up":
+		return okM && monthly.up
+	case "WM_up":
+		return okW && okM && weekly.up && monthly.up
+	case "W_notdown":
+		return okW && weekly.notDown
+	case "M_notdown":
+		return okM && monthly.notDown
+	case "WM_notdown":
+		return okW && okM && weekly.notDown && monthly.notDown
+	}
+	return true
+}
+
+// latestDir 返回 date 之前（严格小于）最近一次已完成的周期状态。
+func latestDir(list []dirPoint, date int) (dirPoint, bool) {
+	if len(list) == 0 {
+		return dirPoint{}, false
+	}
+	idx := sort.Search(len(list), func(i int) bool { return list[i].date >= date }) - 1
+	if idx < 0 {
+		return dirPoint{}, false
+	}
+	return list[idx], true
+}
+
+func dirStats(m map[string][]dirPoint) (codes, points, up int) {
+	for _, list := range m {
+		if len(list) == 0 {
+			continue
+		}
+		codes++
+		points += len(list)
+		for _, point := range list {
+			if point.up {
+				up++
+			}
+		}
+	}
+	return codes, points, up
+}
+
 func pureMarketOf(code string) string {
 	if len(code) != 6 {
 		return ""
@@ -598,6 +863,9 @@ type pureResult struct {
 	Entry          string           `json:"entry"`
 	Exit           string           `json:"exit"`
 	Positions      int              `json:"positions"`
+	FreshBars      int              `json:"freshBars"`
+	TimeMode       string           `json:"timeMode"`
+	SizeMode       string           `json:"sizeMode"`
 	Metrics        backtest.Metrics `json:"metrics"`
 	BuySignals     int              `json:"buySignals"`
 	BuyPassed      int              `json:"buySignalsPassFundamental"`
@@ -622,7 +890,9 @@ func runPureCase(data *pureData, c pureCase) (pureResult, error) {
 		InitialCapital: 1_000_000,
 	}
 	result := pureResult{
-		Name: c.name, Market: c.market, Entry: c.entry, Exit: c.exit, Positions: c.positions,
+		Name: c.name, Market: c.market, Entry: c.entry, Exit: c.exit,
+		Positions: c.positions, FreshBars: c.freshBars,
+		TimeMode: c.timeMode, SizeMode: c.sizeMode,
 	}
 	entrySet := entryTypes(c.entry)
 	exitSet := exitTypes(c.exit)
@@ -640,14 +910,13 @@ func runPureCase(data *pureData, c pureCase) (pureResult, error) {
 		}
 	}
 
+	consumed := map[string]bool{}
 	builder := func(held []score.Row, day backtest.StrengthDay) score.RotationPlan {
 		date, _ := strconv.Atoi(day.Date)
 		heldCodes := map[string]bool{}
-		heldLayers := map[string]int{}
 		usedLayers := 0
 		for _, row := range held {
 			heldCodes[row.Code] = true
-			heldLayers[row.Code] = row.PositionLayers
 			usedLayers += row.PositionLayers
 		}
 		var rows []score.RotationRow
@@ -674,48 +943,92 @@ func runPureCase(data *pureData, c pureCase) (pureResult, error) {
 			sold[row.Code] = true
 			usedLayers -= row.PositionLayers
 		}
-		// 买：只认缠论确认买点 + 基本面前置过滤。
-		candidates := make([]pureEvent, 0, 8)
+		// 买：只认缠论确认买点 + 基本面前置过滤；允许在确认后 freshBars 个交易日内买入。
+		candidates := make([]pureCandidate, 0, 8)
 		queued := map[string]bool{}
-		for _, event := range data.buyEvents[date] {
-			if !entrySet[event.typ] || !marketAllowed(data.market[event.code], c.market) {
-				continue
+		dayIdx, ok := data.dateIndex[date]
+		if !ok {
+			dayIdx = len(data.dates) - 1
+		}
+		for age := 0; age <= c.freshBars; age++ {
+			idx := dayIdx - age
+			if idx < 0 {
+				break
 			}
-			if heldCodes[event.code] || sold[event.code] || queued[event.code] {
-				continue
+			eventDate := data.dates[idx]
+			for _, event := range data.buyEvents[eventDate] {
+				if !entrySet[event.typ] || !marketAllowed(data.market[event.code], c.market) {
+					continue
+				}
+				if !data.directionOK(event.code, date, c.timeMode) {
+					continue
+				}
+				if heldCodes[event.code] || sold[event.code] || queued[event.code] {
+					continue
+				}
+				if consumed[buyEventKey(event)] {
+					continue
+				}
+				if event.invalid > 0 && event.invalid <= date {
+					continue
+				}
+				if event.expire > 0 && event.expire <= date {
+					continue
+				}
+				if !data.fundamentalOK(event.code, date) {
+					continue
+				}
+				candidates = append(candidates, pureCandidate{event: event, age: age})
 			}
-			if event.invalid > 0 && event.invalid <= date {
-				continue
-			}
-			if event.expire > 0 && event.expire <= date {
-				continue
-			}
-			if !data.fundamentalOK(event.code, date) {
-				continue
-			}
-			candidates = append(candidates, event)
 		}
 		sort.Slice(candidates, func(i, j int) bool {
-			if candidates[i].score != candidates[j].score {
-				return candidates[i].score > candidates[j].score
+			if candidates[i].age != candidates[j].age {
+				return candidates[i].age < candidates[j].age
 			}
-			return candidates[i].code < candidates[j].code
+			if candidates[i].event.score != candidates[j].event.score {
+				return candidates[i].event.score > candidates[j].event.score
+			}
+			return candidates[i].event.code < candidates[j].event.code
 		})
 		slots := c.positions - (len(held) - len(sold))
-		for _, event := range candidates {
-			if slots <= 0 || usedLayers+maxLayers > 10 {
+		for _, candidate := range candidates {
+			event := candidate.event
+			targetLayers := maxLayers
+			if c.sizeMode != "" {
+				full := false
+				switch c.sizeMode {
+				case "W_up_half":
+					full = data.directionOK(event.code, date, "W_up")
+				case "W_sig_half":
+					full = data.directionOK(event.code, date, "W_sig")
+				case "M_up_half":
+					full = data.directionOK(event.code, date, "M_up")
+				}
+				if !full && targetLayers > 1 {
+					targetLayers = 1
+				}
+			}
+			if slots <= 0 || usedLayers+targetLayers > 10 {
 				break
+			}
+			reason := "纯缠论买入|" + chanlun.SignalTypeCN(event.typ)
+			if candidate.age > 0 {
+				reason += fmt.Sprintf("|确认后%d日", candidate.age)
+			}
+			if c.sizeMode != "" && targetLayers < maxLayers {
+				reason += "|大周期未确认向上，半仓"
 			}
 			rows = append(rows, score.RotationRow{
 				Code: event.code, Name: data.names[event.code], Action: score.ActionAdd,
 				ActionLabel: score.ActionLabel(score.ActionAdd), SourceType: "candidate",
 				Score: event.score, RankNo: len(rows) + 1,
-				TargetLayers: maxLayers, LayersDelta: maxLayers,
-				Reason: "纯缠论买入|" + chanlun.SignalTypeCN(event.typ),
+				TargetLayers: targetLayers, LayersDelta: targetLayers,
+				Reason: reason,
 			})
+			consumed[buyEventKey(event)] = true
 			queued[event.code] = true
 			slots--
-			usedLayers += maxLayers
+			usedLayers += targetLayers
 		}
 		return score.RotationPlan{Rows: rows}
 	}
@@ -734,6 +1047,10 @@ func runPureCase(data *pureData, c pureCase) (pureResult, error) {
 		}
 	}
 	return result, nil
+}
+
+func buyEventKey(event pureEvent) string {
+	return event.code + "|" + string(event.typ) + "|" + strconv.Itoa(event.confirm)
 }
 
 func entryTypes(mode string) map[chanlun.SignalType]bool {

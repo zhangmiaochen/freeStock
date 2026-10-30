@@ -13,6 +13,9 @@ import * as backtest$0 from "../backtest/models.js";
 import * as chanlun$0 from "../chanlun/models.js";
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore: Unused imports
+import * as chanlunassist$0 from "../chanlunassist/models.js";
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore: Unused imports
 import * as cne$0 from "../cne/models.js";
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore: Unused imports
@@ -735,6 +738,14 @@ export class BacktestRequest {
     "maxStockCount": number;
     "benchmarkCode": string;
 
+    /**
+     * ChanlunAssist 非空且 Enable 时，在调仓计划上叠加缠论辅助：
+     * 确认二买/三买加 1/2 层、确认一卖/二卖/三卖分批减 1/1/2 层。
+     * 
+     * nil / Enable=false 时行为与既有回测**完全一致**（不会多取一次日线、也不改计划）。
+     */
+    "chanlunAssist"?: chanlunassist$0.Config | null;
+
     /** Creates a new BacktestRequest instance. */
     constructor($$source: Partial<BacktestRequest> = {}) {
         if (!("portfolioId" in $$source)) {
@@ -766,7 +777,11 @@ export class BacktestRequest {
      * Creates a new BacktestRequest instance from a string or object.
      */
     static createFrom($$source: any = {}): BacktestRequest {
+        const $$createField7_0 = $$createType21;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        if ("chanlunAssist" in $$parsedSource) {
+            $$parsedSource["chanlunAssist"] = $$createField7_0($$parsedSource["chanlunAssist"]);
+        }
         return new BacktestRequest($$parsedSource as Partial<BacktestRequest>);
     }
 }
@@ -802,7 +817,7 @@ export class BacktestRunResult {
      * Creates a new BacktestRunResult instance from a string or object.
      */
     static createFrom($$source: any = {}): BacktestRunResult {
-        const $$createField2_0 = $$createType20;
+        const $$createField2_0 = $$createType22;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("metrics" in $$parsedSource) {
             $$parsedSource["metrics"] = $$createField2_0($$parsedSource["metrics"]);
@@ -874,7 +889,7 @@ export class BacktestRunView {
      * Creates a new BacktestRunView instance from a string or object.
      */
     static createFrom($$source: any = {}): BacktestRunView {
-        const $$createField10_0 = $$createType21;
+        const $$createField10_0 = $$createType23;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("metrics" in $$parsedSource) {
             $$parsedSource["metrics"] = $$createField10_0($$parsedSource["metrics"]);
@@ -1128,8 +1143,8 @@ export class BoardPeriodStat {
      * Creates a new BoardPeriodStat instance from a string or object.
      */
     static createFrom($$source: any = {}): BoardPeriodStat {
-        const $$createField8_0 = $$createType23;
-        const $$createField9_0 = $$createType23;
+        const $$createField8_0 = $$createType25;
+        const $$createField9_0 = $$createType25;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("leader" in $$parsedSource) {
             $$parsedSource["leader"] = $$createField8_0($$parsedSource["leader"]);
@@ -1323,9 +1338,9 @@ export class BoardQuote {
      * Creates a new BoardQuote instance from a string or object.
      */
     static createFrom($$source: any = {}): BoardQuote {
-        const $$createField14_0 = $$createType23;
-        const $$createField15_0 = $$createType23;
-        const $$createField16_0 = $$createType25;
+        const $$createField14_0 = $$createType25;
+        const $$createField15_0 = $$createType25;
+        const $$createField16_0 = $$createType27;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("leader" in $$parsedSource) {
             $$parsedSource["leader"] = $$createField14_0($$parsedSource["leader"]);
@@ -1439,9 +1454,9 @@ export class BoardQuoteResult {
      * Creates a new BoardQuoteResult instance from a string or object.
      */
     static createFrom($$source: any = {}): BoardQuoteResult {
-        const $$createField3_0 = $$createType27;
+        const $$createField3_0 = $$createType29;
         const $$createField4_0 = $$createType10;
-        const $$createField5_0 = $$createType29;
+        const $$createField5_0 = $$createType31;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("boards" in $$parsedSource) {
             $$parsedSource["boards"] = $$createField3_0($$parsedSource["boards"]);
@@ -1487,8 +1502,8 @@ export class CatchUpInfo {
      * Creates a new CatchUpInfo instance from a string or object.
      */
     static createFrom($$source: any = {}): CatchUpInfo {
-        const $$createField1_0 = $$createType30;
-        const $$createField3_0 = $$createType31;
+        const $$createField1_0 = $$createType32;
+        const $$createField3_0 = $$createType33;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("dates" in $$parsedSource) {
             $$parsedSource["dates"] = $$createField1_0($$parsedSource["dates"]);
@@ -1527,7 +1542,7 @@ export class ChanlunConfigInfo {
      * Creates a new ChanlunConfigInfo instance from a string or object.
      */
     static createFrom($$source: any = {}): ChanlunConfigInfo {
-        const $$createField0_0 = $$createType32;
+        const $$createField0_0 = $$createType34;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("config" in $$parsedSource) {
             $$parsedSource["config"] = $$createField0_0($$parsedSource["config"]);
@@ -1697,9 +1712,9 @@ export class ChanlunHit {
      * Creates a new ChanlunHit instance from a string or object.
      */
     static createFrom($$source: any = {}): ChanlunHit {
-        const $$createField11_0 = $$createType34;
-        const $$createField17_0 = $$createType36;
-        const $$createField18_0 = $$createType38;
+        const $$createField11_0 = $$createType36;
+        const $$createField17_0 = $$createType38;
+        const $$createField18_0 = $$createType40;
         const $$createField25_0 = $$createType13;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("outlook" in $$parsedSource) {
@@ -2080,7 +2095,7 @@ export class DataLakeInfo {
      */
     static createFrom($$source: any = {}): DataLakeInfo {
         const $$createField3_0 = $$createType13;
-        const $$createField4_0 = $$createType40;
+        const $$createField4_0 = $$createType42;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("datasets" in $$parsedSource) {
             $$parsedSource["datasets"] = $$createField3_0($$parsedSource["datasets"]);
@@ -2294,10 +2309,10 @@ export class EmailPrefsInfo {
      * Creates a new EmailPrefsInfo instance from a string or object.
      */
     static createFrom($$source: any = {}): EmailPrefsInfo {
-        const $$createField0_0 = $$createType41;
+        const $$createField0_0 = $$createType43;
         const $$createField4_0 = $$createType13;
         const $$createField5_0 = $$createType13;
-        const $$createField6_0 = $$createType42;
+        const $$createField6_0 = $$createType44;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("prefs" in $$parsedSource) {
             $$parsedSource["prefs"] = $$createField0_0($$parsedSource["prefs"]);
@@ -2617,10 +2632,10 @@ export class FinanceSnapshot {
      * Creates a new FinanceSnapshot instance from a string or object.
      */
     static createFrom($$source: any = {}): FinanceSnapshot {
-        const $$createField4_0 = $$createType43;
-        const $$createField12_0 = $$createType45;
-        const $$createField13_0 = $$createType46;
-        const $$createField14_0 = $$createType48;
+        const $$createField4_0 = $$createType45;
+        const $$createField12_0 = $$createType47;
+        const $$createField13_0 = $$createType48;
+        const $$createField14_0 = $$createType50;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("derived" in $$parsedSource) {
             $$parsedSource["derived"] = $$createField4_0($$parsedSource["derived"]);
@@ -2789,13 +2804,13 @@ export class FinancialStatements {
      * Creates a new FinancialStatements instance from a string or object.
      */
     static createFrom($$source: any = {}): FinancialStatements {
-        const $$createField5_0 = $$createType40;
+        const $$createField5_0 = $$createType42;
         const $$createField6_0 = $$createType13;
-        const $$createField7_0 = $$createType50;
-        const $$createField8_0 = $$createType52;
-        const $$createField9_0 = $$createType54;
-        const $$createField10_0 = $$createType56;
-        const $$createField12_0 = $$createType57;
+        const $$createField7_0 = $$createType52;
+        const $$createField8_0 = $$createType54;
+        const $$createField9_0 = $$createType56;
+        const $$createField10_0 = $$createType58;
+        const $$createField12_0 = $$createType59;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("datasets" in $$parsedSource) {
             $$parsedSource["datasets"] = $$createField5_0($$parsedSource["datasets"]);
@@ -2854,8 +2869,8 @@ export class IndexValuationResult {
      * Creates a new IndexValuationResult instance from a string or object.
      */
     static createFrom($$source: any = {}): IndexValuationResult {
-        const $$createField2_0 = $$createType58;
-        const $$createField3_0 = $$createType59;
+        const $$createField2_0 = $$createType60;
+        const $$createField3_0 = $$createType61;
         const $$createField4_0 = $$createType13;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("index" in $$parsedSource) {
@@ -2919,7 +2934,7 @@ export class IndustryDistributionRow {
      */
     static createFrom($$source: any = {}): IndustryDistributionRow {
         const $$createField3_0 = $$createType14;
-        const $$createField4_0 = $$createType60;
+        const $$createField4_0 = $$createType62;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("topCounts" in $$parsedSource) {
             $$parsedSource["topCounts"] = $$createField3_0($$parsedSource["topCounts"]);
@@ -2971,9 +2986,9 @@ export class IndustryValuationDetail {
      * Creates a new IndustryValuationDetail instance from a string or object.
      */
     static createFrom($$source: any = {}): IndustryValuationDetail {
-        const $$createField2_0 = $$createType61;
-        const $$createField3_0 = $$createType63;
-        const $$createField4_0 = $$createType59;
+        const $$createField2_0 = $$createType63;
+        const $$createField3_0 = $$createType65;
+        const $$createField4_0 = $$createType61;
         const $$createField5_0 = $$createType13;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("industry" in $$parsedSource) {
@@ -3083,10 +3098,10 @@ export class KlineBundle {
      * Creates a new KlineBundle instance from a string or object.
      */
     static createFrom($$source: any = {}): KlineBundle {
-        const $$createField4_0 = $$createType64;
-        const $$createField5_0 = $$createType66;
-        const $$createField6_0 = $$createType68;
-        const $$createField7_0 = $$createType70;
+        const $$createField4_0 = $$createType66;
+        const $$createField5_0 = $$createType68;
+        const $$createField6_0 = $$createType70;
+        const $$createField7_0 = $$createType72;
         const $$createField8_0 = $$createType13;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("profile" in $$parsedSource) {
@@ -3188,7 +3203,7 @@ export class KlinePrefsInfo {
      * Creates a new KlinePrefsInfo instance from a string or object.
      */
     static createFrom($$source: any = {}): KlinePrefsInfo {
-        const $$createField0_0 = $$createType71;
+        const $$createField0_0 = $$createType73;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("prefs" in $$parsedSource) {
             $$parsedSource["prefs"] = $$createField0_0($$parsedSource["prefs"]);
@@ -3500,8 +3515,8 @@ export class MarketIndexStat {
      * Creates a new MarketIndexStat instance from a string or object.
      */
     static createFrom($$source: any = {}): MarketIndexStat {
-        const $$createField27_0 = $$createType72;
-        const $$createField28_0 = $$createType72;
+        const $$createField27_0 = $$createType74;
+        const $$createField28_0 = $$createType74;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("recent" in $$parsedSource) {
             $$parsedSource["recent"] = $$createField27_0($$parsedSource["recent"]);
@@ -3670,9 +3685,9 @@ export class MarketTemperatureResult {
      * Creates a new MarketTemperatureResult instance from a string or object.
      */
     static createFrom($$source: any = {}): MarketTemperatureResult {
-        const $$createField12_0 = $$createType74;
-        const $$createField13_0 = $$createType76;
-        const $$createField16_0 = $$createType30;
+        const $$createField12_0 = $$createType76;
+        const $$createField13_0 = $$createType78;
+        const $$createField16_0 = $$createType32;
         const $$createField17_0 = $$createType13;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("factors" in $$parsedSource) {
@@ -4009,9 +4024,9 @@ export class PlanResult {
      * Creates a new PlanResult instance from a string or object.
      */
     static createFrom($$source: any = {}): PlanResult {
-        const $$createField4_0 = $$createType77;
-        const $$createField5_0 = $$createType78;
-        const $$createField10_0 = $$createType79;
+        const $$createField4_0 = $$createType79;
+        const $$createField5_0 = $$createType80;
+        const $$createField10_0 = $$createType81;
         const $$createField11_0 = $$createType7;
         const $$createField12_0 = $$createType7;
         const $$createField13_0 = $$createType13;
@@ -4118,12 +4133,12 @@ export class PortfolioOptions {
      * Creates a new PortfolioOptions instance from a string or object.
      */
     static createFrom($$source: any = {}): PortfolioOptions {
-        const $$createField0_0 = $$createType81;
-        const $$createField1_0 = $$createType81;
-        const $$createField2_0 = $$createType81;
-        const $$createField3_0 = $$createType81;
-        const $$createField4_0 = $$createType81;
-        const $$createField5_0 = $$createType81;
+        const $$createField0_0 = $$createType83;
+        const $$createField1_0 = $$createType83;
+        const $$createField2_0 = $$createType83;
+        const $$createField3_0 = $$createType83;
+        const $$createField4_0 = $$createType83;
+        const $$createField5_0 = $$createType83;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("types" in $$parsedSource) {
             $$parsedSource["types"] = $$createField0_0($$parsedSource["types"]);
@@ -4198,7 +4213,7 @@ export class RefreshAllResult {
      * Creates a new RefreshAllResult instance from a string or object.
      */
     static createFrom($$source: any = {}): RefreshAllResult {
-        const $$createField4_0 = $$createType83;
+        const $$createField4_0 = $$createType85;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("strategies" in $$parsedSource) {
             $$parsedSource["strategies"] = $$createField4_0($$parsedSource["strategies"]);
@@ -4274,7 +4289,7 @@ export class RefreshResult {
      * Creates a new RefreshResult instance from a string or object.
      */
     static createFrom($$source: any = {}): RefreshResult {
-        const $$createField4_0 = $$createType78;
+        const $$createField4_0 = $$createType80;
         const $$createField5_0 = $$createType13;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("marketState" in $$parsedSource) {
@@ -4533,9 +4548,9 @@ export class ScreenCondition {
      */
     static createFrom($$source: any = {}): ScreenCondition {
         const $$createField19_0 = $$createType13;
-        const $$createField26_0 = $$createType85;
-        const $$createField27_0 = $$createType87;
-        const $$createField37_0 = $$createType88;
+        const $$createField26_0 = $$createType87;
+        const $$createField27_0 = $$createType89;
+        const $$createField37_0 = $$createType90;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("markets" in $$parsedSource) {
             $$parsedSource["markets"] = $$createField19_0($$parsedSource["markets"]);
@@ -4581,7 +4596,7 @@ export class ScreenConditionInfo {
      * Creates a new ScreenConditionInfo instance from a string or object.
      */
     static createFrom($$source: any = {}): ScreenConditionInfo {
-        const $$createField0_0 = $$createType89;
+        const $$createField0_0 = $$createType91;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("condition" in $$parsedSource) {
             $$parsedSource["condition"] = $$createField0_0($$parsedSource["condition"]);
@@ -4728,8 +4743,8 @@ export class ScreenItem {
      */
     static createFrom($$source: any = {}): ScreenItem {
         const $$createField20_0 = $$createType13;
-        const $$createField22_0 = $$createType91;
-        const $$createField23_0 = $$createType93;
+        const $$createField22_0 = $$createType93;
+        const $$createField23_0 = $$createType95;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("boards" in $$parsedSource) {
             $$parsedSource["boards"] = $$createField20_0($$parsedSource["boards"]);
@@ -4823,13 +4838,13 @@ export class ScreenOptions {
      * Creates a new ScreenOptions instance from a string or object.
      */
     static createFrom($$source: any = {}): ScreenOptions {
-        const $$createField0_0 = $$createType95;
-        const $$createField1_0 = $$createType97;
+        const $$createField0_0 = $$createType97;
+        const $$createField1_0 = $$createType99;
         const $$createField2_0 = $$createType13;
-        const $$createField3_0 = $$createType99;
-        const $$createField6_0 = $$createType89;
-        const $$createField7_0 = $$createType88;
-        const $$createField8_0 = $$createType101;
+        const $$createField3_0 = $$createType101;
+        const $$createField6_0 = $$createType91;
+        const $$createField7_0 = $$createType90;
+        const $$createField8_0 = $$createType103;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("categories" in $$parsedSource) {
             $$parsedSource["categories"] = $$createField0_0($$parsedSource["categories"]);
@@ -4975,7 +4990,7 @@ export class ScreenResult {
      * Creates a new ScreenResult instance from a string or object.
      */
     static createFrom($$source: any = {}): ScreenResult {
-        const $$createField0_0 = $$createType103;
+        const $$createField0_0 = $$createType105;
         const $$createField12_0 = $$createType13;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("items" in $$parsedSource) {
@@ -5750,8 +5765,8 @@ export class StockUniverse {
      * Creates a new StockUniverse instance from a string or object.
      */
     static createFrom($$source: any = {}): StockUniverse {
-        const $$createField7_0 = $$createType97;
-        const $$createField8_0 = $$createType105;
+        const $$createField7_0 = $$createType99;
+        const $$createField8_0 = $$createType107;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("markets" in $$parsedSource) {
             $$parsedSource["markets"] = $$createField7_0($$parsedSource["markets"]);
@@ -5795,8 +5810,8 @@ export class StockValuation {
      * Creates a new StockValuation instance from a string or object.
      */
     static createFrom($$source: any = {}): StockValuation {
-        const $$createField2_0 = $$createType106;
-        const $$createField3_0 = $$createType59;
+        const $$createField2_0 = $$createType108;
+        const $$createField3_0 = $$createType61;
         const $$createField4_0 = $$createType13;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("stock" in $$parsedSource) {
@@ -5892,7 +5907,7 @@ export class StrengthSummary {
      * Creates a new StrengthSummary instance from a string or object.
      */
     static createFrom($$source: any = {}): StrengthSummary {
-        const $$createField3_0 = $$createType30;
+        const $$createField3_0 = $$createType32;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("dates" in $$parsedSource) {
             $$parsedSource["dates"] = $$createField3_0($$parsedSource["dates"]);
@@ -6051,7 +6066,7 @@ export class UpdatePrefsInfo {
      * Creates a new UpdatePrefsInfo instance from a string or object.
      */
     static createFrom($$source: any = {}): UpdatePrefsInfo {
-        const $$createField0_0 = $$createType107;
+        const $$createField0_0 = $$createType109;
         const $$createField3_0 = $$createType13;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("prefs" in $$parsedSource) {
@@ -6152,10 +6167,10 @@ export class ValuationParamsInfo {
      * Creates a new ValuationParamsInfo instance from a string or object.
      */
     static createFrom($$source: any = {}): ValuationParamsInfo {
-        const $$createField1_0 = $$createType109;
-        const $$createField2_0 = $$createType111;
-        const $$createField3_0 = $$createType112;
-        const $$createField7_0 = $$createType113;
+        const $$createField1_0 = $$createType111;
+        const $$createField2_0 = $$createType113;
+        const $$createField3_0 = $$createType114;
+        const $$createField7_0 = $$createType115;
         const $$createField8_0 = $$createType13;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("horizons" in $$parsedSource) {
@@ -6292,13 +6307,13 @@ export class ValuationReport {
      * Creates a new ValuationReport instance from a string or object.
      */
     static createFrom($$source: any = {}): ValuationReport {
-        const $$createField2_0 = $$createType59;
-        const $$createField3_0 = $$createType115;
-        const $$createField4_0 = $$createType116;
-        const $$createField5_0 = $$createType117;
-        const $$createField6_0 = $$createType119;
-        const $$createField7_0 = $$createType121;
-        const $$createField11_0 = $$createType123;
+        const $$createField2_0 = $$createType61;
+        const $$createField3_0 = $$createType117;
+        const $$createField4_0 = $$createType118;
+        const $$createField5_0 = $$createType119;
+        const $$createField6_0 = $$createType121;
+        const $$createField7_0 = $$createType123;
+        const $$createField11_0 = $$createType125;
         const $$createField12_0 = $$createType13;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("snapshot" in $$parsedSource) {
@@ -6350,107 +6365,109 @@ const $$createType16 = portfolio$0.BacktestDaily.createFrom;
 const $$createType17 = $Create.Array($$createType16);
 const $$createType18 = portfolio$0.BacktestTrade.createFrom;
 const $$createType19 = $Create.Array($$createType18);
-const $$createType20 = backtest$0.Metrics.createFrom;
-const $$createType21 = $Create.Map($Create.Any, $Create.Any);
-const $$createType22 = BoardMemberQuote.createFrom;
-const $$createType23 = $Create.Nullable($$createType22);
-const $$createType24 = BoardPeriodStat.createFrom;
-const $$createType25 = $Create.Array($$createType24);
-const $$createType26 = BoardQuote.createFrom;
+const $$createType20 = chanlunassist$0.Config.createFrom;
+const $$createType21 = $Create.Nullable($$createType20);
+const $$createType22 = backtest$0.Metrics.createFrom;
+const $$createType23 = $Create.Map($Create.Any, $Create.Any);
+const $$createType24 = BoardMemberQuote.createFrom;
+const $$createType25 = $Create.Nullable($$createType24);
+const $$createType26 = BoardPeriodStat.createFrom;
 const $$createType27 = $Create.Array($$createType26);
-const $$createType28 = BoardPeriodWindow.createFrom;
+const $$createType28 = BoardQuote.createFrom;
 const $$createType29 = $Create.Array($$createType28);
-const $$createType30 = $Create.Array($Create.Any);
-const $$createType31 = cne$0.CatchUpState.createFrom;
-const $$createType32 = chanlun$0.Config.createFrom;
-const $$createType33 = chanlun$0.Scenario.createFrom;
-const $$createType34 = $Create.Array($$createType33);
-const $$createType35 = chanlun$0.DivergenceOutcome.createFrom;
+const $$createType30 = BoardPeriodWindow.createFrom;
+const $$createType31 = $Create.Array($$createType30);
+const $$createType32 = $Create.Array($Create.Any);
+const $$createType33 = cne$0.CatchUpState.createFrom;
+const $$createType34 = chanlun$0.Config.createFrom;
+const $$createType35 = chanlun$0.Scenario.createFrom;
 const $$createType36 = $Create.Array($$createType35);
-const $$createType37 = ChanlunSignalBrief.createFrom;
+const $$createType37 = chanlun$0.DivergenceOutcome.createFrom;
 const $$createType38 = $Create.Array($$createType37);
-const $$createType39 = cnlake$0.DatasetStatus.createFrom;
+const $$createType39 = ChanlunSignalBrief.createFrom;
 const $$createType40 = $Create.Array($$createType39);
-const $$createType41 = config$0.EmailPrefs.createFrom;
-const $$createType42 = EmailScheduleInfo.createFrom;
-const $$createType43 = DerivedFundamentals.createFrom;
-const $$createType44 = MoneyFlowSummary.createFrom;
-const $$createType45 = $Create.Nullable($$createType44);
-const $$createType46 = FinancialStatements.createFrom;
-const $$createType47 = FinanceSourceStatus.createFrom;
-const $$createType48 = $Create.Array($$createType47);
-const $$createType49 = cnlake$0.StatementItem.createFrom;
+const $$createType41 = cnlake$0.DatasetStatus.createFrom;
+const $$createType42 = $Create.Array($$createType41);
+const $$createType43 = config$0.EmailPrefs.createFrom;
+const $$createType44 = EmailScheduleInfo.createFrom;
+const $$createType45 = DerivedFundamentals.createFrom;
+const $$createType46 = MoneyFlowSummary.createFrom;
+const $$createType47 = $Create.Nullable($$createType46);
+const $$createType48 = FinancialStatements.createFrom;
+const $$createType49 = FinanceSourceStatus.createFrom;
 const $$createType50 = $Create.Array($$createType49);
-const $$createType51 = ShareStructureItem.createFrom;
+const $$createType51 = cnlake$0.StatementItem.createFrom;
 const $$createType52 = $Create.Array($$createType51);
-const $$createType53 = ShareholderCountItem.createFrom;
+const $$createType53 = ShareStructureItem.createFrom;
 const $$createType54 = $Create.Array($$createType53);
-const $$createType55 = TopHolderItem.createFrom;
+const $$createType55 = ShareholderCountItem.createFrom;
 const $$createType56 = $Create.Array($$createType55);
-const $$createType57 = $Create.Map($Create.Any, $Create.Any);
-const $$createType58 = valuation$0.IndexEvaluation.createFrom;
-const $$createType59 = valuation$0.Snapshot.createFrom;
-const $$createType60 = $Create.Map($Create.Any, $Create.Any);
-const $$createType61 = valuation$0.IndustryValuation.createFrom;
-const $$createType62 = valuation$0.RankRow.createFrom;
-const $$createType63 = $Create.Array($$createType62);
-const $$createType64 = StockProfile.createFrom;
-const $$createType65 = KlineCandle.createFrom;
-const $$createType66 = $Create.Array($$createType65);
-const $$createType67 = stockdb$0.Factor.createFrom;
+const $$createType57 = TopHolderItem.createFrom;
+const $$createType58 = $Create.Array($$createType57);
+const $$createType59 = $Create.Map($Create.Any, $Create.Any);
+const $$createType60 = valuation$0.IndexEvaluation.createFrom;
+const $$createType61 = valuation$0.Snapshot.createFrom;
+const $$createType62 = $Create.Map($Create.Any, $Create.Any);
+const $$createType63 = valuation$0.IndustryValuation.createFrom;
+const $$createType64 = valuation$0.RankRow.createFrom;
+const $$createType65 = $Create.Array($$createType64);
+const $$createType66 = StockProfile.createFrom;
+const $$createType67 = KlineCandle.createFrom;
 const $$createType68 = $Create.Array($$createType67);
-const $$createType69 = MoneyFlowPoint.createFrom;
+const $$createType69 = stockdb$0.Factor.createFrom;
 const $$createType70 = $Create.Array($$createType69);
-const $$createType71 = config$0.KlinePrefs.createFrom;
-const $$createType72 = $Create.Array($Create.Any);
-const $$createType73 = TemperatureFactor.createFrom;
-const $$createType74 = $Create.Array($$createType73);
-const $$createType75 = MarketIndexStat.createFrom;
+const $$createType71 = MoneyFlowPoint.createFrom;
+const $$createType72 = $Create.Array($$createType71);
+const $$createType73 = config$0.KlinePrefs.createFrom;
+const $$createType74 = $Create.Array($Create.Any);
+const $$createType75 = TemperatureFactor.createFrom;
 const $$createType76 = $Create.Array($$createType75);
-const $$createType77 = score$0.StrategyConfig.createFrom;
-const $$createType78 = score$0.MarketState.createFrom;
-const $$createType79 = score$0.RotationPlan.createFrom;
-const $$createType80 = PortfolioOption.createFrom;
-const $$createType81 = $Create.Array($$createType80);
-const $$createType82 = StrategyRefresh.createFrom;
+const $$createType77 = MarketIndexStat.createFrom;
+const $$createType78 = $Create.Array($$createType77);
+const $$createType79 = score$0.StrategyConfig.createFrom;
+const $$createType80 = score$0.MarketState.createFrom;
+const $$createType81 = score$0.RotationPlan.createFrom;
+const $$createType82 = PortfolioOption.createFrom;
 const $$createType83 = $Create.Array($$createType82);
-const $$createType84 = BoardFilter.createFrom;
+const $$createType84 = StrategyRefresh.createFrom;
 const $$createType85 = $Create.Array($$createType84);
-const $$createType86 = MACondition.createFrom;
+const $$createType86 = BoardFilter.createFrom;
 const $$createType87 = $Create.Array($$createType86);
-const $$createType88 = ChanlunScreenCondition.createFrom;
-const $$createType89 = ScreenCondition.createFrom;
-const $$createType90 = MAValue.createFrom;
-const $$createType91 = $Create.Array($$createType90);
-const $$createType92 = ChanlunHit.createFrom;
-const $$createType93 = $Create.Nullable($$createType92);
-const $$createType94 = BoardCategoryInfo.createFrom;
-const $$createType95 = $Create.Array($$createType94);
-const $$createType96 = MarketInfo.createFrom;
+const $$createType88 = MACondition.createFrom;
+const $$createType89 = $Create.Array($$createType88);
+const $$createType90 = ChanlunScreenCondition.createFrom;
+const $$createType91 = ScreenCondition.createFrom;
+const $$createType92 = MAValue.createFrom;
+const $$createType93 = $Create.Array($$createType92);
+const $$createType94 = ChanlunHit.createFrom;
+const $$createType95 = $Create.Nullable($$createType94);
+const $$createType96 = BoardCategoryInfo.createFrom;
 const $$createType97 = $Create.Array($$createType96);
-const $$createType98 = LakeScreenCondition.createFrom;
+const $$createType98 = MarketInfo.createFrom;
 const $$createType99 = $Create.Array($$createType98);
-const $$createType100 = ChanlunLevelOption.createFrom;
+const $$createType100 = LakeScreenCondition.createFrom;
 const $$createType101 = $Create.Array($$createType100);
-const $$createType102 = ScreenItem.createFrom;
+const $$createType102 = ChanlunLevelOption.createFrom;
 const $$createType103 = $Create.Array($$createType102);
-const $$createType104 = StockItem.createFrom;
+const $$createType104 = ScreenItem.createFrom;
 const $$createType105 = $Create.Array($$createType104);
-const $$createType106 = valuation$0.StockScore.createFrom;
-const $$createType107 = config$0.UpdatePrefs.createFrom;
-const $$createType108 = valuation$0.Horizon.createFrom;
-const $$createType109 = $Create.Array($$createType108);
-const $$createType110 = $Create.Map($Create.Any, $Create.Any);
-const $$createType111 = $Create.Map($Create.Any, $$createType110);
+const $$createType106 = StockItem.createFrom;
+const $$createType107 = $Create.Array($$createType106);
+const $$createType108 = valuation$0.StockScore.createFrom;
+const $$createType109 = config$0.UpdatePrefs.createFrom;
+const $$createType110 = valuation$0.Horizon.createFrom;
+const $$createType111 = $Create.Array($$createType110);
 const $$createType112 = $Create.Map($Create.Any, $Create.Any);
-const $$createType113 = valuation$0.RatingThresholds.createFrom;
-const $$createType114 = valuation$0.HorizonRanking.createFrom;
-const $$createType115 = $Create.Array($$createType114);
-const $$createType116 = $Create.Array($$createType61);
-const $$createType117 = $Create.Array($$createType58);
-const $$createType118 = valuation$0.ScoreDistribution.createFrom;
-const $$createType119 = $Create.Map($Create.Any, $$createType118);
-const $$createType120 = IndustryDistributionRow.createFrom;
-const $$createType121 = $Create.Array($$createType120);
-const $$createType122 = PhaseTiming.createFrom;
+const $$createType113 = $Create.Map($Create.Any, $$createType112);
+const $$createType114 = $Create.Map($Create.Any, $Create.Any);
+const $$createType115 = valuation$0.RatingThresholds.createFrom;
+const $$createType116 = valuation$0.HorizonRanking.createFrom;
+const $$createType117 = $Create.Array($$createType116);
+const $$createType118 = $Create.Array($$createType63);
+const $$createType119 = $Create.Array($$createType60);
+const $$createType120 = valuation$0.ScoreDistribution.createFrom;
+const $$createType121 = $Create.Map($Create.Any, $$createType120);
+const $$createType122 = IndustryDistributionRow.createFrom;
 const $$createType123 = $Create.Array($$createType122);
+const $$createType124 = PhaseTiming.createFrom;
+const $$createType125 = $Create.Array($$createType124);

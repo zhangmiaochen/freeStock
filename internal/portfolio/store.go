@@ -71,16 +71,20 @@ var executionModes = map[string]struct {
 const (
 	StrategyTrendGrowth = "trend_growth"
 	StrategyTrendLowBuy = "trend_pullback_low_buy"
-	StrategyOversold    = "oversold_rebound"
-	StrategyExpert      = "expert_simulation"
+	// StrategyQualityGrowth 是"质量成长 · 趋势回调"（基本面选股 + 趋势/回调择时）。
+	// 见 reports/fund_strategy/开发说明_v3.md。
+	StrategyQualityGrowth = "quality_growth_pullback"
+	StrategyOversold      = "oversold_rebound"
+	StrategyExpert        = "expert_simulation"
 )
 
 // strategyLabels 是策略 ID 的中文名。
 var strategyLabels = map[string]string{
-	StrategyTrendGrowth: "趋势成长",
-	StrategyTrendLowBuy: "趋势低吸",
-	StrategyOversold:    "超跌反弹",
-	StrategyExpert:      "高手模拟",
+	StrategyTrendGrowth:   "趋势成长",
+	StrategyTrendLowBuy:   "趋势低吸",
+	StrategyQualityGrowth: "质量成长·趋势回调",
+	StrategyOversold:      "超跌反弹",
+	StrategyExpert:        "高手模拟",
 }
 
 // 选股范围类型。
@@ -359,6 +363,13 @@ var strategyAliases = map[string]string{
 	"去rs低吸":                  StrategyTrendLowBuy,
 	"去 rs 低吸":                StrategyTrendLowBuy,
 
+	"quality_growth_pullback": StrategyQualityGrowth,
+	"quality_growth":          StrategyQualityGrowth,
+	"qgrowth":                 StrategyQualityGrowth,
+	"质量成长":                   StrategyQualityGrowth,
+	"趋势回调":                   StrategyQualityGrowth,
+	"质量成长趋势回调":               StrategyQualityGrowth,
+
 	"oversold":         StrategyOversold,
 	"rebound":          StrategyOversold,
 	"oversold_rebound": StrategyOversold,
@@ -370,6 +381,14 @@ var strategyAliases = map[string]string{
 	"mainline":          StrategyExpert,
 	"高手模拟":              StrategyExpert,
 	"主线强度":              StrategyExpert,
+}
+
+// StrategyUsesStrength 判断策略是否依赖 stock_strength 评分表。
+//
+// 质量成长·趋势回调直接从数据湖取 PIT 财报 + 日线现算，不写 stock_strength，
+// 因此"刷新评分/全量重算"应跳过它（否则会按低吸/成长的口径白算一遍）。
+func StrategyUsesStrength(strategyID string) bool {
+	return NormalizeStrategy(strategyID, "") != StrategyQualityGrowth
 }
 
 // NormalizeStrategy 归一化策略 ID。

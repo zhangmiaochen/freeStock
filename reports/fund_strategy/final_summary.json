@@ -1,0 +1,43 @@
+{
+ "params": {
+  "n": 8,
+  "trend_ma": 200,
+  "pullback": true,
+  "min_roe": 8,
+  "min_rev_yoy": 0,
+  "min_np_yoy": 0,
+  "min_gm": 15,
+  "max_debt": 70,
+  "min_ocf": 0.3,
+  "dd_hi": -2,
+  "dd_lo": -20,
+  "min_amount": 30000000.0,
+  "min_listed": 250,
+  "value": false,
+  "cost": 0.0023,
+  "every": 1,
+  "bear_exposure": 0.5,
+  "weight_mode": "score",
+  "max_weight": 0.15
+ },
+ "results": {
+  "2013-2026": {
+   "total": 625.09,
+   "cagr": 15.52,
+   "maxdd": -48.28,
+   "vol": 26.67,
+   "sharpe": 0.62,
+   "years": 13.74,
+   "trades": 2101
+  },
+  "2010-2012(OOS)": {
+   "total": -4.66,
+   "cagr": -2.12,
+   "maxdd": -24.44,
+   "vol": 15.67,
+   "sharpe": -0.19,
+   "years": 2.23,
+   "trades": 294
+  }
+ }
+}
