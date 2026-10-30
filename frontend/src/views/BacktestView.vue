@@ -243,6 +243,52 @@ const chart = computed(() => {
   return { path, width, height, min, max };
 });
 
+// ---- 净值曲线悬停：显示某一天的具体数据 ----
+const hoverIndex = ref<number | null>(null);
+
+const hoverPoint = computed(() => {
+  const i = hoverIndex.value;
+  const c = chart.value;
+  if (i == null || !c || !daily.value[i]) return null;
+  const p = daily.value[i];
+  const span = c.max - c.min || 1;
+  const x = (i / Math.max(1, daily.value.length - 1)) * c.width;
+  const y = c.height - ((p.totalValue - c.min) / span) * c.height;
+  return { i, x, y, p };
+});
+
+/** 悬停提示框位置：按 x 百分比定位，并向内收 12% 防止贴边溢出 */
+const hoverTipStyle = computed(() => {
+  const hp = hoverPoint.value;
+  const c = chart.value;
+  if (!hp || !c) return {};
+  const pct = Math.min(88, Math.max(12, (hp.x / c.width) * 100));
+  return { left: `${pct}%` };
+});
+
+function onChartMove(e: MouseEvent) {
+  const c = chart.value;
+  if (!c || daily.value.length < 2) return;
+  const el = e.currentTarget as SVGSVGElement;
+  const rect = el.getBoundingClientRect();
+  if (rect.width <= 0) return;
+  const ratio = (e.clientX - rect.left) / rect.width;
+  const i = Math.round(ratio * (daily.value.length - 1));
+  hoverIndex.value = Math.max(0, Math.min(daily.value.length - 1, i));
+}
+
+function dayReturn(i: number): number {
+  const cur = daily.value[i];
+  const prev = daily.value[i - 1];
+  if (!cur || !prev || !prev.totalValue) return 0;
+  return (cur.totalValue / prev.totalValue - 1) * 100;
+}
+
+function fmtPct(v: number | undefined | null): string {
+  if (v == null || Number.isNaN(v)) return "—";
+  return `${v >= 0 ? "+" : ""}${v.toFixed(2)}%`;
+}
+
 // ⚠ App.vue 用了 `<KeepAlive>`，页面切走再切回来**不会重新 mount** ——
 // 只用 onMounted 的话，在组合管理页改了组合（新建/改名/删除）再切回来，
 // 这里的组合列表还是旧的。
@@ -422,9 +468,41 @@ async function removeSelectedRuns() {
     <Card v-if="chart">
       <CardHeader><CardTitle class="text-base">净值曲线</CardTitle></CardHeader>
       <CardContent>
-        <svg :viewBox="`0 0 ${chart.width} ${chart.height}`" class="h-48 w-full">
-          <path :d="chart.path" fill="none" stroke="currentColor" stroke-width="2" class="text-primary" />
-        </svg>
+        <div class="relative" @mouseleave="hoverIndex = null">
+          <svg
+            :viewBox="`0 0 ${chart.width} ${chart.height}`"
+            preserveAspectRatio="none"
+            class="h-48 w-full cursor-crosshair"
+            @mousemove="onChartMove"
+            @mouseleave="hoverIndex = null"
+          >
+            <path :d="chart.path" fill="none" stroke="currentColor" stroke-width="2" class="text-primary" />
+            <g v-if="hoverPoint">
+              <line
+                :x1="hoverPoint.x"
+                :x2="hoverPoint.x"
+                y1="0"
+                :y2="chart.height"
+                stroke="currentColor"
+                stroke-opacity="0.3"
+                stroke-dasharray="4 4"
+              />
+              <circle :cx="hoverPoint.x" :cy="hoverPoint.y" r="3.5" class="fill-primary" />
+            </g>
+          </svg>
+          <div
+            v-if="hoverPoint"
+            class="bg-popover pointer-events-none absolute top-1 z-10 -translate-x-1/2 rounded-md border px-2 py-1.5 text-[11px] leading-5 shadow-md"
+            :style="hoverTipStyle"
+          >
+            <div class="font-medium">{{ hoverPoint.p.tradeDate }}</div>
+            <div class="text-muted-foreground">净值 {{ hoverPoint.p.totalValue.toFixed(0) }}</div>
+            <div class="text-muted-foreground">累计收益 {{ fmtPct(hoverPoint.p.cumulativeReturn) }}</div>
+            <div class="text-muted-foreground">当日收益 {{ fmtPct(dayReturn(hoverPoint.i)) }}</div>
+            <div class="text-muted-foreground">基准累计 {{ fmtPct(hoverPoint.p.benchmarkReturn) }}</div>
+            <div class="text-muted-foreground">持仓 {{ hoverPoint.p.positionCount }} 只</div>
+          </div>
+        </div>
         <div class="text-muted-foreground flex justify-between text-xs">
           <span>{{ daily[0]?.tradeDate }}</span>
           <span>最低 {{ chart.min.toFixed(0) }} / 最高 {{ chart.max.toFixed(0) }}</span>
