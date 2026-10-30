@@ -356,8 +356,16 @@ func (s *PortfolioService) buildQGrowthDays(
 		days = append(days, backtest.StrengthDay{Date: strconv.Itoa(d), Rows: rows})
 	}
 
+	// 固定行情顺序：barsByCode 是 map，遍历顺序随机；引擎虽然按 (date, code) 建索引，
+	// 但重复行/边界值会让结果依赖顺序，这里统一按 (date, code) 排序。
+	sort.Slice(priceBars, func(i, j int) bool {
+		if priceBars[i].Date != priceBars[j].Date {
+			return priceBars[i].Date < priceBars[j].Date
+		}
+		return priceBars[i].Code < priceBars[j].Code
+	})
+
 	benchmark := map[string]float64{}
-	// 多取 400 个自然日，保证区间开头的 MA200 有值
 	if closes, err := s.stock.loadBenchmark(score.LowBuyIndexBenchmarkCode, shiftBack(start, 400), end); err == nil {
 		for date, close := range closes {
 			benchmark[strconv.Itoa(int(date))] = close

@@ -3,6 +3,7 @@ package service
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"freestock/internal/config"
@@ -67,6 +68,56 @@ func TestQualityGrowthBacktestReal(t *testing.T) {
 		start, end, m.TotalReturn, m.AnnualReturn, m.MaxDrawdown, m.SharpeRatio, m.TotalTrades, m.TradingDays)
 	t.Logf("QG_RESULT start=%d end=%d total=%.2f cagr=%.2f dd=%.2f sharpe=%.2f trades=%d days=%d",
 		start, end, m.TotalReturn, m.AnnualReturn, m.MaxDrawdown, m.SharpeRatio, m.TotalTrades, m.TradingDays)
+
+	// 把逐日净值导出来做逐年/逐月对账
+	rows, err := store.DB().Query(
+		`SELECT trade_date, total_value FROM portfolio_backtest_daily WHERE run_id=? ORDER BY trade_date`, res.RunID)
+	if err == nil {
+		type pt struct {
+			Date  string
+			Value float64
+		}
+		var series []pt
+		for rows.Next() {
+			var d string
+			var v float64
+			if err := rows.Scan(&d, &v); err == nil {
+				series = append(series, pt{d, v})
+			}
+		}
+		rows.Close()
+		out, ferr := os.Create(filepath.Join("..", "..", ".gotmp", "qg_go_equity.csv"))
+		if ferr == nil {
+			defer out.Close()
+			out.WriteString("date,value\n")
+			for _, p := range series {
+				out.WriteString(p.Date + "," + strconv.FormatFloat(p.Value, 'f', 2, 64) + "\n")
+			}
+		}
+		// 逐年收益
+		byYear := map[string][2]float64{} // year -> [first, last]
+		for _, p := range series {
+			y := p.Date[:4]
+			if cur, ok := byYear[y]; ok {
+				cur[1] = p.Value
+				byYear[y] = cur
+			} else {
+				byYear[y] = [2]float64{p.Value, p.Value}
+			}
+		}
+		prev := 0.0
+		for y := start / 10000; y <= end/10000; y++ {
+			key := strconv.Itoa(y)
+			v, ok := byYear[key]
+			if !ok {
+				continue
+			}
+			if prev > 0 {
+				t.Logf("QG_YEAR year=%s ret=%.2f", key, (v[1]/prev-1)*100)
+			}
+			prev = v[1]
+		}
+	}
 	if m.TradingDays == 0 || m.TotalTrades == 0 {
 		t.Fatalf("回测没有产生交易：days=%d trades=%d", m.TradingDays, m.TotalTrades)
 	}

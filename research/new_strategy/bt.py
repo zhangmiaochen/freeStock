@@ -291,6 +291,11 @@ def run(p, start="2013-01-01", end="2026-10-28", verbose=False):
     traded_value = 0.0
     trade_types = {}
     peak_value = 1.0
+    entry_px = {}     # 建仓价（用于"亏损暂缓卖出"判断）
+    hold_start = {}   # 建仓时的调仓序号
+    month_idx = 0
+    loser_holds = 0   # 因亏损被暂缓卖出的次数
+    sold_at_loss = 0  # 最终仍以亏损卖出/清仓的次数
 
     lag = int(p.get("exec_lag", 1))
     for d in bt_dates:
@@ -320,17 +325,46 @@ def run(p, start="2013-01-01", end="2026-10-28", verbose=False):
             s = close.loc[:d, sym].dropna()
             return s.iloc[-1] if len(s) else None
 
-        # 先卖不在目标里的
+        # 先卖不在目标里的（hold_losers：亏损的可以暂缓，等回本/部分回本/超时/破趋势再卖）
+        kept = set()
         for sym in list(pos):
             if sym in target:
                 continue
             pr = price_of(sym)
             if pr is None:
                 pos.pop(sym, None)
+                entry_px.pop(sym, None)
+                hold_start.pop(sym, None)
                 continue
+            ep = entry_px.get(sym, pr)
+            ret = pr / ep - 1 if ep > 0 else 0.0
+            if p.get("hold_losers") and ret < 0:
+                months = month_idx - hold_start.get(sym, month_idx)
+                ok_ma = True
+                if p.get("loser_ma"):
+                    ma_series = ctx.get("ma")
+                    if ma_series is not None:
+                        try:
+                            ma_v = ma_series.loc[d].get(sym)
+                        except KeyError:
+                            ma_v = None
+                        ok_ma = ma_v is not None and np.isfinite(ma_v) and pr >= ma_v
+                    else:
+                        ok_ma = False
+                ok_time = p.get("loser_max_months", 0) <= 0 or months < p["loser_max_months"]
+                recovered = ret >= p.get("recover_to", 0.0)
+                if not recovered and ok_time and ok_ma:
+                    kept.add(sym)
+                    loser_holds += 1
+                    continue
+                sold_at_loss += 1
+            elif ret < 0:
+                sold_at_loss += 1
             cash += pos[sym] * pr * (1 - p["cost"])
             traded_value += pos[sym] * pr
             pos.pop(sym)
+            entry_px.pop(sym, None)
+            hold_start.pop(sym, None)
             trades += 1
             trade_types["exit"] = trade_types.get("exit", 0) + 1
 
@@ -340,6 +374,8 @@ def run(p, start="2013-01-01", end="2026-10-28", verbose=False):
             prices = {s: v for s, v in prices.items() if v}
             if prices:
                 value = cash + sum(pos[s] * prices.get(s, price_of(s) or 0) for s in pos)
+                keep_value = sum(pos[s] * (price_of(s) or 0) for s in sorted(kept))
+                base = max(value - keep_value, 0.0)
                 peak_value = max(peak_value, value)
                 expo = 1.0
                 try:
@@ -355,7 +391,7 @@ def run(p, start="2013-01-01", end="2026-10-28", verbose=False):
                 weights = compute_weights(scores, list(prices), ctx, d, p)
                 band = p.get("min_trade", 0.0)
                 for sym, pr in prices.items():
-                    w = value * expo * weights.get(sym, 0.0)
+                    w = base * expo * weights.get(sym, 0.0)
                     cur = pos.get(sym, 0.0) * pr
                     delta = w - cur
                     if abs(delta) < band * value:
@@ -364,6 +400,13 @@ def run(p, start="2013-01-01", end="2026-10-28", verbose=False):
                     if delta > 1e-9:
                         cash -= delta * (1 + p["cost"])
                         pos[sym] = pos.get(sym, 0.0) + delta / pr
+                        if not held_before:
+                            entry_px[sym] = pr
+                            hold_start[sym] = month_idx
+                        else:
+                            # 加仓：按金额加权更新成本价
+                            old_sh = pos[sym] - delta / pr
+                            entry_px[sym] = (entry_px.get(sym, pr) * old_sh + pr * (delta / pr)) / pos[sym]
                         traded_value += delta
                         trades += 1
                         trade_types["new" if not held_before else "add"] = trade_types.get(
@@ -374,6 +417,7 @@ def run(p, start="2013-01-01", end="2026-10-28", verbose=False):
                         traded_value += -delta
                         trades += 1
                         trade_types["trim"] = trade_types.get("trim", 0) + 1
+        month_idx += 1
         states.append((nxt, cash, dict(pos)))
 
     # 逐日估值
@@ -395,6 +439,7 @@ def run(p, start="2013-01-01", end="2026-10-28", verbose=False):
 
     return {"equity": pd.Series(dict(eq)).sort_index(), "trades": trades,
             "trade_types": trade_types, "traded_value": traded_value,
+            "loser_holds": loser_holds, "sold_at_loss": sold_at_loss,
             "states": states}
 
 

@@ -96,16 +96,33 @@ func (c Config) PullbackOK(x Candidate) bool {
 }
 
 // rankPct 返回每个元素的百分位（最小=1/n，最大=1）。
+//
+// **并列值取平均名次**（与 pandas `rank(pct=True)` 的默认行为一致）：
+// 早期实现用"稳定排序后依次给不同名次"，并列的股票会拿到不同分数，
+// 既与参考实现不一致，也让结果依赖 map 遍历顺序（同一区间两次回测结果会变）。
 func rankPct(vals []float64) []float64 {
 	n := len(vals)
 	idx := make([]int, n)
 	for i := range idx {
 		idx[i] = i
 	}
-	sort.SliceStable(idx, func(a, b int) bool { return vals[idx[a]] < vals[idx[b]] })
+	sort.SliceStable(idx, func(a, b int) bool {
+		if vals[idx[a]] != vals[idx[b]] {
+			return vals[idx[a]] < vals[idx[b]]
+		}
+		return idx[a] < idx[b]
+	})
 	out := make([]float64, n)
-	for rank, i := range idx {
-		out[i] = float64(rank+1) / float64(n)
+	for i := 0; i < n; {
+		j := i
+		for j+1 < n && vals[idx[j+1]] == vals[idx[i]] {
+			j++
+		}
+		avg := float64(i+j+2) / 2.0 / float64(n)
+		for k := i; k <= j; k++ {
+			out[idx[k]] = avg
+		}
+		i = j + 1
 	}
 	return out
 }
