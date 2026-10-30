@@ -75,6 +75,34 @@ def rank_pct(s):
     return s.rank(pct=True)
 
 
+# ---- 行业（申万一级，2020+） ----
+_IND = {}
+_IND_SNAP = {}
+
+
+def load_ind():
+    if "df" not in _IND:
+        df = pd.read_parquet(os.path.join(CACHE, "ind.parquet"))
+        df = df[df["classification_system"] == "sw"]
+        df = df.sort_values("as_of_date").drop_duplicates(["symbol", "as_of_date"], keep="last")
+        _IND["df"] = df
+    return _IND["df"]
+
+
+def ind_snapshot(date):
+    if date in _IND_SNAP:
+        return _IND_SNAP[date]
+    df = load_ind()
+    sub = df[df["as_of_date"] <= date]
+    if sub.empty:
+        snap = pd.Series(dtype=object)
+    else:
+        last = sub["as_of_date"].max()
+        snap = sub[sub["as_of_date"] == last].set_index("symbol")["l1_code"]
+    _IND_SNAP[date] = snap
+    return snap
+
+
 def board_of(sym):
     """按代码前缀判断板块：main / gem / star。"""
     p3 = sym[:3]
@@ -112,6 +140,11 @@ def build_table(close, amount, fin, date, p, ctx, apply_pullback=True):
     df["close"] = close.loc[date]
     df = df[df["close"] > 0]
 
+    # 衍生因子（fn 里已按报告期预计算）：ROE 同比趋势、增速加速度
+    if "roe_prev4" in f.columns:
+        df["roe_trend"] = (f["roe"] - f["roe_prev4"]).reindex(df.index)
+        df["accel"] = (f["revenue_yoy"] - f["rev_prev"]).reindex(df.index)
+
     boards = p.get("boards")
     if boards:
         keep = [s for s in df.index if board_of(s) in boards]
@@ -123,6 +156,10 @@ def build_table(close, amount, fin, date, p, ctx, apply_pullback=True):
     df = df[df["gm"] >= p["min_gm"]]
     df = df[df["debt"] <= p["max_debt"]]
     df = df[df["ocf"] >= p["min_ocf"]]
+    if p.get("min_roe_trend") is not None and "roe_trend" in df:
+        df = df[df["roe_trend"] >= p["min_roe_trend"]]
+    if p.get("min_accel") is not None and "accel" in df:
+        df = df[df["accel"] >= p["min_accel"]]
     if df.empty:
         return pd.DataFrame(columns=["score", "pullback_ok"])
 
@@ -154,6 +191,17 @@ def build_table(close, amount, fin, date, p, ctx, apply_pullback=True):
     g = 0.5 * rank_pct(df["rev_yoy"]) + 0.5 * rank_pct(df["np_yoy"])
     s = 0.5 * rank_pct(-df["debt"]) + 0.5 * rank_pct(df["ocf"])
     score = 0.4 * q + 0.4 * g + 0.2 * s
+    # 因子融合：把"ROE 趋势 / 增速加速度"按权重混进总分
+    fw = float(p.get("factor_weight", 0) or 0)
+    if fw > 0 and "roe_trend" in df:
+        mix = p.get("factor_mix", "both")
+        if mix == "trend":
+            extra = rank_pct(df["roe_trend"])
+        elif mix == "accel":
+            extra = rank_pct(df["accel"])
+        else:
+            extra = 0.5 * rank_pct(df["roe_trend"]) + 0.5 * rank_pct(df["accel"])
+        score = (1 - fw) * score + fw * extra
     if p.get("value"):
         val = load_val_asof(date)
         if val is not None:
@@ -165,6 +213,33 @@ def build_table(close, amount, fin, date, p, ctx, apply_pullback=True):
                 vrank[valid] = 0.6 * (1 - rank_pct(pe[valid])) + 0.4 * (1 - rank_pct(pb[valid]))
             score = 0.35 * q + 0.35 * g + 0.15 * s + 0.15 * vrank
     df["score"] = score
+    # 估值过滤（2016+）：只保留 PE 为正且不过高的
+    if p.get("pe_max") is not None or p.get("pe_pct_max") is not None:
+        val = load_val_asof(date)
+        if val is not None:
+            pe = val["pe_ttm"].reindex(df.index)
+            if p.get("pe_max") is not None:
+                mask = (pe > 0) & (pe <= p["pe_max"])
+                df = df[mask.fillna(False)]
+            if p.get("pe_pct_max") is not None:
+                pe_v = pe.reindex(df.index)
+                pos = pe_v[pe_v > 0]
+                if len(pos) > 5:
+                    thr = pos.rank(pct=True)
+                    keep = set(thr[thr <= p["pe_pct_max"]].index)
+                    df = df[df.index.isin(keep)]
+    # 估值融合：把"便宜程度"按权重混进分数
+    vw = float(p.get("val_weight", 0) or 0)
+    if vw > 0:
+        val = load_val_asof(date)
+        if val is not None:
+            pe = val["pe_ttm"].reindex(df.index)
+            pb = val["pb"].reindex(df.index)
+            valid = pe.notna() & (pe > 0)
+            if valid.sum() > 5:
+                vr = pd.Series(0.5, index=df.index)
+                vr[valid] = 0.6 * (1 - rank_pct(pe[valid])) + 0.4 * (1 - rank_pct(pb[valid]))
+                df["score"] = (1 - vw) * df["score"] + vw * vr
     return df[["score", "pullback_ok"]].sort_values("score", ascending=False)
 
 
@@ -280,7 +355,9 @@ def run(p, start="2013-01-01", end="2026-10-28", verbose=False):
         _CTX[key] = ctx
     bt_dates = rebalance_dates(close, start, end, every)
     bench = load_benchmark()
-    bench_ma = bench.rolling(200, min_periods=160).mean()
+    bench_win = int(p.get("bench_ma", 200))
+    bench_ma = bench.rolling(bench_win, min_periods=min(160, max(20, int(bench_win * 0.8)))).mean()
+    bench_dd = bench / bench.cummax() - 1
     if verbose:
         print(f"rebalance dates: {len(bt_dates)}", flush=True)
 
@@ -296,6 +373,9 @@ def run(p, start="2013-01-01", end="2026-10-28", verbose=False):
     month_idx = 0
     loser_holds = 0   # 因亏损被暂缓卖出的次数
     sold_at_loss = 0  # 最终仍以亏损卖出/清仓的次数
+    stop_log = []     # 止损明细：(日期, 代码, 成本, 卖出价)
+    hold_sum = 0      # 已平仓持仓的持有月数合计（用于算平均持有期）
+    closed = 0
 
     lag = int(p.get("exec_lag", 1))
     for d in bt_dates:
@@ -311,7 +391,31 @@ def run(p, start="2013-01-01", end="2026-10-28", verbose=False):
                 pool = table.loc[table.index.isin(entry_index) | table.index.isin(keep)]
             else:
                 pool = table.loc[entry_index]
-            target = list(pool.index[: p["n"]])
+            # 行业过滤/上限（2020+ 才有申万行业）
+            snap = None
+            if p.get("ind_cap") or p.get("ind_mom_top"):
+                snap = ind_snapshot(d)
+                if len(snap) and p.get("ind_mom_top"):
+                    ret60 = (close.loc[d] / close.shift(60).loc[d] - 1).reindex(pool.index)
+                    ind_of = snap.reindex(pool.index)
+                    ind_ret = ret60.groupby(ind_of).mean().dropna()
+                    if len(ind_ret) > 3:
+                        keep_n = max(1, int(np.ceil(len(ind_ret) * p["ind_mom_top"])))
+                        top_ind = set(ind_ret.sort_values(ascending=False).index[:keep_n])
+                        pool = pool[ind_of.isin(top_ind)]
+            target = []
+            cap = p.get("ind_cap") or 0
+            counts = {}
+            for code in pool.index:
+                if cap and snap is not None:
+                    ind = snap.get(code)
+                    if ind is not None and counts.get(ind, 0) >= cap:
+                        continue
+                    if ind is not None:
+                        counts[ind] = counts.get(ind, 0) + 1
+                target.append(code)
+                if len(target) >= p["n"]:
+                    break
             scores = table["score"]
         else:
             target = []
@@ -326,9 +430,53 @@ def run(p, start="2013-01-01", end="2026-10-28", verbose=False):
             return s.iloc[-1] if len(s) else None
 
         # 先卖不在目标里的（hold_losers：亏损的可以暂缓，等回本/部分回本/超时/破趋势再卖）
+        # stop_loss：持仓浮亏达到阈值，即使在目标名单里也先卖出（本月不再买回）
         kept = set()
+        stop = float(p.get("stop_loss", 0) or 0)
         for sym in list(pos):
+            pr0 = price_of(sym)
+            if pr0 is None:
+                pos.pop(sym, None)
+                entry_px.pop(sym, None)
+                hold_start.pop(sym, None)
+                continue
+            months = month_idx - hold_start.get(sym, month_idx)
+            # 最长持有：到期强制卖出（即使在目标名单里）
+            if p.get("max_hold_months") and months >= p["max_hold_months"]:
+                if sym in target:
+                    target = [t for t in target if t != sym]
+                cash += pos[sym] * pr0 * (1 - p["cost"])
+                traded_value += pos[sym] * pr0
+                pos.pop(sym, None)
+                entry_px.pop(sym, None)
+                hold_start.pop(sym, None)
+                trades += 1
+                trade_types["max_hold"] = trade_types.get("max_hold", 0) + 1
+                hold_sum += months
+                closed += 1
+                continue
+            if stop > 0:
+                ep0 = entry_px.get(sym, pr0)
+                if ep0 > 0 and pr0 / ep0 - 1 <= -stop:
+                    if sym in target:
+                        target = [t for t in target if t != sym]
+                    cash += pos[sym] * pr0 * (1 - p["cost"])
+                    traded_value += pos[sym] * pr0
+                    pos.pop(sym, None)
+                    entry_px.pop(sym, None)
+                    hold_start.pop(sym, None)
+                    trades += 1
+                    trade_types["stop"] = trade_types.get("stop", 0) + 1
+                    sold_at_loss += 1
+                    stop_log.append({"date": int(d.strftime("%Y%m%d")), "code": sym, "entry": ep0, "exit": pr0})
+                    hold_sum += months
+                    closed += 1
+                    continue
             if sym in target:
+                continue
+            # 最短持有：没到期就不卖（占用仓位，新买入用剩余预算）
+            if p.get("min_hold_months") and months < p["min_hold_months"]:
+                kept.add(sym)
                 continue
             pr = price_of(sym)
             if pr is None:
@@ -367,6 +515,8 @@ def run(p, start="2013-01-01", end="2026-10-28", verbose=False):
             hold_start.pop(sym, None)
             trades += 1
             trade_types["exit"] = trade_types.get("exit", 0) + 1
+            hold_sum += months
+            closed += 1
 
         # 目标权重（动态：按分数/波动加权，单票有上限）
         if target:
@@ -388,6 +538,16 @@ def run(p, start="2013-01-01", end="2026-10-28", verbose=False):
                     if dd_now <= -level:
                         expo *= factor
                         break
+                # 指数自身回撤再加一层减仓（比"指数<MA200"更灵敏）
+                if p.get("bench_dd_throttle"):
+                    try:
+                        idx_dd = float(bench_dd.loc[d])
+                    except KeyError:
+                        idx_dd = 0.0
+                    for level, factor in p["bench_dd_throttle"]:
+                        if idx_dd <= -level:
+                            expo *= factor
+                            break
                 weights = compute_weights(scores, list(prices), ctx, d, p)
                 band = p.get("min_trade", 0.0)
                 for sym, pr in prices.items():
@@ -440,6 +600,8 @@ def run(p, start="2013-01-01", end="2026-10-28", verbose=False):
     return {"equity": pd.Series(dict(eq)).sort_index(), "trades": trades,
             "trade_types": trade_types, "traded_value": traded_value,
             "loser_holds": loser_holds, "sold_at_loss": sold_at_loss,
+            "stop_log": stop_log,
+            "avg_hold_months": (hold_sum / closed) if closed else 0.0,
             "states": states}
 
 

@@ -110,23 +110,35 @@ func (s *PortfolioService) loadQGrowthFundamentals(startYear, endYear int) (map[
 		return nil, err
 	}
 	// 先按 (symbol, report_period) 聚合，再拼成每期一条记录。
+	// 同一科目可能因"部分科目后补公告"出现多次：保留 announce_date 最新的一条，
+	// 避免后到的空值/旧值覆盖掉有效值。
 	type key struct{ sym, period string }
-	agg := make(map[key]map[string]float64, len(rows)/6)
+	type itemVal struct {
+		value  float64
+		announce int64
+	}
+	agg := make(map[key]map[string]itemVal, len(rows)/6)
 	ann := make(map[key]int64, len(rows)/6)
 	for _, r := range rows {
 		k := key{portfolio.BareCode(r.Symbol), r.ReportPeriod}
 		m := agg[k]
 		if m == nil {
-			m = make(map[string]float64, 8)
+			m = make(map[string]itemVal, 8)
 			agg[k] = m
 		}
-		m[r.ItemCode] = r.ItemValue
+		if cur, ok := m[r.ItemCode]; !ok || r.AnnounceDate >= cur.announce {
+			m[r.ItemCode] = itemVal{value: r.ItemValue, announce: r.AnnounceDate}
+		}
 		if r.AnnounceDate > ann[k] {
 			ann[k] = r.AnnounceDate
 		}
 	}
 	out := make(map[string][]qgFund, 6000)
-	for k, m := range agg {
+	for k, raw := range agg {
+		m := make(map[string]float64, len(raw))
+		for code, v := range raw {
+			m[code] = v.value
+		}
 		q := int(k.period[len(k.period)-1] - '0')
 		if q < 1 || q > 4 {
 			continue

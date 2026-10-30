@@ -87,6 +87,18 @@ def build_fin():
         columns="item_code", values="item_value", aggfunc="last").reset_index()
     wide.columns.name = None
     wide["announce_date"] = pd.to_datetime(wide["announce_date"])
+    # 同一报告期可能因"部分科目后补公告"被拆成多行（其中一行大量 NaN）：
+    # 按列取最后一个非空值合并，避免最后公告的残行盖掉完整行。
+    ann = wide.groupby(["symbol", "report_period"])["announce_date"].max()
+    vals = wide.drop(columns=["announce_date"]).groupby(["symbol", "report_period"]).last()
+    wide = vals.join(ann).reset_index()
+    wide = wide.sort_values(["symbol", "report_period"]).reset_index(drop=True)
+    # 衍生因子：ROE 同比趋势、增速加速度（供因子实验用）
+    g = wide.groupby("symbol")
+    wide["roe_prev4"] = g["roe"].shift(4)
+    wide["gm_prev4"] = g["gross_margin"].shift(4)
+    wide["rev_prev"] = g["revenue_yoy"].shift(1)
+    wide["np_prev"] = g["net_profit_yoy"].shift(1)
     wide = wide.sort_values(["announce_date", "symbol"]).reset_index(drop=True)
     wide.to_parquet(os.path.join(OUT, "fin.parquet"), index=False)
     print("fin:", wide.shape, "ann", wide["announce_date"].min(), wide["announce_date"].max(), flush=True)
