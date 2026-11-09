@@ -7,6 +7,7 @@ export {
     BacktestRun,
     BacktestTrade,
     Detail,
+    Money,
     Overview,
     Portfolio,
     PortfolioInput,

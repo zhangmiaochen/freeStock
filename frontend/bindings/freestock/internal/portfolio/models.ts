@@ -382,6 +382,34 @@ export class Detail {
 }
 
 /**
+ * Money 是一个组合的资金状态。
+ */
+export class Money {
+    "initialCapital": number;
+    "cash": number;
+
+    /** Creates a new Money instance. */
+    constructor($$source: Partial<Money> = {}) {
+        if (!("initialCapital" in $$source)) {
+            this["initialCapital"] = 0;
+        }
+        if (!("cash" in $$source)) {
+            this["cash"] = 0;
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new Money instance from a string or object.
+     */
+    static createFrom($$source: any = {}): Money {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new Money($$parsedSource as Partial<Money>);
+    }
+}
+
+/**
  * Overview 是组合总览（原项目 get_overview_payload 的口径）。
  */
 export class Overview {

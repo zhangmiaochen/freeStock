@@ -374,6 +374,8 @@ def run(p, start="2013-01-01", end="2026-10-28", verbose=False):
     loser_holds = 0   # 因亏损被暂缓卖出的次数
     sold_at_loss = 0  # 最终仍以亏损卖出/清仓的次数
     stop_log = []     # 止损明细：(日期, 代码, 成本, 卖出价)
+    exit_log = []     # 所有卖出：原因 / 卖出时是否仍在 MA200 上方 / 持有收益
+    peak_px = {}      # 持有期最高收盘价（用于移动止盈）
     hold_sum = 0      # 已平仓持仓的持有月数合计（用于算平均持有期）
     closed = 0
 
@@ -429,6 +431,13 @@ def run(p, start="2013-01-01", end="2026-10-28", verbose=False):
             s = close.loc[:d, sym].dropna()
             return s.iloc[-1] if len(s) else None
 
+        # 更新持有期最高价（用收盘价）
+        if pos:
+            for sym in list(pos):
+                c_peak = close.at[d, sym] if sym in close.columns else np.nan
+                if np.isfinite(c_peak):
+                    peak_px[sym] = max(peak_px.get(sym, 0.0), float(c_peak))
+
         # 先卖不在目标里的（hold_losers：亏损的可以暂缓，等回本/部分回本/超时/破趋势再卖）
         # stop_loss：持仓浮亏达到阈值，即使在目标名单里也先卖出（本月不再买回）
         kept = set()
@@ -474,6 +483,19 @@ def run(p, start="2013-01-01", end="2026-10-28", verbose=False):
                     continue
             if sym in target:
                 continue
+            # 移动止盈：掉出名单但仍在 MA200 上方、且没从最高点回撤超过阈值 → 继续持有
+            if p.get("trail_exit"):
+                c_now = close.at[d, sym] if sym in close.columns else np.nan
+                ma_s = ctx.get("ma")
+                ma_v = ma_s.loc[d].get(sym) if ma_s is not None else None
+                above = ma_v is not None and np.isfinite(ma_v) and np.isfinite(c_now) and c_now > ma_v
+                pk = peak_px.get(sym, c_now)
+                ret_now = c_now / entry_px.get(sym, c_now) - 1 if entry_px.get(sym, c_now) > 0 else 0.0
+                if above and np.isfinite(c_now) and c_now >= pk * (1 - p["trail_exit"]) and (
+                    not p.get("trail_winners_only") or ret_now > 0
+                ):
+                    kept.add(sym)
+                    continue
             # 最短持有：没到期就不卖（占用仓位，新买入用剩余预算）
             if p.get("min_hold_months") and months < p["min_hold_months"]:
                 kept.add(sym)
@@ -513,8 +535,13 @@ def run(p, start="2013-01-01", end="2026-10-28", verbose=False):
             pos.pop(sym)
             entry_px.pop(sym, None)
             hold_start.pop(sym, None)
+            peak_px.pop(sym, None)
             trades += 1
             trade_types["exit"] = trade_types.get("exit", 0) + 1
+            ma_now = ctx["ma"].loc[d].get(sym) if ctx.get("ma") is not None else None
+            above_ma = bool(ma_now is not None and np.isfinite(ma_now) and pr > ma_now)
+            exit_log.append({"date": int(d.strftime("%Y%m%d")), "code": sym, "price": pr,
+                             "ret": ret, "above_ma": above_ma})
             hold_sum += months
             closed += 1
 
@@ -563,6 +590,7 @@ def run(p, start="2013-01-01", end="2026-10-28", verbose=False):
                         if not held_before:
                             entry_px[sym] = pr
                             hold_start[sym] = month_idx
+                            peak_px[sym] = pr
                         else:
                             # 加仓：按金额加权更新成本价
                             old_sh = pos[sym] - delta / pr
@@ -601,6 +629,7 @@ def run(p, start="2013-01-01", end="2026-10-28", verbose=False):
             "trade_types": trade_types, "traded_value": traded_value,
             "loser_holds": loser_holds, "sold_at_loss": sold_at_loss,
             "stop_log": stop_log,
+            "exit_log": exit_log,
             "avg_hold_months": (hold_sum / closed) if closed else 0.0,
             "states": states}
 

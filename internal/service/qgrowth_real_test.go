@@ -58,7 +58,9 @@ func TestQualityGrowthBacktestReal(t *testing.T) {
 	}
 
 	res, err := svc.CreateBacktest(BacktestRequest{
-		PortfolioID: portfolioID, StartDate: start, EndDate: end, InitialCapital: 100000,
+		PortfolioID: portfolioID, StartDate: start, EndDate: end,
+		InitialCapital: float64(envInt(t, "FREESTOCK_QG_CAPITAL", 100000)),
+		Affordable:     os.Getenv("FREESTOCK_QG_AFFORD") == "1",
 	})
 	if err != nil {
 		t.Fatalf("回测失败：%v", err)

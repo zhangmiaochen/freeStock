@@ -3,7 +3,9 @@ package service
 import (
 	"fmt"
 	"log/slog"
+	"math"
 	"runtime"
+	"strconv"
 	"sync"
 	"time"
 
@@ -25,6 +27,8 @@ type PortfolioService struct {
 	store *portfolio.Store
 	// opened 记录打开失败过，避免每次调用都重试失败的文件操作
 	openErr error
+	// fixEntryOnce 保证"复权成本价修正"只跑一次
+	fixEntryOnce sync.Once
 
 	// ---- 回填 → 回测 的日线复用 ----
 	//
@@ -162,6 +166,66 @@ func (s *PortfolioService) GetDatabasePath() string { return s.dbPath() }
 // 现价来源
 // ---------------------------------------------------------------------------
 
+// fixAdjustedEntryPrices 把历史持仓里被记成"复权价"的成本价改回原始价。
+//
+// 早期版本的应用调仓/新增持仓用的是评分表的复权收盘价，导致成本价和现价
+// （原始价）不在一个口径上，盈亏会算成 −25%~−60%。
+//
+// 判定方式：成本价 ≈ 建仓日的复权收盘价（误差 1% 内），且与原始收盘价
+// 相差超过 2% —— 只有这种情况才认定"记成了复权价"并改成原始价；
+// 手工按市价录入的成本价 ≈ 原始价，不会被误改。
+func (s *PortfolioService) fixAdjustedEntryPrices() {
+	store, err := s.db()
+	if err != nil || s.stock == nil {
+		return
+	}
+	portfolios, err := store.List()
+	if err != nil {
+		return
+	}
+	fixed := 0
+	for _, p := range portfolios {
+		positions, err := store.ListPositions(p.ID)
+		if err != nil {
+			continue
+		}
+		for _, pos := range positions {
+			if pos.EntryPrice <= 0 || pos.EntryDate == "" {
+				continue
+			}
+			d, err := strconv.Atoi(pos.EntryDate)
+			if err != nil {
+				continue
+			}
+			raw, okRaw := s.rawCloseFor(pos.Code, d)
+			if !okRaw || raw <= 0 {
+				continue
+			}
+			adj, okAdj := s.adjustedCloseFor(pos.Code, d)
+			looksAdjusted := okAdj && adj > 0 &&
+				math.Abs(pos.EntryPrice/adj-1) < 0.01 &&
+				math.Abs(pos.EntryPrice/raw-1) > 0.02
+			// 兜底：拿不到复权价时，用"偏离原始价 1.5 倍以上"判断（老规则）
+			if !okAdj {
+				ratio := pos.EntryPrice / raw
+				looksAdjusted = ratio > 1.5 || ratio < 0.67
+			}
+			if !looksAdjusted {
+				continue
+			}
+			if _, err := store.DB().Exec(
+				"UPDATE portfolio_position SET entry_price=? WHERE portfolio_id=? AND ts_code=?",
+				raw, p.ID, pos.Code); err != nil {
+				continue
+			}
+			fixed++
+		}
+	}
+	if fixed > 0 {
+		slog.Info("已修正历史持仓的复权成本价", "count", fixed)
+	}
+}
+
 // LatestClose 实现 portfolio.PriceSource。
 //
 // **优先取"该策略最新评分日"的收盘价**（原实现 portfolio_service.py:3199），
@@ -192,8 +256,13 @@ func (s *PortfolioService) LatestClose(codes []string, strategyID string) (map[s
 			if err == nil {
 				for code, row := range rows {
 					if row.Close > 0 {
+						// 评分表里的 Close 是**复权价**；持仓展示要用原始价。
+						closePx := row.Close
+						if v, ok := s.rawCloseFor(code, int(date)); ok {
+							closePx = v
+						}
 						out[code] = portfolio.PricePoint{
-							Close: row.Close,
+							Close: closePx,
 							Date:  fmt.Sprintf("%d", date),
 						}
 					}
@@ -225,7 +294,13 @@ func (s *PortfolioService) LatestClose(codes []string, strategyID string) (map[s
 		if item.Date > 0 {
 			date = fmt.Sprintf("%d", item.Date)
 		}
-		out[item.Code] = portfolio.PricePoint{Close: item.Close, Date: date}
+		closePx := item.Close
+		if item.Date > 0 {
+			if v, ok := s.rawCloseFor(item.Code, int(item.Date)); ok {
+				closePx = v
+			}
+		}
+		out[item.Code] = portfolio.PricePoint{Close: closePx, Date: date}
 	}
 	return out, nil
 }
@@ -285,6 +360,8 @@ func (s *PortfolioService) DeletePortfolio(id string) error {
 
 // GetPortfolioDetail 返回组合详情：持仓（含现价与盈亏）、流水、汇总。
 func (s *PortfolioService) GetPortfolioDetail(id string) (*portfolio.Detail, error) {
+	// 一次性修正：早期"一键应用"把复权价记成了成本价，这里改成原始价
+	s.fixEntryOnce.Do(func() { s.fixAdjustedEntryPrices() })
 	store, err := s.db()
 	if err != nil {
 		return nil, err

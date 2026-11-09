@@ -341,6 +341,13 @@ export class RotationRow {
     "executionModeLabel": string;
     "actionPrefix": string;
 
+    /**
+     * 资金口径（质量成长按本金折算，其它策略可为 0）
+     */
+    "targetShares"?: number;
+    "targetAmount"?: number;
+    "affordable"?: boolean;
+
     /** Creates a new RotationRow instance. */
     constructor($$source: Partial<RotationRow> = {}) {
         if (!("tsCode" in $$source)) {

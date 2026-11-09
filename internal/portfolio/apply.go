@@ -59,7 +59,11 @@ func IsApplyExecutable(action string) bool {
 //
 // 对应原实现的 `changed_count`（只累加 `layer_delta != 0` 的行）。
 // 判据必须是"clamp 之后目标层数 ≠ 当前层数"，而不是"动作名可执行"。
-func wouldChangeLayers(actions []ApplyAction, existing map[string]Position) bool {
+func wouldChangeLayers(actions []ApplyAction, existing map[string]Position, totalLayers int) bool {
+	limit := maxApplyLayers
+	if totalLayers > 10 {
+		limit = totalLayers
+	}
 	for _, action := range actions {
 		code := BareCode(action.Code)
 		if code == "" {
@@ -70,8 +74,8 @@ func wouldChangeLayers(actions []ApplyAction, existing map[string]Position) bool
 			continue
 		}
 		target := action.TargetLayers
-		if target > maxApplyLayers {
-			target = maxApplyLayers
+		if target > limit {
+			target = limit
 		}
 		if target < 0 {
 			target = 0
@@ -200,7 +204,7 @@ func (s *Store) ApplyRotation(portfolioID string, tradeDate string, actions []Ap
 	// 我此前是在 service 层按**动作名**判（`IsApplyExecutable`），
 	// 于是"计划说要加层、但目标层数已经等于当前层数"（例如已在上限 3 层）
 	// 会被当成可执行 → 整表重写却没改任何东西 → 与原版的"直接拒绝"行为不同。
-	if !wouldChangeLayers(actions, existingByCode) {
+	if !wouldChangeLayers(actions, existingByCode, item.TotalLayers) {
 		return nil, fmt.Errorf("当前组合暂无可执行的层级调仓建议")
 	}
 
@@ -230,10 +234,16 @@ func (s *Store) ApplyRotation(portfolioID string, tradeDate string, actions []Ap
 			continue
 		}
 
-		// 硬编码 clamp 到 3（原实现如此）
+		// 层数上限：10 层制（含）以下沿用参考实现的硬编码 3；
+		// 超过 10 层的组合（例如质量成长的 100 层制）按总层数放行，
+		// 否则 15% 的目标会被砍成 3%。
+		limit := maxApplyLayers
+		if item.TotalLayers > 10 {
+			limit = item.TotalLayers
+		}
 		target := action.TargetLayers
-		if target > maxApplyLayers {
-			target = maxApplyLayers
+		if target > limit {
+			target = limit
 		}
 		if target < 0 {
 			target = 0

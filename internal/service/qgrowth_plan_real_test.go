@@ -49,6 +49,11 @@ func TestQualityGrowthPlanReal(t *testing.T) {
 		"quality_growth_pullback", portfolioID); err != nil {
 		t.Fatalf("切换策略失败：%v", err)
 	}
+	// 质量成长用 100 层制（1 层 = 1%）；老组合可能是 10 层，先对齐再比对
+	if _, err := store.DB().Exec(
+		"UPDATE portfolio SET total_layers=100 WHERE portfolio_id=?", portfolioID); err != nil {
+		t.Fatalf("设置层数失败：%v", err)
+	}
 
 	plan, err := svc.BuildPlan(portfolioID)
 	if err != nil {
@@ -61,7 +66,8 @@ func TestQualityGrowthPlanReal(t *testing.T) {
 		if i >= 8 {
 			break
 		}
-		t.Logf("  候选%d %s %s 评分=%.1f", i+1, row.Code, row.Name, row.TotalScore)
+		t.Logf("  候选%d %s %s 评分=%.1f 价格=%.2f", i+1, row.Code, row.Name, row.TotalScore, row.Close)
+		t.Logf("QCAND %s close=%.2f", row.Code, row.Close)
 	}
 	for _, row := range plan.Plan.Rows {
 		t.Logf("  计划 %s %s %s 层 %d→%d (%+d) %s",
@@ -70,8 +76,21 @@ func TestQualityGrowthPlanReal(t *testing.T) {
 	if plan.StrengthDate == 0 {
 		t.Fatal("建议日为空")
 	}
-	if len(plan.Candidates) == 0 {
-		t.Fatal("最新交易日没有候选（可能数据未更新）")
+	// 方案 A：非月末调仓窗口不展示临时名单（只有持仓 keep），这是预期行为。
+	if isRebalanceWindowDate(plan.StrengthDate) {
+		if len(plan.Candidates) == 0 {
+			t.Fatal("月末调仓日没有候选（可能数据未更新）")
+		}
+	} else {
+		if len(plan.Candidates) != 0 {
+			t.Fatalf("非月末不应展示候选名单，实际 %d 只", len(plan.Candidates))
+		}
+		for _, row := range plan.Plan.Rows {
+			if row.Action != score.ActionKeep {
+				t.Fatalf("非月末只应有 keep，实际 %s %s", row.Action, row.Code)
+			}
+		}
+		t.Logf("非月末（%d）：仅展示持仓，下一调仓日 %s", plan.StrengthDate, nextRebalanceDate(plan.StrengthDate))
 	}
 
 	// ---- 一致性检查：回测的计划构建器与实盘建议必须是同一套目标层数 ----
@@ -79,8 +98,14 @@ func TestQualityGrowthPlanReal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// 用**月末调仓日**比对：非月末只展示持仓（方案 A），不生成临时名单。
+	const rebalanceDate = 20261030
+	livePlan, err := svc.buildQualityGrowthPlanAt(item, store, rebalanceDate)
+	if err != nil {
+		t.Fatal(err)
+	}
 	cfg := qgrowth.DefaultConfig()
-	days, _, bench, err := svc.buildQGrowthDays(plan.StrengthDate, plan.StrengthDate, cfg)
+	days, _, bench, err := svc.buildQGrowthDays(rebalanceDate, rebalanceDate, cfg, scopeOfPortfolio(item))
 	if err != nil || len(days) == 0 {
 		t.Fatalf("回测侧组装失败：%v", err)
 	}
@@ -91,8 +116,8 @@ func TestQualityGrowthPlanReal(t *testing.T) {
 			btTarget[r.Code] = r.TargetLayers
 		}
 	}
-	liveTarget := make(map[string]int, len(plan.Plan.Rows))
-	for _, r := range plan.Plan.Rows {
+	liveTarget := make(map[string]int, len(livePlan.Plan.Rows))
+	for _, r := range livePlan.Plan.Rows {
 		if r.Action == score.ActionAdd && r.TargetLayers > 0 {
 			liveTarget[r.Code] = r.TargetLayers
 		}

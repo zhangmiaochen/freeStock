@@ -35,7 +35,9 @@ type Config struct {
 	SlippagePct    float64 // 0.1
 	// SlippageType 是 "pct"（按百分比）或 "fixed"（按绝对值）
 	SlippageType string
-	MarketScope  []string
+	// LotSize 是下单的最小单位（A 股 100 股）；1 表示不限整手（历史口径）
+	LotSize     int
+	MarketScope []string
 }
 
 // withDefaults 补上原实现的默认值。
@@ -69,6 +71,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.SlippageType == "" {
 		c.SlippageType = "pct"
+	}
+	if c.LotSize < 1 {
+		c.LotSize = 1
 	}
 	return c
 }
@@ -295,7 +300,15 @@ func (e *Engine) affordableBuyShares(available, price float64) int {
 	if available <= 0 || price <= 0 {
 		return 0
 	}
+	lot := e.cfg.LotSize
+	if lot < 1 {
+		lot = 1
+	}
 	shares := int(available / price)
+	// A 股按 100 股整数倍下单：先向下取整到整手，再逐手校验手续费
+	if lot > 1 {
+		shares = (shares / lot) * lot
+	}
 	for shares > 0 {
 		amount := float64(shares) * price
 		commission := math.Max(amount*e.cfg.CommissionRate, e.cfg.MinCommission)
@@ -304,8 +317,12 @@ func (e *Engine) affordableBuyShares(available, price float64) int {
 			return shares
 		}
 		excess := total - available
-		// 至少减 1 —— 与 `max(1, ...)` 一致，保证循环一定收敛
-		shares -= max1(int(excess / math.Max(price, 1e-9)))
+		// 至少减 1 手（或 1 股）—— 保证循环一定收敛
+		step := max1(int(excess / math.Max(price, 1e-9)))
+		if lot > 1 {
+			step = ((step + lot - 1) / lot) * lot
+		}
+		shares -= step
 		if shares < 0 {
 			return 0
 		}

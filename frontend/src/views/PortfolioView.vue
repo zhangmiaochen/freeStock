@@ -47,6 +47,7 @@ import {
   type StrengthSummary,
 } from "@/lib/backend";
 import { formatPercent, trendClass } from "@/lib/format";
+import { confirmDialog, promptDialog } from "@/lib/dialog";
 import { cn } from "@/lib/utils";
 
 const router = useRouter();
@@ -89,6 +90,7 @@ const planError = ref("");
 const applying = ref(false);
 const refreshing = ref(false);
 const strength = ref<StrengthSummary | null>(null);
+const money = ref<import("@/lib/backend").MoneyView | null>(null);
 /** 刷新评分时评多少只。**默认 0 = 全市场**（原版没有这个参数，广度闸门需要全市场样本） */
 const refreshLimit = ref(0);
 
@@ -269,17 +271,50 @@ async function loadList() {
 async function loadDetail(id: string) {
   if (!id) {
     current.value = null;
+    money.value = null;
     return;
   }
   loadingDetail.value = true;
   try {
     current.value = await api.portfolio.detail(id);
+    money.value = await api.portfolio.getMoney(id);
   } catch (err) {
     error.value = errorMessage(err);
     current.value = null;
+    money.value = null;
   } finally {
     loadingDetail.value = false;
   }
+}
+
+/** 修改本金：本地保存，并按新本金重置现金/重算股数。 */
+async function editCapital() {
+  if (!current.value) return;
+  const input = await promptDialog({
+    title: "设置本金",
+    message: "本金用于把推荐权重换算成股数（100 股整手），保存在本地。",
+    defaultValue: String(Math.round(money.value?.initialCapital ?? 100000)),
+    placeholder: "例如 100000",
+    inputSuffix: "元",
+  });
+  if (input === null) return;
+  const capital = Number(input);
+  if (!Number.isFinite(capital) || capital < 0) {
+    error.value = "本金必须是非负数字";
+    return;
+  }
+  try {
+    money.value = await api.portfolio.setCapital(current.value.portfolio.id, capital);
+    applyResult.value = "本金已更新";
+  } catch (err) {
+    error.value = errorMessage(err);
+  }
+}
+
+/** 金额格式：1234567 → 1,234,567 元 */
+function formatMoney(value: number | undefined | null): string {
+  if (value === undefined || value === null || !Number.isFinite(value)) return "—";
+  return value.toLocaleString("zh-CN", { maximumFractionDigits: 0 }) + " 元";
 }
 
 async function selectPortfolio(id: string) {
@@ -378,9 +413,12 @@ async function refreshStrength(force = false) {
 async function applyPlan() {
   if (!currentId.value || !plan.value) return;
   const changed = plan.value.plan.rows.filter((row) => row.isExecutable).length;
-  if (!window.confirm(
-    `确定应用建议？会影响 ${changed} 只股票，持仓会被重写（流水会保留审计记录）。`,
-  )) return;
+  const confirmed = await confirmDialog({
+    title: "应用调仓建议",
+    message: `会影响 ${changed} 只股票，持仓会被重写（流水保留审计记录）。`,
+    confirmText: "应用",
+  });
+  if (!confirmed) return;
 
   applying.value = true;
   planError.value = "";
@@ -436,7 +474,13 @@ async function submitPortfolio(input: PortfolioInput) {
 }
 
 async function removePortfolio(item: Portfolio) {
-  if (!window.confirm(`确定删除组合「${item.name}」？持仓与流水会一起删除。`)) return;
+  const ok = await confirmDialog({
+    title: `删除组合「${item.name}」`,
+    message: "持仓与流水会一起删除，且不可恢复。",
+    confirmText: "删除",
+    danger: true,
+  });
+  if (!ok) return;
   error.value = "";
   try {
     await api.portfolio.remove(item.id);
@@ -498,7 +542,13 @@ async function submitPosition() {
 }
 
 async function removePosition(code: string, name: string) {
-  if (!window.confirm(`确定删除持仓「${name || code}」？`)) return;
+  const ok = await confirmDialog({
+    title: `删除持仓「${name || code}」`,
+    message: "只删除这条持仓，不会影响其它持仓。",
+    confirmText: "删除",
+    danger: true,
+  });
+  if (!ok) return;
   try {
     await api.portfolio.removePosition(currentId.value, code);
     await refresh();
@@ -630,6 +680,40 @@ onMounted(async () => {
               {{ current.portfolio.notes }}
             </p>
 
+            <!-- 资金：本金（当前权益 = 现金 + 持仓市值） -->
+            <div v-if="money" class="border-border/60 mt-3 rounded-lg border p-3">
+              <div class="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <div class="text-muted-foreground text-[11px]">当前本金（现金 + 持仓市值）</div>
+                  <div class="tabular text-lg font-semibold">{{ formatMoney(money.equity) }}</div>
+                </div>
+                <div class="flex items-center gap-3 text-[11px]">
+                  <span :class="trendClass(money.returnPct)">收益 {{ formatPercent(money.returnPct) }}</span>
+                  <Button variant="outline" size="sm" class="h-6 px-2 text-[11px]" @click="editCapital">
+                    修改本金
+                  </Button>
+                </div>
+              </div>
+              <div class="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-[11px] sm:grid-cols-4">
+                <div>
+                  <span class="text-muted-foreground">初始本金</span>
+                  <span class="tabular ml-1">{{ formatMoney(money.initialCapital) }}</span>
+                </div>
+                <div>
+                  <span class="text-muted-foreground">持仓市值</span>
+                  <span class="tabular ml-1">{{ formatMoney(money.marketValue) }}</span>
+                </div>
+                <div>
+                  <span class="text-muted-foreground">现金</span>
+                  <span class="tabular ml-1">{{ formatMoney(money.cash) }}</span>
+                </div>
+                <div>
+                  <span class="text-muted-foreground">口径</span>
+                  <span class="ml-1">100 股整手</span>
+                </div>
+              </div>
+            </div>
+
             <!-- 汇总指标 -->
             <div v-if="summary" class="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 sm:grid-cols-3 lg:grid-cols-6">
               <div>
@@ -666,7 +750,7 @@ onMounted(async () => {
 
             <!-- 口径说明：这些地方最容易误解 -->
             <div class="text-muted-foreground mt-3 space-y-0.5 border-t pt-2 text-[11px]">
-              <p>· 数量口径是<b>层数</b>：1 层 = 总资金的 1/{{ current.portfolio.totalLayers }}，本项目组合不记股数</p>
+              <p>· 数量口径是<b>层数</b>：1 层 = 总资金的 1/{{ current.portfolio.totalLayers }}；质量成长会按本金折算成 100 股整手（见上方资金卡片）</p>
               <p>· 权重是<b>计划权重</b>（层数 ÷ 总层数），不是按市值算的</p>
               <p>· 组合收益率是<b>各持仓收益按权重加权求和</b>，不含未投入的现金</p>
               <p v-if="summary && summary.missingPrices > 0" class="text-amber-500">

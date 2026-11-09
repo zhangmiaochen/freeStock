@@ -447,7 +447,7 @@ func fromAddress(prefs config.EmailPrefs) string {
 // 预览就失去了"所见即所得"的意义。代价是点预览可能等几十秒（首刷）。
 func (s *PortfolioService) PreviewEmail() (*EmailPreview, error) {
 	prefs := s.emailPrefs()
-	digest, err := s.prepareDigest(prefs, s.defaultRefresher())
+	digest, err := s.prepareDigest(prefs, s.defaultRefresher(), false) // 预览不自动应用
 	if err != nil {
 		return nil, err
 	}
@@ -554,7 +554,7 @@ func (s *PortfolioService) sendDigestWith(
 ) (*EmailSendResult, error) {
 	started := time.Now()
 
-	digest, err := s.prepareDigest(prefs, refresh)
+	digest, err := s.prepareDigest(prefs, refresh, true) // 真正发送时才自动应用
 	if err != nil {
 		return nil, err
 	}
@@ -706,7 +706,7 @@ func containsAll(haystack, needles []int) bool {
 // 逐组合"能算多少算多少"：某个组合的评分还没刷新时，**不中止整封邮件**，
 // 而是在它的段落里写清原因（PortfolioDigest.PlanError）——
 // 静默跳过会让用户以为那个组合今天没有动作。
-func (s *PortfolioService) buildDigest(prefs config.EmailPrefs) (*email.Digest, error) {
+func (s *PortfolioService) buildDigest(prefs config.EmailPrefs, applyAuto bool) (*email.Digest, error) {
 	store, err := s.db()
 	if err != nil {
 		return nil, err
@@ -715,7 +715,7 @@ func (s *PortfolioService) buildDigest(prefs config.EmailPrefs) (*email.Digest, 
 	if err != nil {
 		return nil, err
 	}
-	return s.buildDigestFor(store, selected, prefs)
+	return s.buildDigestFor(store, selected, prefs, applyAuto)
 }
 
 // buildDigestFor 用**已经挑好的**组合列表拼内容。
@@ -723,7 +723,7 @@ func (s *PortfolioService) buildDigest(prefs config.EmailPrefs) (*email.Digest, 
 // 抽出来是为了让"发送前刷新评分"能复用同一份列表 ——
 // 否则挑两次列表，万一期间组合被删/被归档，刷新的集合与发出去的集合会对不上。
 func (s *PortfolioService) buildDigestFor(
-	store *portfolio.Store, selected []portfolio.Portfolio, prefs config.EmailPrefs,
+	store *portfolio.Store, selected []portfolio.Portfolio, prefs config.EmailPrefs, applyAuto bool,
 ) (*email.Digest, error) {
 	digest := &email.Digest{GeneratedAt: time.Now()}
 	if len(selected) == 0 {
@@ -733,7 +733,7 @@ func (s *PortfolioService) buildDigestFor(
 	}
 
 	for _, item := range selected {
-		digest.Portfolios = append(digest.Portfolios, s.buildPortfolioDigest(item, prefs))
+		digest.Portfolios = append(digest.Portfolios, s.buildPortfolioDigest(item, prefs, applyAuto))
 	}
 
 	// 评分日取各组合里**最新的那一个**（原实现用全表 MAX(trade_date)）。
@@ -900,7 +900,7 @@ func (s *PortfolioService) defaultRefresher() scoreRefresher {
 // 预览与发送走同一条路径，是为了让"预览看到的 = 真正发出去的"。
 // 预览也会触发一次刷新，这样它显示的评分日就是实际会用的那一天。
 func (s *PortfolioService) prepareDigest(
-	prefs config.EmailPrefs, refresh scoreRefresher,
+	prefs config.EmailPrefs, refresh scoreRefresher, applyAuto bool,
 ) (*email.Digest, error) {
 	store, err := s.db()
 	if err != nil {
@@ -914,7 +914,7 @@ func (s *PortfolioService) prepareDigest(
 	// ⚠ 顺序：**先刷新，再拼内容**（理由见下面的注释与 9.6.1）
 	notes := refreshScoresBeforeSend(selected, prefs, refresh)
 
-	digest, err := s.buildDigestFor(store, selected, prefs)
+	digest, err := s.buildDigestFor(store, selected, prefs, applyAuto)
 	if err != nil {
 		return nil, err
 	}
@@ -926,10 +926,92 @@ func (s *PortfolioService) prepareDigest(
 	return digest, nil
 }
 
+// planHasExecutableChange 判断建议里是否有"可执行、且会改变仓位"的动作。
+//
+// 包含减仓/加层这类权重调整 —— 自动组合不手动确认，权重也必须被应用，
+// 否则仓位会一直漂移。
+func planHasExecutableChange(plan *PlanResult) bool {
+	if plan == nil {
+		return false
+	}
+	for _, row := range plan.Plan.Rows {
+		if !row.IsExecutable {
+			continue
+		}
+		switch row.Action {
+		case score.ActionAdd, score.ActionReplaceIn, score.ActionClear, score.ActionReplaceOut,
+			score.ActionReduce, score.ActionAddLayer:
+			if row.TargetLayers != row.CurrentLayers {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// shouldAutoApply 决定这次发送要不要自动应用。
+//
+//   - 只有 type=auto 的组合；
+//   - 必须有真实可执行的变化；
+//   - **质量成长只在月末调仓日应用**：它的目标权重是按当日快照算的，
+//     每天都应用等于每天再平衡，会打乱月频节奏、白交手续费。
+//     其他策略（低吸等）的计划本身只在信号日产生动作，直接应用即可。
+func (s *PortfolioService) shouldAutoApply(item portfolio.Portfolio, plan *PlanResult) bool {
+	if item.Type != portfolio.TypeAuto {
+		return false
+	}
+	if !planHasExecutableChange(plan) {
+		return false
+	}
+	if item.StrategyID == portfolio.StrategyQualityGrowth {
+		if !s.isMonthEndTradeDate(plan.StrengthDate) {
+			return false
+		}
+		// 只有清仓、没有建仓时不自动应用（数据缺口时避免"清了不买"）
+		if !planHasBuy(plan) {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *PortfolioService) isMonthEndTradeDate(date int) bool {
+	return isRebalanceWindowDate(date)
+}
+
+// planHasBuy 判断计划里是否有"建仓/换入"这类买入动作（用于防止只清仓不加仓）。
+func planHasBuy(plan *PlanResult) bool {
+	if plan == nil {
+		return false
+	}
+	for _, row := range plan.Plan.Rows {
+		if row.IsExecutable && (row.Action == score.ActionAdd || row.Action == score.ActionReplaceIn) && row.TargetLayers > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // buildPortfolioDigest 构建单个组合的段落。
 func (s *PortfolioService) buildPortfolioDigest(
-	item portfolio.Portfolio, prefs config.EmailPrefs,
+	item portfolio.Portfolio, prefs config.EmailPrefs, applyAuto bool,
 ) email.PortfolioDigest {
+	// 质量成长必须是 100 层制（1 层 = 1%）：空仓的历史组合自动升级一次，
+	// 否则 10 层制下 15% 的目标只能落到 2 层（20%），和回测口径对不上。
+	// 已有持仓的组合不自动改（避免把旧层数按新分母重解释）。
+	if item.StrategyID == portfolio.StrategyQualityGrowth && item.TotalLayers < 100 {
+		if store, err := s.db(); err == nil {
+			if positions, e := store.ListPositions(item.ID); e == nil && len(positions) == 0 {
+				if _, e2 := store.Update(item.ID, portfolio.PortfolioInput{
+					StrategyID: item.StrategyID, TotalLayers: 100,
+				}); e2 == nil {
+					if it2, e3 := store.Get(item.ID); e3 == nil {
+						item = it2
+					}
+				}
+			}
+		}
+	}
 	out := email.PortfolioDigest{
 		Name:          item.Name,
 		TypeLabel:     item.TypeLabel,
@@ -963,13 +1045,68 @@ func (s *PortfolioService) buildPortfolioDigest(
 		return out
 	}
 
+	// ---- 自动组合：先补做漏掉的月度调仓，再判断这次要不要应用 ----
+	//
+	// 只对 type=auto 的质量成长生效；预览路径传 applyAuto=false，避免"看一眼就把仓调了"。
+	if applyAuto && item.Type == portfolio.TypeAuto && item.StrategyID == portfolio.StrategyQualityGrowth {
+		if note := s.catchUpQualityGrowthRebalance(item); note != "" {
+			out.Notes = append(out.Notes, note)
+			// 补做后重读持仓与建议，让邮件反映补做后的真实仓位
+			if d2, e2 := s.GetPortfolioDetail(item.ID); e2 == nil {
+				detail = d2
+				out.ReturnPct = d2.Summary.TotalReturnPct
+				out.PositionCount = d2.Summary.PositionCount
+				out.UsedLayers = d2.Summary.UsedLayers
+				out.AvailableLayers = d2.Summary.AvailableLayers
+				out.PositionRatio = d2.Summary.PositionRatio
+				out.PriceDate = d2.Summary.PriceDate
+				if prefs.IncludeHoldings {
+					out.Holdings = holdingDigests(d2.Positions)
+				}
+			}
+			if p2, e3 := s.BuildPlan(item.ID); e3 == nil {
+				plan = p2
+			}
+		}
+	}
+
+	// ---- 自动组合：出现真实调仓时自动应用（不用等手动确认）----
+	//
+	// 只对 type=auto 的组合生效；预览路径传 applyAuto=false，避免"看一眼就把仓调了"。
+	// 只认"建仓/清仓/换入换出"这类真实调仓，单纯的权重微调（reduce/add_layer）
+	// 不自动执行，否则质量成长这种按日算权重的策略会天天被再平衡。
+	if applyAuto && s.shouldAutoApply(item, plan) {
+		if res, applyErr := s.ApplyRotation(item.ID); applyErr == nil {
+			out.Notes = append(out.Notes, fmt.Sprintf(
+				"已自动应用调仓：新增 %d 只、减仓 %d 只、清仓 %d 只",
+				res.Applied.Added, res.Applied.Reduced, res.Applied.Cleared))
+			// 应用后重读持仓与建议，让邮件反映应用后的真实仓位
+			if d2, e2 := s.GetPortfolioDetail(item.ID); e2 == nil {
+				detail = d2
+				out.ReturnPct = d2.Summary.TotalReturnPct
+				out.PositionCount = d2.Summary.PositionCount
+				out.UsedLayers = d2.Summary.UsedLayers
+				out.AvailableLayers = d2.Summary.AvailableLayers
+				out.PositionRatio = d2.Summary.PositionRatio
+				out.PriceDate = d2.Summary.PriceDate
+				if prefs.IncludeHoldings {
+					out.Holdings = holdingDigests(d2.Positions)
+				}
+			}
+			if p2, e3 := s.BuildPlan(item.ID); e3 == nil {
+				plan = p2
+			}
+		} else {
+			out.Notes = append(out.Notes, "自动应用调仓失败："+applyErr.Error())
+		}
+	}
+
 	out.HealthLabel = plan.HealthLabel
 	out.PortfolioScore = plan.PortfolioScore
 	out.MaxDrawdownPct = plan.MaxDrawdownPct
 	out.TradeDate = strconv.Itoa(plan.StrengthDate)
 	out.NoActionReasons = plan.Plan.NoActionReasons
 	out.Notes = append(out.Notes, plan.Notes...)
-
 	if prefs.IncludeHoldings {
 		// 用计划里的持仓行覆盖一次：它带 120 日回撤、持有交易日等
 		// 只在评分链路里才有的字段（有评分时才有值）。

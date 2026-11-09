@@ -386,6 +386,9 @@ type PlanResult struct {
 	Holdings       []score.Row        `json:"holdings"`
 	Candidates     []score.Row        `json:"candidates"`
 	Notes          []string           `json:"notes"`
+	// 资金口径（质量成长）：当前权益、现金
+	MoneyEquity float64 `json:"moneyEquity,omitempty"`
+	MoneyCash   float64 `json:"moneyCash,omitempty"`
 }
 
 // BuildPlan 为组合生成真实的调仓建议。
@@ -488,13 +491,18 @@ func (s *PortfolioService) BuildPlan(portfolioID string) (*PlanResult, error) {
 		row := strengthToRow(strength)
 		row.PositionLayers = position.PositionLayers
 		row.EntryPrice = position.EntryPrice
-		row.CurrentPrice = strength.Close
-		if position.EntryPrice > 0 && strength.Close > 0 {
-			row.ProfitLossPct = round4((strength.Close/position.EntryPrice - 1) * 100)
+		// 现价用**不复权**价：评分表里的 Close 是复权价，和行情软件对不上
+		cur := strength.Close
+		if v, ok := s.rawCloseFor(position.Code, int(strengthDate)); ok {
+			cur = v
+		}
+		row.CurrentPrice = cur
+		if position.EntryPrice > 0 && cur > 0 {
+			row.ProfitLossPct = round4((cur/position.EntryPrice - 1) * 100)
 		}
 		// 持仓期最高价与交易日数：需要历史，逐只查（持仓通常只有几只）
 		row.HighestPrice, row.HoldingTradeDays = s.holdingExtremes(
-			position.Code, position.EntryDate, int(strengthDate), position.EntryPrice, strength.Close)
+			position.Code, position.EntryDate, int(strengthDate), position.EntryPrice, cur)
 		holdingRows = append(holdingRows, row)
 	}
 	if missing > 0 {
@@ -650,6 +658,18 @@ func (s *PortfolioService) buildCandidatePool(
 		rowsIn = append(rowsIn, strengthToRow(strength))
 	}
 	rows, scores, fullPool := s.buildCandidatePoolFrom(store, rowsIn, item, cfg, holdingCodes)
+	// 展示用现价换成**不复权**价（评分表里是复权价）；筛选/打分已在上一步完成，
+	// 这里只改展示字段，不影响选股结果。
+	for i := range rows {
+		if v, ok := s.rawCloseFor(rows[i].Code, int(strengthDate)); ok {
+			rows[i].Close = v
+		}
+	}
+	for i := range fullPool {
+		if v, ok := s.rawCloseFor(fullPool[i].Code, int(strengthDate)); ok {
+			fullPool[i].Close = v
+		}
+	}
 	return rows, scores, fullPool, nil
 }
 
@@ -1320,6 +1340,23 @@ type AppliedChange struct {
 // 本项目目前不落快照表（建议是实时算的），所以省掉这一步；等需要历史建议
 // 追溯时再补。
 func (s *PortfolioService) ApplyRotation(portfolioID string) (*ApplyResult, error) {
+	return s.applyRotationWithPlan(portfolioID, nil)
+}
+
+// ApplyRotationAt 用**指定日期**的建议应用调仓（补做机制用）。
+//
+// 与 ApplyRotation 的唯一区别：计划不是按最新交易日算，而是按 date 那天的
+// 数据算 —— 节假日/数据延迟导致月末没调仓时，用它补上那一次。
+func (s *PortfolioService) ApplyRotationAt(portfolioID string, date int) (*ApplyResult, error) {
+	return s.applyRotationWithPlan(portfolioID, func(item portfolio.Portfolio, store *portfolio.Store) (*PlanResult, error) {
+		return s.buildQualityGrowthPlanAt(item, store, date)
+	})
+}
+
+func (s *PortfolioService) applyRotationWithPlan(
+	portfolioID string,
+	planFn func(item portfolio.Portfolio, store *portfolio.Store) (*PlanResult, error),
+) (*ApplyResult, error) {
 	store, err := s.db()
 	if err != nil {
 		return nil, err
@@ -1334,7 +1371,12 @@ func (s *PortfolioService) ApplyRotation(portfolioID string) (*ApplyResult, erro
 			item.Name, item.TypeLabel)
 	}
 
-	plan, err := s.BuildPlan(portfolioID)
+	var plan *PlanResult
+	if planFn != nil {
+		plan, err = planFn(item, store)
+	} else {
+		plan, err = s.BuildPlan(portfolioID)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -1433,6 +1475,8 @@ func (s *PortfolioService) ApplyRotation(portfolioID string) (*ApplyResult, erro
 	if err != nil {
 		return nil, err
 	}
+	// 应用后按新层数换算整手股数、重算现金（资金随盈亏变化）
+	_ = s.syncMoneyFor(portfolioID, item.StrategyID)
 
 	// 应用后的层数
 	after := map[string]portfolio.Position{}

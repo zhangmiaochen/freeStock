@@ -749,6 +749,12 @@ export class BacktestRequest {
     "benchmarkCode": string;
 
     /**
+     * Affordable 开启"可负担过滤"：一手成本超过单仓预算的候选跳过、用后面的补位。
+     * 小资金（<30 万）专用；关闭时保持原口径。
+     */
+    "affordable"?: boolean;
+
+    /**
      * ChanlunAssist 非空且 Enable 时，在调仓计划上叠加缠论辅助：
      * 确认二买/三买加 1/2 层、确认一卖/二卖/三卖分批减 1/1/2 层。
      * 
@@ -787,10 +793,10 @@ export class BacktestRequest {
      * Creates a new BacktestRequest instance from a string or object.
      */
     static createFrom($$source: any = {}): BacktestRequest {
-        const $$createField7_0 = $$createType21;
+        const $$createField8_0 = $$createType21;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("chanlunAssist" in $$parsedSource) {
-            $$parsedSource["chanlunAssist"] = $$createField7_0($$parsedSource["chanlunAssist"]);
+            $$parsedSource["chanlunAssist"] = $$createField8_0($$parsedSource["chanlunAssist"]);
         }
         return new BacktestRequest($$parsedSource as Partial<BacktestRequest>);
     }
@@ -3885,6 +3891,54 @@ export class MoneyFlowSummary {
 }
 
 /**
+ * MoneyView 是给界面用的资金视图。
+ */
+export class MoneyView {
+    "initialCapital": number;
+    "cash": number;
+    "marketValue": number;
+
+    /**
+     * 当前本金
+     */
+    "equity": number;
+
+    /**
+     * 相对初始本金
+     */
+    "returnPct": number;
+
+    /** Creates a new MoneyView instance. */
+    constructor($$source: Partial<MoneyView> = {}) {
+        if (!("initialCapital" in $$source)) {
+            this["initialCapital"] = 0;
+        }
+        if (!("cash" in $$source)) {
+            this["cash"] = 0;
+        }
+        if (!("marketValue" in $$source)) {
+            this["marketValue"] = 0;
+        }
+        if (!("equity" in $$source)) {
+            this["equity"] = 0;
+        }
+        if (!("returnPct" in $$source)) {
+            this["returnPct"] = 0;
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new MoneyView instance from a string or object.
+     */
+    static createFrom($$source: any = {}): MoneyView {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new MoneyView($$parsedSource as Partial<MoneyView>);
+    }
+}
+
+/**
  * PhaseTiming 是一个阶段的耗时。
  */
 export class PhaseTiming {
@@ -3981,6 +4035,12 @@ export class PlanResult {
     "holdings": score$0.Row[];
     "candidates": score$0.Row[];
     "notes": string[];
+
+    /**
+     * 资金口径（质量成长）：当前权益、现金
+     */
+    "moneyEquity"?: number;
+    "moneyCash"?: number;
 
     /** Creates a new PlanResult instance. */
     constructor($$source: Partial<PlanResult> = {}) {

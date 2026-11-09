@@ -1,4 +1,4 @@
-import { Events } from "@wailsio/runtime";
+import { Call, Events } from "@wailsio/runtime";
 
 import type {
   BoardCategoryInfo,
@@ -328,6 +328,15 @@ export interface ScanProgress {
   total: number;
 }
 
+/** 组合资金视图：当前本金（权益）= 现金 + 持仓市值。 */
+export interface MoneyView {
+  initialCapital: number;
+  cash: number;
+  marketValue: number;
+  equity: number;
+  returnPct: number;
+}
+
 const PROGRESS_EVENT = "stock:progress";
 /** 条件选股的技术层要逐只拉日线，单独一个进度事件 */
 const SCREEN_PROGRESS_EVENT = "screen:progress";
@@ -632,6 +641,24 @@ export const api = {
     /** 一键应用建议（手动组合会被拒绝） */
     applyRotation: (portfolioID: string) =>
       PortfolioService.ApplyRotation(portfolioID) as Promise<ApplyResult>,
+
+    // ---- 资金（本金 / 现金 / 持仓市值）----
+    //
+    // 这两个方法用 Call.ByName 调用：新方法还没进生成绑定，
+    // 按名字调用不需要等 wails 重新生成 bindings。
+    /** 读资金视图：当前本金 = 现金 + 持仓市值 */
+    getMoney: (portfolioID: string) =>
+      Call.ByName(
+        "freestock/internal/service.PortfolioService.GetPortfolioMoney",
+        portfolioID,
+      ) as Promise<MoneyView>,
+    /** 设置本金（本地保存），并按新本金重置现金、重算股数 */
+    setCapital: (portfolioID: string, capital: number) =>
+      Call.ByName(
+        "freestock/internal/service.PortfolioService.SetPortfolioCapital",
+        portfolioID,
+        capital,
+      ) as Promise<MoneyView>,
 
     // ---- 阶段三：回测 ----
     /**

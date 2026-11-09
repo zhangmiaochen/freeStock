@@ -236,6 +236,11 @@ func normalizeInput(in PortfolioInput, existing *Portfolio) (Portfolio, error) {
 	if layers < 1 {
 		layers = 1
 	}
+	// 质量成长：权重是"1% 一层"（单票 6%~15%），必须用 100 层制。
+	// 10 层制下 15% 只能表示成 2 层（20%），与回测/建议的权重对不上。
+	if strategyID == StrategyQualityGrowth && layers < 100 {
+		layers = 100
+	}
 
 	scopeType := NormalizeScopeType(pick(in.ScopeType, old.ScopeType))
 

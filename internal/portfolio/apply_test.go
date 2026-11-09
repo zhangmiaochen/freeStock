@@ -183,7 +183,7 @@ func TestApplyRotationRejectsNoChange(t *testing.T) {
 	}
 }
 
-// **硬编码 clamp 到 3** —— 即使请求 10 层也只能到 3（参考实现如此）。
+// **10 层制硬编码 clamp 到 3** —— 即使请求 10 层也只能到 3（参考实现如此）。
 func TestApplyRotationClampsLayers(t *testing.T) {
 	store := newStore(t)
 	item, _ := store.Create(PortfolioInput{Name: "组合", Type: "auto", TotalLayers: (10)})
@@ -204,6 +204,28 @@ func TestApplyRotationClampsLayers(t *testing.T) {
 	// 权重按 clamp 后的层数算：3/10 = 30%
 	if positions[0].PositionWeight != 30 {
 		t.Errorf("权重应为 30%%，实际 %v", positions[0].PositionWeight)
+	}
+}
+
+// 100 层制的组合（质量成长）不受 3 层限制：目标 15 层就是 15%。
+func TestApplyRotationBigLayerPortfolio(t *testing.T) {
+	store := newStore(t)
+	item, _ := store.Create(PortfolioInput{Name: "成长", Type: "auto", TotalLayers: 100})
+
+	if _, err := store.ApplyRotation(item.ID, "20261008", []ApplyAction{
+		applyAction("600519", "add", 15, 100),
+	}); err != nil {
+		t.Fatalf("应用失败: %v", err)
+	}
+	positions, _ := store.ListPositions(item.ID)
+	if len(positions) != 1 {
+		t.Fatalf("应有 1 个持仓: %+v", positions)
+	}
+	if positions[0].PositionLayers != 15 {
+		t.Errorf("100 层制下应保留 15 层，实际 %d", positions[0].PositionLayers)
+	}
+	if positions[0].PositionWeight != 15 {
+		t.Errorf("权重应为 15%%，实际 %v", positions[0].PositionWeight)
 	}
 }
 

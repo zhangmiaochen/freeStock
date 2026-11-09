@@ -34,6 +34,9 @@ type BacktestRequest struct {
 	TargetPositionCount int     `json:"targetPositionCount"`
 	MaxStockCount       int     `json:"maxStockCount"`
 	BenchmarkCode       string  `json:"benchmarkCode"`
+	// Affordable 开启"可负担过滤"：一手成本超过单仓预算的候选跳过、用后面的补位。
+	// 小资金（<30 万）专用；关闭时保持原口径。
+	Affordable bool `json:"affordable,omitempty"`
 	// ChanlunAssist 非空且 Enable 时，在调仓计划上叠加缠论辅助：
 	// 确认二买/三买加 1/2 层、确认一卖/二卖/三卖分批减 1/1/2 层。
 	//

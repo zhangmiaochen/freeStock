@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import AppSidebar from "@/components/layout/AppSidebar.vue";
 import AppTopbar from "@/components/layout/AppTopbar.vue";
+import DialogHost from "@/components/ui/dialog/DialogHost.vue";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 </script>
 
@@ -27,5 +28,7 @@ import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
         </RouterView>
       </div>
     </SidebarInset>
+    <!-- 全局确认/输入弹窗（替代系统 confirm/prompt） -->
+    <DialogHost />
   </SidebarProvider>
 </template>

@@ -30,6 +30,11 @@ type Config struct {
 	MaxWeight     float64 `json:"maxWeight"`     // 0.15
 	BearExposure  float64 `json:"bearExposure"`  // 0.5
 	Band          float64 `json:"band"`          // 0.01
+	// Capital > 0 时启用"可负担过滤"：一手成本超过单仓预算的候选跳过，
+	// 用后面的候选补位（小资金专用）。0 = 关闭。
+	Capital float64 `json:"capital"`
+	// LotSize 是整手股数（A 股 100）；Capital 开启时参与可负担判断。
+	LotSize int `json:"lotSize"`
 }
 
 // DefaultConfig 返回冻结参数。

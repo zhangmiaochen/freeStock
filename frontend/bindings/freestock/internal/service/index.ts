@@ -64,6 +64,7 @@ export {
     MarketTemperatureResult,
     MoneyFlowPoint,
     MoneyFlowSummary,
+    MoneyView,
     PhaseTiming,
     PinyinInfo,
     PlanResult,

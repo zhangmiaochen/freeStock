@@ -577,6 +577,11 @@ type RotationRow struct {
 	ExecutionMode        string `json:"executionMode"`
 	ExecutionModeLabel   string `json:"executionModeLabel"`
 	ActionPrefix         string `json:"actionPrefix"`
+
+	// 资金口径（质量成长按本金折算，其它策略可为 0）
+	TargetShares int     `json:"targetShares,omitempty"`
+	TargetAmount float64 `json:"targetAmount,omitempty"`
+	Affordable   bool    `json:"affordable,omitempty"`
 }
 
 // RotationPlan 是一次完整的轮动计划。

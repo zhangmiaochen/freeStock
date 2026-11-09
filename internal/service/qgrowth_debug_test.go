@@ -37,7 +37,7 @@ func TestQualityGrowthDebugDate(t *testing.T) {
 	svc := NewPortfolioServiceAt(stock, filepath.Join("..", "..", ".gotmp", "gate_exp", "portfolio.db"))
 	t.Cleanup(svc.Close)
 
-	days, _, _, err := svc.buildQGrowthDays(date, date, qgrowth.DefaultConfig())
+	days, _, _, err := svc.buildQGrowthDays(date, date, qgrowth.DefaultConfig(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,7 +48,7 @@ func TestQualityGrowthDebugDate(t *testing.T) {
 	if a := os.Getenv("FREESTOCK_QG_START"); a != "" {
 		if st, e1 := strconv.Atoi(a); e1 == nil {
 			if en, e2 := strconv.Atoi(os.Getenv("FREESTOCK_QG_END")); e2 == nil {
-				all, _, _, e3 := svc.buildQGrowthDays(st, en, qgrowth.DefaultConfig())
+				all, _, _, e3 := svc.buildQGrowthDays(st, en, qgrowth.DefaultConfig(), nil)
 				if e3 == nil {
 					n, sum := 0, 0.0
 					for _, day := range all {
