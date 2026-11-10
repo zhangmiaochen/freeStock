@@ -12,15 +12,15 @@
 
 services:
   freestock:
-    # 二选一：本地构建（默认）或直接用 GitHub Actions 推送的镜像
-    build:
-      context: .
-      dockerfile: Dockerfile
-      # 想在镜像里就带 cne，取消下面两行注释并填正确的 PyPI 包名/版本：
-      # args:
-      #   CNE_PIP_SPEC: "cne==1.2.3"
-    # image: ghcr.io/zmc1994/freestock:latest
-    image: freestock:latest
+    # 默认**直接拉 GitHub Actions 推好的多架构镜像**（NAS 上最省事）。
+    # 想本地改代码构建，把下面 build: 段的注释去掉，再 `docker compose up -d --build`。
+    image: ghcr.io/zhangmiaochen/freestock:latest
+    # build:
+    #   context: .
+    #   dockerfile: Dockerfile
+    #   # 想在镜像里就带 cne，取消下面两行注释并填正确的 PyPI 包名/版本：
+    #   args:
+    #     CNE_PIP_SPEC: "cne==1.2.3"
     container_name: freestock
     restart: unless-stopped
 
