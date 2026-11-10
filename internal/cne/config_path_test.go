@@ -86,6 +86,56 @@ func TestConfigPathMissingListsCandidates(t *testing.T) {
 			t.Errorf("错误信息应包含候选 %q：%v", rel, msg)
 		}
 	}
+	if !strings.Contains(msg, "空目录") {
+		t.Errorf("空目录时要明说，别让人以为是挂载问题：%v", msg)
+	}
+}
+
+// 目录里只有一个 *.toml（名字不叫 cnequity.toml）时也要认 ——
+// cne 不同安装方式/版本的文件名并不统一，硬套名字会让人无从下手。
+func TestConfigPathSingleArbitraryToml(t *testing.T) {
+	dir := t.TempDir()
+	want := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(want, []byte("# t\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ConfigPath(dir)
+	if err != nil {
+		t.Fatalf("目录里唯一的 toml 应当被采用：%v", err)
+	}
+	if got != want {
+		t.Errorf("应为 %q，实际 %q", want, got)
+	}
+}
+
+// 有多个 toml 时**不能猜**（可能改错配置），要列出来让人选。
+func TestConfigPathMultipleTomlsIsAmbiguous(t *testing.T) {
+	dir := t.TempDir()
+	for _, n := range []string{"a.toml", "b.toml"} {
+		if err := os.WriteFile(filepath.Join(dir, n), []byte("# t\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if _, err := ConfigPath(dir); err == nil {
+		t.Fatal("多个 toml 时应当报错，不能随便挑一个")
+	} else if !strings.Contains(err.Error(), "多个 toml") {
+		t.Errorf("错误信息应说明「多个 toml」：%v", err)
+	}
+}
+
+// 目录不存在时，报"读不了"，而不是伪装成"找不到配置"。
+func TestConfigPathDirMissing(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "nope")
+
+	_, err := ConfigPath(missing)
+	if err == nil {
+		t.Fatal("目录不存在应当报错")
+	}
+	if !strings.Contains(err.Error(), "读不了") {
+		t.Errorf("应说明目录读不了：%v", err)
+	}
 }
 
 // 工程目录为空要直接说清楚，不能拼出个 ./cnequity.toml 去误导。

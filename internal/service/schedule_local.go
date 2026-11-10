@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -95,6 +96,11 @@ func (l *localScheduler) Query(name string) (*cne.TaskInfo, error) {
 	}
 
 	info.Enabled = enabled
+	// 配置里的时间**与启用状态无关**，总是报出去：
+	// 界面上"把 17:30 改成 18:00"要知道当前值，而 NextRun 在禁用时是空的。
+	if validClockLocal(at) {
+		info.ConfiguredTime = strings.TrimSpace(at)
+	}
 	info.ScheduledState = "Enabled"
 	if !enabled {
 		info.ScheduledState = "Disabled"

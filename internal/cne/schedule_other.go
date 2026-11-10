@@ -30,11 +30,17 @@ type TaskInfo struct {
 	// 它不是一个需要"注册"的外部实体。
 	Registered bool   `json:"registered"`
 	NextRun    string `json:"nextRun"`
-	Status     string `json:"status"`
-	LastResult string `json:"lastResult"`
-	LastRun    string `json:"lastRun"`
-	Command    string `json:"command"`
-	Enabled    bool   `json:"enabled"`
+	// ConfiguredTime 是**配置里**设定的时间（HH:MM），与任务是否启用无关。
+	//
+	// 为什么要它：NextRun 只在任务启用时才有值（schtasks 对禁用任务报 N/A），
+	// 而界面上"把时间从 17:30 改成 18:00"需要知道**当前值**。
+	// 进程内调度器直接读 config.json，所以这里总是填得出来。
+	ConfiguredTime string `json:"configuredTime,omitempty"`
+	Status         string `json:"status"`
+	LastResult     string `json:"lastResult"`
+	LastRun        string `json:"lastRun"`
+	Command        string `json:"command"`
+	Enabled        bool   `json:"enabled"`
 	// ScheduledState 是原始的 "Scheduled Task State" 字段（保持字段兼容）
 	ScheduledState string `json:"scheduledState"`
 	// StartWhenAvailable 表示"错过计划时间后是否补跑"。

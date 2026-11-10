@@ -78,6 +78,16 @@ func PreviewSchedule(dailyAt, staleAt string) (*SchedulePlan, error) {
 		}
 
 		current := clockOf(info.NextRun)
+		if current == "" && validClock(info.ConfiguredTime) {
+			// NextRun 只在任务**启用**时才有值（schtasks 对禁用任务报 N/A）。
+			// 但"当前设置的时间"本来就该从配置里读得到 ——
+			// 进程内调度器（Linux/NAS/容器）会直接给出它。
+			//
+			// ⚠ 没有这一步的话，自动更新处于关闭状态时改时间，界面会报
+			// "读不到当前运行时间，为避免误改而不动它"，而实际上时间就在配置里，
+			// 用户完全没法理解这句话。
+			current = strings.TrimSpace(info.ConfiguredTime)
+		}
 		change.From = current
 		if current == "" {
 			// 取不到当前时间 → 不敢盲改
