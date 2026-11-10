@@ -192,40 +192,11 @@ func (r *Runner) defaultArgs(kind string, extra []string) ([]string, error) {
 }
 
 // executable 决定用哪个 cne。
+//
+// 具体解析规则（目录 / 可执行文件 / 裸命令名 / 留空）集中在 ResolveCNE，
+// 这里只做委托 —— 设置校验和诊断也要用同一套规则，不能各写一遍。
 func (r *Runner) executable() (string, error) {
-	if p := strings.TrimSpace(r.opts.CNEPath); p != "" {
-		// 有路径分隔符 → 当路径校验；否则当命令名去 PATH 里找。
-		// （只看 os.Stat 会把 "cne.exe" 这种裸命令名误判成不可用。）
-		if strings.ContainsAny(p, `\/`) {
-			if _, err := os.Stat(p); err != nil {
-				return "", fmt.Errorf("配置的 cne 路径不可用（%s）：%w", p, err)
-			}
-			return p, nil
-		}
-		if found, err := exec.LookPath(p); err == nil {
-			return found, nil
-		}
-		return "", fmt.Errorf("在 PATH 上找不到 %q", p)
-	}
-	if p, err := exec.LookPath("cne"); err == nil {
-		return p, nil
-	}
-	// 兜底常见位置。
-	//
-	// Windows 的 `D:\softInstal\...` 是实测那台机器的路径；
-	// 容器/NAS 上对应的是镜像约定好的 venv 位置（见 Dockerfile 的 PATH）——
-	// 这两个兜底只是"少填一个设置项"的便利，找不到也不影响：
-	// 用户仍可在界面里显式指定 CNEPath。
-	for _, cand := range []string{
-		`D:\softInstal\python3.11.3\Scripts\cne.exe`,
-		"/data/cne-venv/bin/cne", // 容器：装在数据卷上的 venv（推荐）
-		"/opt/cne-venv/bin/cne",  // 容器：构建镜像时装进去的 venv
-	} {
-		if _, err := os.Stat(cand); err == nil {
-			return cand, nil
-		}
-	}
-	return "", errors.New("找不到 cne 可执行文件：请在设置里指定 CNEPath，或把它放进 PATH")
+	return ResolveCNE(r.opts.CNEPath)
 }
 
 // SetOptions 更新 Runner 的选项（设置改了之后由 service 层调用）。

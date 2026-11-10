@@ -555,12 +555,12 @@ func (s *CneUpdateService) validate(prefs config.UpdatePrefs) []string {
 			out = append(out, fmt.Sprintf("工程目录里找不到 %s", cfgPath))
 		}
 	}
+	// cne 允许填**目录**（容器/NAS 上把宿主机 cne 挂进来后就是填目录），
+	// 所以这里必须和运行期用同一套解析规则，否则会出现
+	// "设置页说没问题、一跑就报找不到 cne"。
 	if prefs.CNEPath != "" {
-		if _, err := os.Stat(prefs.CNEPath); err != nil &&
-			!strings.ContainsAny(prefs.CNEPath, `\/`) {
-			// 裸命令名 —— 交给 PATH 解析，不算问题
-		} else if err != nil {
-			out = append(out, fmt.Sprintf("cne 路径不存在：%s", prefs.CNEPath))
+		if _, err := cne.ResolveCNE(prefs.CNEPath); err != nil {
+			out = append(out, err.Error())
 		}
 	}
 	return out

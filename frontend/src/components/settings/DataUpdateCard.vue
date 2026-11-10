@@ -731,8 +731,11 @@ onUnmounted(stopPolling);
             <Input v-model="projectDir" class="h-8" placeholder="D:\workspace\stockTool\CNEquity" />
           </label>
           <label class="flex flex-col gap-1 text-xs">
-            <span class="text-muted-foreground">cne 可执行文件（留空则按 PATH 查找）</span>
-            <Input v-model="cnePath" class="h-8" placeholder="留空即可" />
+            <span class="text-muted-foreground">cne 目录或可执行文件（留空则按 PATH 查找）</span>
+            <Input v-model="cnePath" class="h-8" placeholder="填目录即可，例如 /volume1/docker/cne-venv" />
+            <span class="text-[10px] text-muted-foreground">
+              可填目录（会自动在其中找 cne）、可执行文件，或命令名；留空则按 PATH 查找
+            </span>
           </label>
         </div>
 
