@@ -45,28 +45,21 @@ services:
       # 所以首次启动后留意 logs 里有没有权限告警。
       - ./data:/data
 
-      # ── cne：宿主机 venv 安装，容器复用 ──────────────────────────────
-      #
-      # **铁律：左右路径必须完全一样。** 两个原因，都是绝对路径：
-      #   1. venv 里的 cne 启动脚本 shebang 写死了解释器路径
-      #      （`#!/volume1/docker/cne-venv/bin/python`，还是指向宿主机基础解释器的符号链接）；
-      #   2. configs/cnequity.toml 里写死了数据湖位置。
-      # 换路径挂载（比如挂到 /cne）就得同时改 shebang 和 toml —— 不值得。
-      #
-      # ① 数据目录（界面里的「cne 工程目录」，含 configs/cnequity.toml 与数据湖）
-      #    ⚠ 必须读写：cne 要把新数据写进数据湖。
-      # - /volume1/docker/CNEquity:/volume1/docker/CNEquity:rw
-      #
-      # ② 复用宿主机 venv 里的 cne（Python 版本与镜像一致时才可行，先跑
-      #    build/docker/cne-host-check.sh 确认）：
-      # - /volume1/docker/cne-venv:/volume1/docker/cne-venv:ro
-      #
-      # ②' 版本不一致时别硬挂（.so 跨小版本会炸），改成在容器里装一份，
-      #     数据目录仍按 ① 同路径挂载，宿主机那份 cne 不受影响：
-      #     docker compose exec -u 10001:10001 freestock \
-      #       sh -c 'python3 -m venv /data/cne-venv && /data/cne-venv/bin/pip install -U pip cne'
-      #
-      # 详见 docs/docker-nas-部署与gitflow.md §4.4
+      # ① 应用自己的数据：config.json / portfolio.db / logs
+      # - /vol2/1001/docker/freestock:/data
+
+      # ② cne 的配置目录（Linux 上 cne 默认读 ~/.config/cnequity）。
+      #    镜像里 HOME=/data，所以容器内的 ~ 就是 /data —— 挂到 /data/.config/cnequity
+      #    即可让 cne 找到宿主机那份配置（含 toml、可能的凭据/缓存）。
+      #    要读写：cne 可能往里写 token / 缓存。
+      # - /home/zmc1994/.config/cnequity:/data/.config/cnequity:rw
+
+      # ③ cne 工程 + 数据湖：**左右路径完全一样**
+      #    （configs/cnequity.toml 里写的是绝对路径，同路径挂载就不用改一个字）
+      # - /vol2/1001/stockTool/CNEquity:/vol2/1001/stockTool/CNEquity:rw
+
+      # ④ cne 的 venv：同样同路径挂载（先跑 build/docker/cne-host-check.sh 确认可用）
+      # - /vol2/1001/docker/cne-venv:/vol2/1001/docker/cne-venv:ro
 
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]

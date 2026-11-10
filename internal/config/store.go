@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -529,8 +530,35 @@ func DefaultUpdatePrefs() UpdatePrefs {
 		AutoStale:      false,
 		StaleTime:      "21:00",
 		CatchUpOnStart: true,
-		ProjectDir:     `D:\workspace\stockTool\CNEquity`,
+		ProjectDir:     defaultProjectDir(),
 	}
+}
+
+// defaultProjectDir 是「cne 工程目录」的默认值，**按平台给**。
+//
+// Windows 上沿用历史默认（作者本机的 CNEquity 路径），行为保持不变。
+// 但 Linux/NAS/容器上这个 `D:\...` 毫无意义——界面里会直接显示
+// "工程目录不存在：D:\workspace\stockTool\CNEquity"，把人引向错误方向。
+//
+// Linux 上 cne 自己的默认配置位置就是 `~/.config/cnequity`；
+// 镜像里 HOME=/data，所以容器内它是 `/data/.config/cnequity`，
+// 正好是本项目文档推荐的挂载点。
+//
+// ⚠ 只有目录**真的存在**才填：否则宁可留空让界面提示用户填，
+// 也不要先给一个必然报错的路径。
+func defaultProjectDir() string {
+	if runtime.GOOS == "windows" {
+		return `D:\workspace\stockTool\CNEquity`
+	}
+	dir, err := os.UserConfigDir()
+	if err != nil || dir == "" {
+		return ""
+	}
+	cand := filepath.Join(dir, "cnequity")
+	if st, err := os.Stat(cand); err == nil && st.IsDir() {
+		return cand
+	}
+	return ""
 }
 
 // Sanitize 收敛非法值 —— 与 KlinePrefs.Sanitize 一样"永不报错，只纠正"。

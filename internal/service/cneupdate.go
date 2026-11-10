@@ -548,12 +548,10 @@ func (s *CneUpdateService) validate(prefs config.UpdatePrefs) []string {
 		out = append(out, "工程目录为空")
 	} else if _, err := os.Stat(prefs.ProjectDir); err != nil {
 		out = append(out, fmt.Sprintf("工程目录不存在：%s", prefs.ProjectDir))
-	} else {
-		cfgPath := prefs.ProjectDir + string(os.PathSeparator) + "configs" +
-			string(os.PathSeparator) + "cnequity.toml"
-		if _, err := os.Stat(cfgPath); err != nil {
-			out = append(out, fmt.Sprintf("工程目录里找不到 %s", cfgPath))
-		}
+	} else if _, err := cne.ConfigPath(prefs.ProjectDir); err != nil {
+		// 和运行期用同一套解析规则（支持 <工程>/cnequity.toml，
+		// 即 Linux 上 ~/.config/cnequity 那种布局）。
+		out = append(out, err.Error())
 	}
 	// cne 允许填**目录**（容器/NAS 上把宿主机 cne 挂进来后就是填目录），
 	// 所以这里必须和运行期用同一套解析规则，否则会出现

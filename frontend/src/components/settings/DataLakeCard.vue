@@ -101,13 +101,17 @@ function formatRows(rows: number): string {
       <Input
         v-model="rootInput"
         class="h-8 min-w-[320px] flex-1 font-mono text-xs"
-        placeholder="数据湖根目录（包含 curated 子目录的那一级），留空则自动探测"
+        placeholder="数据湖根目录（包含 curated 的那一级），留空则自动探测"
         @keyup.enter="applyRoot"
       />
       <Button size="sm" variant="outline" :disabled="busy" @click="applyRoot">应用</Button>
     </div>
     <p class="text-muted-foreground mt-1.5 text-[11px]">
+      例如 <code class="font-mono">/vol2/1001/stockTool/CNEquity/data/cnequity</code>。
       也可以设置环境变量 <code>FREESTOCK_CNLAKE</code> 指向同一位置。
+    </p>
+    <p class="text-muted-foreground mt-1 text-[11px]">
+      容器里要填<b>容器内</b>路径 —— 把数据湖按原路径挂进容器，这里就填原来的路径，不用改。
     </p>
 
     <p v-if="message" class="text-muted-foreground mt-2 text-xs">{{ message }}</p>

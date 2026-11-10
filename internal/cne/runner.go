@@ -158,16 +158,18 @@ func NewRunner(opts Options) *Runner {
 	return r
 }
 
-// defaultArgs 拼出 `cne run daily <args...> --config <ProjectDir>\configs\cnequity.toml`。
+// defaultArgs 拼出 `cne run daily <args...> --config <配置文件>`。
 //
 // 命令形态固定（方案 §4.2）：一套执行器覆盖 full / stale / --trade-date / --group。
+// 配置文件位置由 ConfigPath 解析：`<工程>/configs/cnequity.toml` 或 `<工程>/cnequity.toml`
+// （后者是 Linux 上 ~/.config/cnequity 这种布局）。
 //
 // ⚠ `KindBackfill` 是**唯一**不走 `run daily` 的类型：补历史区间要用另一个子命令
 // `cne backfill daily_bars --start X --end Y`（`extra` 由 `StartBackfill` 备好）。
 func (r *Runner) defaultArgs(kind string, extra []string) ([]string, error) {
-	configPath := filepath.Join(r.opts.ProjectDir, "configs", "cnequity.toml")
-	if _, err := os.Stat(configPath); err != nil {
-		return nil, fmt.Errorf("找不到 cne 配置 %s：%w", configPath, err)
+	configPath, err := ConfigPath(r.opts.ProjectDir)
+	if err != nil {
+		return nil, fmt.Errorf("找不到 cne 配置：%w", err)
 	}
 	var args []string
 	if kind == KindBackfill {

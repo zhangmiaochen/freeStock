@@ -727,14 +727,18 @@ onUnmounted(stopPolling);
         <div class="text-sm font-medium">设置</div>
         <div class="grid gap-3 md:grid-cols-2">
           <label class="flex flex-col gap-1 text-xs">
-            <span class="text-muted-foreground">cne 工程目录（须含 configs/cnequity.toml）</span>
-            <Input v-model="projectDir" class="h-8" placeholder="D:\workspace\stockTool\CNEquity" />
+            <span class="text-muted-foreground">cne 工程目录（含 cnequity.toml）</span>
+            <Input v-model="projectDir" class="h-8 font-mono" placeholder="/data/.config/cnequity 或 /volume1/docker/CNEquity" />
+            <span class="text-[10px] text-muted-foreground">
+              认两种布局：<code>configs/cnequity.toml</code> 或 toml 直接放在该目录里
+              （Linux 上 cne 默认用 <code>~/.config/cnequity</code>）
+            </span>
           </label>
           <label class="flex flex-col gap-1 text-xs">
             <span class="text-muted-foreground">cne 目录或可执行文件（留空则按 PATH 查找）</span>
-            <Input v-model="cnePath" class="h-8" placeholder="填目录即可，例如 /volume1/docker/cne-venv" />
+            <Input v-model="cnePath" class="h-8 font-mono" placeholder="填目录即可，例如 /data/cne-venv" />
             <span class="text-[10px] text-muted-foreground">
-              可填目录（会自动在其中找 cne）、可执行文件，或命令名；留空则按 PATH 查找
+              可填目录（会自动在其中找 cne）、可执行文件，或命令名；留空则按 PATH 查找（容器里已含 <code>/data/cne-venv/bin</code>）
             </span>
           </label>
         </div>

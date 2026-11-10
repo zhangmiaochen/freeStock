@@ -278,6 +278,32 @@ docker build --build-arg CNE_PIP_SPEC='cne==1.2.3' -t freestock:latest .
 三者不是同一个东西。`configs/cnequity.toml` 里的数据湖路径通常就是第二行那个，
 所以**同路径挂载后一个字都不用改**。
 
+#### cne 的配置在 `~/.config/cnequity`（Linux 默认位置）
+
+cne 在 Linux 上默认从 `~/.config/cnequity/cnequity.toml` 读配置；
+Windows 上的 CNEquity 源码布局是 `<工程>/configs/cnequity.toml`。
+
+**应用两种布局都认**：先找 `<工程>/configs/cnequity.toml`，再找 `<工程>/cnequity.toml`。
+所以你可以把「cne 工程目录」直接指到 `~/.config/cnequity`。
+
+容器里要让 cne 找到它，只需把配置目录挂到**容器的 `~`** 上——
+镜像里已经设了 `HOME=/data`，所以容器的 `~/.config/cnequity` 就是 `/data/.config/cnequity`：
+
+```yaml
+volumes:
+  - /home/zmc1994/.config/cnequity:/data/.config/cnequity:rw
+```
+
+| 宿主机上 toml 在哪 | 挂载 | 「cne 工程目录」填 |
+|---|---|---|
+| `~/.config/cnequity/cnequity.toml` | `- /home/zmc1994/.config/cnequity:/data/.config/cnequity:rw` | `/data/.config/cnequity` |
+| `<工程>/configs/cnequity.toml` | 只挂工程目录（见上一步） | `<工程>` |
+
+> 为什么 `HOME` 要指到 `/data`：cne 除了读 toml，**可能还会往 `~/.config/cnequity/`
+> 写 token/缓存**。默认的 HOME 是 `/root` 或 `/home/freestock`，容器里通常不可写或不存在，
+> 结果就是"跑起来了但结果不对"，比直接报错更难查。指到 `/data` 后 `~` 永远可写，
+> 内容也会随数据卷持久化。
+
 #### 属主：决定 cne 能不能写进数据湖
 
 容器默认以 uid **10001** 运行。如果数据湖属于别的用户（NAS 上很常见，比如 1001），

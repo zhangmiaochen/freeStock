@@ -159,7 +159,15 @@ RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh
 # 想要完全非 root（不做 chown），compose 里加 `user: "10001:10001"` 即可。
 
 # 配置、组合库（portfolio.db）、缓存、日志全部落在 /data —— 这是唯一需要挂卷的目录。
+#
+# ⚠ **HOME 必须指到 /data**，不能留默认值（会变成 /root 或 /home/freestock）：
+#   cne 会读写 `~/.config/cnequity/`（Linux 上它的默认配置位置，也可能存凭据/缓存）。
+#   如果 HOME 指向一个不存在或不可写的目录，cne 要么读不到配置，要么写不进去 ——
+#   两种都是"跑起来了但结果不对"，很难查。
+#   指到 /data 后：`~` 永远可写（入口脚本会 chown），且内容随数据卷持久化。
 ENV FREESTOCK_DATA_DIR=/data \
+    HOME=/data \
+    XDG_CONFIG_HOME=/data/.config \
     TZ=Asia/Shanghai \
     WAILS_SERVER_HOST=0.0.0.0 \
     WAILS_SERVER_PORT=8080

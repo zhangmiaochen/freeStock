@@ -1,6 +1,10 @@
 package config
 
-import "testing"
+import (
+	"os"
+	"runtime"
+	"testing"
+)
 
 // UpdatePrefs.Sanitize 必须"永不报错，只纠正"（与 KlinePrefs 同一约定）。
 //
@@ -49,8 +53,18 @@ func TestDefaultUpdatePrefsKeepsAutomationOff(t *testing.T) {
 	if s.AutoDaily || s.AutoStale {
 		t.Error("Sanitize 不应把自动开关打开")
 	}
-	if s.ProjectDir == "" {
-		t.Error("ProjectDir 为空时应回落默认值")
+	// ProjectDir 的默认值**按平台给**：
+	//   - Windows 有历史默认（作者本机的 CNEquity 路径），不能为空；
+	//   - Linux/容器上那个 D:\ 路径无意义，只有 ~/.config/cnequity 真的存在时才填，
+	//     否则宁可留空（界面会提示用户填），也不能给一个必然报错的路径。
+	if runtime.GOOS == "windows" && s.ProjectDir == "" {
+		t.Error("Windows 上 ProjectDir 为空时应回落默认值")
+	}
+	if s.ProjectDir != "" {
+		if _, err := os.Stat(s.ProjectDir); err != nil {
+			t.Errorf("默认的 ProjectDir 要么为空、要么真实存在，实际 %q（%v）",
+				s.ProjectDir, err)
+		}
 	}
 }
 
