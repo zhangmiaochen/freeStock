@@ -184,101 +184,95 @@ docker compose down          # 数据留在 ./data
 
 1. **数据源**：默认 `http://127.0.0.1:7899` 指的是**容器自己**，
    要改成宿主机或上游的地址；或者切到 `cnlake` 直读本地数据湖
-2. **cne 工程目录**：容器内路径（例如 `/cne`，取决于你在 compose 里挂到哪）
-3. **cne 目录 / 可执行文件**：填宿主机上 cne 的目录（按原路径挂进容器），
+2. **cne 工程目录**：填**容器内路径**，且与宿主机完全一致（同路径挂载，详见 §4.4）
+3. **cne 目录 / 可执行文件**：填宿主机 venv 目录（已同路径挂进容器），
    或装进 `/data/cne-venv` 后留空 —— 详见 §4.4
 4. **自动更新**：打开后即可看到「两个任务都已启用，由应用内生调度器执行」
 
-### 4.4 cne 装在 NAS 宿主机上，容器用它
+### 4.4 cne 装在宿主机 venv 里，容器怎么用它
 
-**结论先说：cne 装在宿主机上，把它的目录按原路径挂进容器，界面里填那个目录。**
+你的情况：**cne 装在 NAS 宿主机的 Python venv 里**（`cne` 命令来自那个 venv），
+而界面里的「cne 工程目录」是**数据目录**（含 `configs/cnequity.toml` 和数据湖）。
 
-容器是独立命名空间，看不到宿主机的 `/usr/local/bin/cne` —— 所以必须挂载。
-但挂载有个前提，也是这里唯一的坑：
+容器是另一个文件系统视图，看不到宿主机的 venv，也看不到宿主机上的数据目录。
+所以只有**两条铁律**，其余都是配路径：
 
-> `cne` 是 pip 生成的 Python 启动脚本，**第一行 shebang 是绝对路径**，例如
-> `#!/volume1/docker/cne-venv/bin/python`。
-> 如果你把 venv 挂到别的路径（比如 `/cne`），shebang 指向的 python 在容器里不存在，
-> 执行时直接 `bad interpreter: No such file or directory`。
-> 应用里只会看到一行失败日志，非常难查。
+> **铁律 1：数据目录必须挂载，且挂载点与宿主机路径完全相同。**
+> `configs/cnequity.toml` 里写的是**绝对路径**的数据湖位置。挂到别的路径（如 `/cne`）
+> 就得改 toml；同路径挂载则一个字都不用改。
+>
+> **铁律 2：要让容器复用宿主机 venv 里的 cne，也得同路径挂载。**
+> venv 里的 `cne` 是 pip 生成的启动脚本，第一行 shebang 写死解释器绝对路径
+> （如 `#!/volume1/docker/cne-venv/bin/python`），而那个 python 通常是指向宿主机
+> 基础解释器的**符号链接**。换路径挂载，这条链就断了。
 
-**所以：挂载点要和宿主机上的路径一模一样。**
+#### 第一步：挂数据目录（一定要做）
 
 ```yaml
 volumes:
-  - /volume1/docker/cne-venv:/volume1/docker/cne-venv:ro   # 左右同一个路径
+  # 左右完全一样 → toml 里的路径不用动
+  - /volume1/docker/CNEquity:/volume1/docker/CNEquity:rw
 ```
 
-然后在界面里填 `/volume1/docker/cne-venv`（**填目录**，不用填到 `cne` 文件）。
+必须 `:rw` —— cne 要把新数据写进数据湖；只读会在最后一步失败，报错还很隐晦。
 
-#### 为什么这样就能跑
+界面里「cne 工程目录」填同一个路径：`/volume1/docker/CNEquity`。
 
-绝大多数 NAS 的 Python venv 是这样建的：`python3 -m venv xxx`，其中 `bin/python`
-是指向 `/usr/bin/python3` 的**符号链接**。而运行镜像是 Debian，本来就有
-`/usr/bin/python3`（3.11）。于是：
+> ⚠ 如果是从 Windows 拷过来的 CNEquity，检查 `configs/cnequity.toml` 里有没有
+> `D:\...` —— 那是没法在容器里生效的，要换成 Linux 路径。
 
-```
-cne 的 shebang  →  /volume1/docker/cne-venv/bin/python
-                    └─ 符号链接 → /usr/bin/python3   ← 容器里也有，成立
-```
+#### 第二步：让容器能用 cne 命令
 
-**先确认一下**（在宿主机上跑，只读，不改任何东西）：
+先确认这条链在容器里成不成立（**在宿主机上跑**，只读）：
 
 ```bash
-sh build/docker/cne-host-check.sh /volume1/docker/cne-venv
+sh build/docker/cne-host-check.sh                       # 自动找 command -v cne
+sh build/docker/cne-host-check.sh /volume1/docker/cne-venv   # 或指定 venv 目录
 ```
 
-它会打印 shebang、顺着符号链接找到真实解释器，并直接给出结论。
-如果解释器是 `/usr/bin/python3.x` 或 `/usr/local/bin/python3.x`，按原路径挂载即可。
+它会打印 `cne` 的 shebang、顺着符号链接找到的**真实解释器**、Python 版本，
+并直接给出结论。
 
-#### 如果解释器在非标准路径
-
-比如群晖自带的 `/usr/local/bin/python3.11`、或 pyenv 的 `~/.pyenv/versions/.../python`。
-容器里没有那个路径，`cne` 起不来。两条路：
-
-**1）在容器里重建 venv（推荐，最省心）**
-
-```bash
-docker compose exec -u 10001:10001 freestock \
-  sh -c 'python3 -m venv /data/cne-venv && /data/cne-venv/bin/pip install -U pip cne'
-```
-
-装到数据卷上，重建容器不丢；界面里填 `/data/cne-venv`。镜像已把
-`/data/cne-venv/bin` 放进 `PATH`，所以填完直接生效。
-
-**2）把宿主机的解释器也按原路径挂进去**
+**A. 能复用（解释器在 /usr/bin 或 /usr/local/bin，且版本与镜像一致 3.11）**
 
 ```yaml
-- /usr/local/bin/python3.11:/usr/local/bin/python3.11:ro
+volumes:
+  - /volume1/docker/cne-venv:/volume1/docker/cne-venv:ro   # 同路径
 ```
 
-要求两边 glibc 与 Python 小版本一致，而且 Python 还依赖 `libpython*.so`
-等库，容易缺 —— 不如方案 1。
+界面里「cne 目录 / 可执行文件」填 `/volume1/docker/cne-venv`（**填目录就行**）。
+只读挂载足够 —— cne 写的是数据湖（另一个挂载），不是它自己的安装目录。
 
-#### 更省事的做法：装进数据卷（也是方案 1 的变体）
-
-如果不想动宿主机上的 cne，就在容器里装一份到 `/data`：
+**B. 不能复用（版本不一致 / 解释器在非标准路径）→ 容器里装一份**
 
 ```bash
 docker compose exec -u 10001:10001 freestock \
   sh -c 'python3 -m venv /data/cne-venv && /data/cne-venv/bin/pip install -U pip cne'
-docker compose exec -u 10001:10001 freestock cne --help     # 验证
 ```
 
-装完界面里「cne 目录 / 可执行文件」**留空**也能找到（镜像已把该路径放进 PATH）。
+原因：cne 的依赖（pyarrow / pandas / duckdb）是按 **Python 小版本**编好的 `.so`，
+跨版本 import 会 `undefined symbol` 甚至段错误，硬挂不划算。
 
-#### 构建镜像时就装好（可选）
+数据目录仍按第一步同路径挂载，宿主机那份 cne 完全不受影响（可以继续在宿主机上用）。
+界面里填 `/data/cne-venv`，或**留空**（镜像已把 `/data/cne-venv/bin` 放进 PATH）。
+
+**C. 构建镜像时就装好（可选，版本最确定）**
 
 ```bash
 docker build --build-arg CNE_PIP_SPEC='cne==1.2.3' -t freestock:latest .
 ```
 
-装进 `/opt/cne-venv`（镜像内、不可变）。版本确定、可复现，但每次升级 cne 要重建镜像。
-`CNE_PIP_SPEC` 刻意**没有默认值**：包名/版本以 CNEquity 的发行为准，这里不猜。
+装进 `/opt/cne-venv`（镜像内、不可变）。升级 cne 要重建镜像。
+`CNE_PIP_SPEC` 刻意**没有默认值**：包名/版本以 CNEquity 发行为准，这里不猜。
 
-#### 设置项允许填「目录」
+#### 设置项填什么
 
-`cne 目录 / 可执行文件` 这一个输入框，四种填法都认：
+| 设置项 | 填什么 | 说明 |
+|---|---|---|
+| cne 工程目录 | `/volume1/docker/CNEquity`（容器内路径） | 数据目录，**同路径**挂载 |
+| cne 目录 / 可执行文件 | `/volume1/docker/cne-venv` 或空 | 见下表 |
+
+第二个输入框**填目录也行**，不用非填到 `cne` 文件：
 
 | 填法 | 例子 | 行为 |
 |---|---|---|
@@ -287,33 +281,22 @@ docker build --build-arg CNE_PIP_SPEC='cne==1.2.3' -t freestock:latest .
 | 裸命令名 | `cne` | 按 PATH 找 |
 | 留空 | — | 按 PATH 找，再兜底 `/data/cne-venv/bin/cne` 等 |
 
-找不到时的报错会**列出找过哪些路径**；如果是"文件在但没执行位"，
-会明确提示 `chmod +x`（从宿主机挂进来的目录经常是 0644，这个情况很常见）。
+找不到时会**列出找过哪些路径**；文件在但没执行位会提示 `chmod +x`
+（从宿主机挂进来的文件常丢执行位，这个坑很常见）。
 
-#### 为什么运行镜像是 Debian 而不是 alpine
+#### 验证（在容器里跑，宿主机通不算）
 
-cne 是 Python 包，依赖里几乎必然有 `pyarrow` / `pandas` / `duckdb` 这类**二进制 wheel**。
-PyPI 上的预编译 wheel 是 **manylinux（glibc）** 的，而 alpine 是 **musl** ——
-`pip install` 要么找不到匹配 wheel 直接失败，要么现场源码编译几十分钟然后大概率失败。
-
-而且宿主机（群晖/威联通）也是 glibc，**只有镜像也用 glibc，才能直接复用宿主机的 cne**。
-镜像从 ~80MB 涨到 ~250MB，这个代价必须付。
-
-#### 还需要挂数据湖（读写）
-
-cne 会把新数据写进数据湖，所以 CNEquity 目录必须**读写挂载**（不要 `:ro`）：
-
-```yaml
-volumes:
-  - /volume1/docker/CNEquity:/cne:rw
+```bash
+docker compose exec freestock cne --version
+docker compose exec freestock /volume1/docker/cne-venv/bin/cne --version
 ```
 
-然后在界面里把「cne 工程目录」填 `/cne`（该目录下要有 `configs/cnequity.toml`）。
-只读挂载的典型现象是：更新跑了很久，最后一步写盘失败，报错还很隐晦。
-
-> ⚠ 如果你是把 Windows 上的 CNEquity 整个拷过来的，**检查 `configs/cnequity.toml`
-> 里的路径**：里面若写着 `D:\...`，在容器里一律无效。要改成容器内路径
-> （就是 `/cne` 这一套），数据湖根目录同理。
+| 报错 | 原因 | 处理 |
+|---|---|---|
+| `bad interpreter` | shebang 指向的解释器容器里没有 | 同路径挂 venv，或走方案 B |
+| `No module named cne` | venv 没挂 / 挂错路径 | 检查挂载点是否与宿主机一致 |
+| `undefined symbol` | Python 小版本不一致 | 走方案 B |
+| `Permission denied` | 丢了执行位 | `chmod +x`（界面也会提示） |
 
 #### 如果你打算不用 Docker、直接在 NAS 上跑二进制
 
