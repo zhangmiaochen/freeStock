@@ -37,6 +37,16 @@ writable_as_app() {
 }
 
 if [ "$(id -u)" = "0" ]; then
+    # 嵌套挂载点（比如 - /home/x/.config/cnequity:/data/.config/cnequity）
+    # 的父目录是 **Docker 以 root 0700 建的**。非 root 应用连「遍历」都做不到，
+    # 表现就是：明明挂上了，却报"目录读不了 / 找不到配置"。
+    #
+    # 只动 /data 自己内部的路径，不碰其它挂载点。
+    if [ -d "$DATA_DIR" ]; then
+        mkdir -p "$DATA_DIR/.config" 2>/dev/null || true
+        chmod 0755 "$DATA_DIR" "$DATA_DIR/.config" 2>/dev/null || true
+    fi
+
     if [ -d "$DATA_DIR" ]; then
         need_chown=0
         if ! writable_as_app "$DATA_DIR"; then

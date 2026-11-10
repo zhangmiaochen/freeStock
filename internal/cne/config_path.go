@@ -9,17 +9,20 @@ import (
 
 // cneConfigRelPaths 是 cne 配置在"工程目录"下的可能位置，按优先级排列。
 //
-// 为什么有两个：
+// 为什么不止一个：
 //   - Windows / CNEquity 源码布局一直是 `<工程>/configs/cnequity.toml`；
-//   - Linux 上 cne 自己的默认位置是 `~/.config/cnequity/`，
-//     用户把「工程目录」指到那里时，toml **直接**在目录里，没有 `configs/` 这一层。
+//   - Linux 上 cne 自己的默认位置是 `~/.config/cnequity/`，实测里面放的是
+//     **`config.toml`**（不是 cnequity.toml），且直接平铺、没有 configs/ 这层；
+//   - 旧版/其它安装方式可能叫 `cne.toml`。
 //
-// 只认第一种会把后者判成「配置不存在」。这个错误在容器里尤其难查 ——
-// 它看起来跟"挂载没挂上"一模一样，而实际上是路径假设错了。
+// 只认第一种会把后两种判成「配置不存在」。这个错误在容器里尤其难查 ——
+// 它看起来跟"挂载没挂上"一模一样，而实际上是文件名假设错了。
 func cneConfigRelPaths() []string {
 	return []string{
 		filepath.Join("configs", "cnequity.toml"),
 		"cnequity.toml",
+		"config.toml",
+		"cne.toml",
 	}
 }
 

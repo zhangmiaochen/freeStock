@@ -68,7 +68,44 @@ func TestConfigPathPrefersConfigsDir(t *testing.T) {
 	}
 }
 
-// 都没找到时，错误信息要把两条候选路径都列出来 ——
+// Linux 上 cne 的真实形态：~/.config/cnequity/config.toml（平铺、且文件名叫 config.toml）
+func TestConfigPathLinuxDefaultName(t *testing.T) {
+	dir := t.TempDir()
+	want := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(want, []byte("# t\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ConfigPath(dir)
+	if err != nil {
+		t.Fatalf("config.toml 应当被识别：%v", err)
+	}
+	if got != want {
+		t.Errorf("应为 %q，实际 %q", want, got)
+	}
+}
+
+// 即使目录里还有别的 toml，也要按已知名字确定性地选 config.toml，
+// 而不是靠"唯一 toml"那条兜底去碰运气。
+func TestConfigPathPrefersKnownNameOverAmbiguity(t *testing.T) {
+	dir := t.TempDir()
+	want := filepath.Join(dir, "config.toml")
+	for _, n := range []string{"config.toml", "themes.toml"} {
+		if err := os.WriteFile(filepath.Join(dir, n), []byte("# t\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := ConfigPath(dir)
+	if err != nil {
+		t.Fatalf("有已知名字时不该报歧义：%v", err)
+	}
+	if got != want {
+		t.Errorf("应确定性地选中 %q，实际 %q", want, got)
+	}
+}
+
+// 都没找到时，错误信息要把候选路径都列出来 ——
 // 否则用户不知道该把 toml 放哪，容器里更难判断是"没挂上"还是"位置不对"。
 func TestConfigPathMissingListsCandidates(t *testing.T) {
 	dir := t.TempDir()
@@ -81,6 +118,7 @@ func TestConfigPathMissingListsCandidates(t *testing.T) {
 	for _, rel := range []string{
 		filepath.Join("configs", "cnequity.toml"),
 		"cnequity.toml",
+		"config.toml",
 	} {
 		if !strings.Contains(msg, rel) {
 			t.Errorf("错误信息应包含候选 %q：%v", rel, msg)
