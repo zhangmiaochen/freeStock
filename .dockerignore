@@ -1,0 +1,52 @@
+# Docker 构建上下文排除清单。
+#
+# ⚠ 这个文件不写会出大问题：仓库里有 .gotmp（模块缓存）、.gocache
+# （Go 构建缓存）、frontend/node_modules、.pnpm-store，加起来好几个 GB。
+# 不排除的话 `docker build .` 会把它们全量传给 daemon，
+# 构建慢到无法接受，而且会覆盖镜像里干净依赖层。
+
+# 版本控制
+.git
+.gitignore
+.gitattributes
+
+# 本地构建缓存（最容易忽略、体积最大）
+.gocache
+.gotmp
+.tmp
+.task
+
+# 前端依赖与产物：镜像里会自己装、自己构建
+frontend/node_modules
+frontend/dist
+.pnpm-store
+
+# 运行期数据：绝不能进镜像（config.json 里有授权码；portfolio.db 可能几 GB）
+bin
+data
+data-*
+config.json
+portfolio.db
+cache
+logs
+webview2-data
+*.log
+cne-schedule-state.json
+dist-bin
+
+# 文档与实验产物（不影响构建）
+reports
+research
+docs
+*.md
+!README.md
+
+# 编辑器/系统垃圾
+.vscode
+.idea
+.DS_Store
+Thumbs.db
+
+# 本地测试残留
+go.test.mod
+go.test.sum

@@ -29,6 +29,8 @@ type PortfolioService struct {
 	openErr error
 	// fixEntryOnce 保证"复权成本价修正"只跑一次
 	fixEntryOnce sync.Once
+	// moneyOnce 保证"资金初始化（老组合补股数）"只跑一次
+	moneyOnce sync.Once
 
 	// ---- 回填 → 回测 的日线复用 ----
 	//
@@ -366,6 +368,14 @@ func (s *PortfolioService) GetPortfolioDetail(id string) (*portfolio.Detail, err
 	if err != nil {
 		return nil, err
 	}
+	// 一次性初始化资金：老组合没有股数记录，按当前层数折算整手股数
+	s.moneyOnce.Do(func() {
+		if portfolios, err := store.List(); err == nil {
+			for _, p := range portfolios {
+				_, _ = s.SyncPortfolioMoney(p.ID)
+			}
+		}
+	})
 	detail, err := store.Detail(id, s)
 	if err != nil {
 		return nil, err
@@ -470,6 +480,10 @@ func (s *PortfolioService) AddPosition(portfolioID string, in portfolio.Position
 	slog.Info("持仓已新增",
 		"portfolio", portfolioID, "code", position.Code,
 		"layers", position.PositionLayers, "weight", position.PositionWeight)
+	// 增仓后同步资金（股数/现金随本金变化）
+	if item, e := store.Get(portfolioID); e == nil {
+		_ = s.syncMoneyFor(portfolioID, item.StrategyID)
+	}
 	return &position, nil
 }
 
@@ -479,7 +493,14 @@ func (s *PortfolioService) DeletePosition(portfolioID, code string) error {
 	if err != nil {
 		return err
 	}
-	return store.DeletePosition(portfolioID, code)
+	if err := store.DeletePosition(portfolioID, code); err != nil {
+		return err
+	}
+	// 删仓后同步资金：释放的股数回到现金
+	if item, e := store.Get(portfolioID); e == nil {
+		_ = s.syncMoneyFor(portfolioID, item.StrategyID)
+	}
+	return nil
 }
 
 // GetPortfolioOptions 返回界面需要的元信息（策略/类型/范围的取值清单）。

@@ -25,6 +25,9 @@ type CneUpdateService struct {
 	r  *cne.Runner
 	// onDataChanged 是"数据湖变了"的回调，见 SetOnDataChanged
 	onDataChanged func()
+	// sched 是"到点触发更新"的平台后端（见 schedule_backend.go）。
+	// Windows 上为 nil：那边由 schtasks 负责。
+	sched scheduleBackend
 }
 
 // NewCneUpdateService 构造服务。

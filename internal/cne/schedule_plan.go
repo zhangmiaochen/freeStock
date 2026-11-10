@@ -96,8 +96,11 @@ func PreviewSchedule(dailyAt, staleAt string) (*SchedulePlan, error) {
 
 		change.Action = "change"
 		plan.Changes = append(plan.Changes, change)
-		plan.Commands = append(plan.Commands, fmt.Sprintf(
-			`schtasks /change /tn "%s" /st %s`, t.task, t.at))
+		// ⚠ 这里显示的是**该平台真正会发生什么**，不是硬编码的 schtasks：
+		//   Windows → 一条 schtasks /change 命令
+		//   Linux/NAS → 写回 config.json 的 dailyTime/staleTime
+		// 用户在确认框里看到的东西必须和实际行为一致，否则"确认"就没有意义。
+		plan.Commands = append(plan.Commands, changeTaskHint(t.task, t.at))
 		plan.HasChanges = true
 	}
 

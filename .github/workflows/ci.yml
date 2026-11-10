@@ -1,0 +1,134 @@
+name: 编译与测试
+
+# 目的：**防止"为了兼容 Linux 而弄坏 Windows"**。
+#
+# 这个项目的主线是 Windows 桌面端（wails v3 + WebView2）。Docker 支持
+# 走的是另一条构建路径（`-tags server`），两条路径共用大量代码
+# （main.go、internal/service、internal/cne），只要有一处
+# 平台拆分写错，另一半就编不过。
+#
+# 所以每次 push / PR 都**同时**编：
+#   - windows/amd64 桌面版（原有功能，不许回归）
+#   - linux/amd64 server 版（容器用）
+#   - linux/arm64 server 版（NAS 常见架构）
+on:
+  push:
+    branches: [main, master, develop]
+  pull_request:
+    branches: [main, master, develop]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: 编译（${{ matrix.goos }}/${{ matrix.goarch }} · ${{ matrix.tags }}）
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: windows
+            goarch: amd64
+            tags: desktop,production
+            output: freestock-desktop.exe
+          - goos: linux
+            goarch: amd64
+            tags: server
+            output: freestock-server-linux-amd64
+          - goos: linux
+            goarch: arm64
+            tags: server
+            output: freestock-server-linux-arm64
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # ⚠ 必须构建前端：main.go 用 //go:embed all:frontend/dist，
+      # dist 不存在时 go build 直接失败（不是警告）。
+      - name: 安装 pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 12
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: 安装前端依赖
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: 构建前端
+        working-directory: frontend
+        run: pnpm run build
+
+      - name: 编译
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          mkdir -p dist-bin
+          go build -tags "${{ matrix.tags }}" -trimpath \
+            -ldflags "-s -w" \
+            -o "dist-bin/${{ matrix.output }}" .
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.output }}
+          path: dist-bin/${{ matrix.output }}
+          if-no-files-found: error
+
+  vet-and-test:
+    name: go vet + 单元测试
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: 安装 pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 12
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # 同样是 embed 依赖，测试编译也要 dist 存在
+      - name: 构建前端
+        working-directory: frontend
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run build
+
+      - name: go vet（server 标签）
+        run: go vet -tags server ./...
+
+      - name: 单元测试（只跑不依赖真实数据湖的包）
+        # 行情/回测相关的用例需要本地 parquet 数据湖与环境变量，CI 里没有，
+        # 用 -short 跳过它们。这里只保证配置层、cne 调度层、组合库这几个
+        # **纯逻辑**包没被改坏 —— 它们正是本次 Docker 兼容改动的主要落点。
+        run: |
+          go test -tags server -short ./internal/config/... ./internal/cne/... ./internal/portfolio/...

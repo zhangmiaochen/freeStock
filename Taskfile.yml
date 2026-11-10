@@ -58,3 +58,52 @@ tasks:
     summary: Builds and runs the Docker image
     cmds:
       - task: common:run:docker
+
+  # ---- Docker / NAS 常用动作（对应 docs/docker-nas-部署与gitflow.md） ----
+
+  docker:up:
+    summary: 启动容器（compose，后台）
+    cmds:
+      - docker compose up -d
+      - docker compose ps
+
+  docker:down:
+    summary: 停止容器（保留 ./data 数据）
+    cmds:
+      - docker compose down
+
+  docker:logs:
+    summary: 跟随容器日志
+    cmds:
+      - docker compose logs -f --tail=200
+
+  docker:health:
+    summary: 探测 /health 是否正常
+    cmds:
+      - docker compose exec freestock wget -qO- http://127.0.0.1:8080/health
+
+  docker:multiarch:
+    summary: 本地构建多架构镜像（amd64+arm64，需 buildx）
+    cmds:
+      - docker buildx build --platform linux/amd64,linux/arm64 -t {{.APP_NAME}}:multi -f Dockerfile .
+
+  verify:platforms:
+    summary: 双平台编译自检（Windows 桌面 + Linux server，防回归）
+    desc: |
+      容器化最容易在“另一半平台”翻车：Windows 有、Linux 没有的符号会让
+      server 构建报 undefined。这个任务把两条路径都编一遍。
+    cmds:
+      # Windows 桌面（原有功能，不许回归）
+      - cmd: powershell -NoProfile -Command "$env:GOOS='windows';$env:GOARCH='amd64';$env:CGO_ENABLED='0';go build -tags 'desktop,production' -o {{.BIN_DIR}}/freeStock.exe ."
+        platforms: [windows]
+      # Linux server（容器）
+      - cmd: GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -tags server -o {{.BIN_DIR}}/freeStock-server-amd64 .
+        platforms: [linux, darwin]
+      - cmd: GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -tags server -o {{.BIN_DIR}}/freeStock-server-arm64 .
+        platforms: [linux, darwin]
+      # 桌面版在非 Windows 上也编一次（无 CGO 只能编 server，这里只做 vet）
+      - cmd: go vet -tags 'desktop,production' ./...
+        platforms: [windows]
+      - cmd: GOOS=linux go vet -tags server ./...
+        platforms: [linux, darwin]
+

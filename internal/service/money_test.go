@@ -5,9 +5,62 @@ import (
 	"testing"
 
 	"freestock/internal/portfolio"
+	"freestock/internal/score"
 )
 
-// 资金同步：按层数把权益换算成整手股数，现金 = 权益 - 持仓市值。
+// 其它策略（10 层制）也按实际本金折算股数。
+func TestApplyMoneyToPlanLowBuy(t *testing.T) {
+	svc := NewPortfolioServiceAt(nil, filepath.Join(t.TempDir(), "portfolio.db"))
+	t.Cleanup(svc.Close)
+	store, err := svc.db()
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err := store.Create(portfolio.PortfolioInput{
+		Name: "低吸资金", Type: portfolio.TypeAuto,
+		StrategyID: portfolio.StrategyTrendLowBuy, TotalLayers: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SetInitialCapital(item.ID, 100000); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ApplyRotation(item.ID, "20261103", []portfolio.ApplyAction{
+		{Code: "600000", Action: "add", TargetLayers: 3, Price: 50},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.SyncPortfolioMoney(item.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	plan := &PlanResult{
+		Config: score.StrategyConfig{TotalLayers: 10},
+		Plan: score.RotationPlan{Rows: []score.RotationRow{
+			{Code: "600000", TargetLayers: 3},
+			{Code: "600519", TargetLayers: 2},
+		}},
+		Candidates: []score.Row{
+			{Code: "600000", Close: 50},
+			{Code: "600519", Close: 1000},
+		},
+	}
+	if err := svc.ApplyMoneyToPlan(item.ID, plan); err != nil {
+		t.Fatal(err)
+	}
+	// 权益 10 万：3/10 = 3 万 → 50 元 → 600 股；2/10 = 2 万 → 1000 元/股 → 一手 10 万 > 2 万 → 买不起
+	if plan.Plan.Rows[0].TargetShares != 600 {
+		t.Errorf("600000 应为 600 股，实际 %d", plan.Plan.Rows[0].TargetShares)
+	}
+	if !plan.Plan.Rows[0].Affordable {
+		t.Error("600000 应标记为买得起")
+	}
+	if plan.Plan.Rows[1].TargetShares != 0 || plan.Plan.Rows[1].Affordable {
+		t.Errorf("600519 一手 10 万 > 2 万预算，应买不起，实际 %d 股", plan.Plan.Rows[1].TargetShares)
+	}
+}
+
 func TestSyncPortfolioMoney(t *testing.T) {
 	svc := NewPortfolioServiceAt(nil, filepath.Join(t.TempDir(), "portfolio.db"))
 	t.Cleanup(svc.Close)

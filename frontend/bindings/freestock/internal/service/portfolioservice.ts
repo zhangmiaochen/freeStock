@@ -49,7 +49,7 @@ export function AddPosition(portfolioID: string, $in: portfolio$0.PositionInput)
 /**
  * ApplyMoneyToPlan 给计划行补上"目标股数/金额/买不起"标记。
  * 
- * 只对 quality_growth 生效（其它策略的层数含义不同）。
+ * 所有策略通用：目标金额 = 权益 × 目标层数 / 总层数，再按 100 股整手向下取整。
  */
 export function ApplyMoneyToPlan(portfolioID: string, plan: $models.PlanResult | null): $CancellablePromise<void> {
     return $Call.ByID(1729211694, portfolioID, plan);

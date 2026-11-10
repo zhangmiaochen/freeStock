@@ -24,11 +24,11 @@ type MoneyView struct {
 	ReturnPct      float64 `json:"returnPct"` // 相对初始本金
 }
 
-// syncMoneyFor 只对质量成长做资金同步（其它策略的层数含义不同，先不动）。
+// syncMoneyFor 调仓后同步资金（所有策略通用）。
+//
+// 层数体系不同，但"层数 → 目标金额 → 整手股数 → 现金"的口径一致。
 func (s *PortfolioService) syncMoneyFor(portfolioID, strategyID string) error {
-	if strategyID != portfolio.StrategyQualityGrowth {
-		return nil
-	}
+	_ = strategyID
 	_, err := s.SyncPortfolioMoney(portfolioID)
 	return err
 }
@@ -177,9 +177,9 @@ type RowMoney struct {
 
 // ApplyMoneyToPlan 给计划行补上"目标股数/金额/买不起"标记。
 //
-// 只对 quality_growth 生效（其它策略的层数含义不同）。
+// 所有策略通用：目标金额 = 权益 × 目标层数 / 总层数，再按 100 股整手向下取整。
 func (s *PortfolioService) ApplyMoneyToPlan(portfolioID string, plan *PlanResult) error {
-	if plan == nil || plan.StrategyID != portfolio.StrategyQualityGrowth {
+	if plan == nil {
 		return nil
 	}
 	store, err := s.db()
@@ -201,6 +201,10 @@ func (s *PortfolioService) ApplyMoneyToPlan(portfolioID string, plan *PlanResult
 	if equity <= 0 {
 		return nil
 	}
+	total := plan.Config.TotalLayers
+	if total < 1 {
+		total = 10
+	}
 	priceByCode := make(map[string]float64, len(plan.Holdings)+len(plan.Candidates))
 	for _, r := range plan.Holdings {
 		if r.CurrentPrice > 0 {
@@ -221,7 +225,7 @@ func (s *PortfolioService) ApplyMoneyToPlan(portfolioID string, plan *PlanResult
 		if px <= 0 {
 			continue
 		}
-		amount := equity * float64(row.TargetLayers) / 100
+		amount := equity * float64(row.TargetLayers) / float64(total)
 		n := int(amount/px/100) * 100
 		row.TargetShares = n
 		row.TargetAmount = float64(n) * px

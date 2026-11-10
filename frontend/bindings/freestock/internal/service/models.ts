@@ -755,6 +755,16 @@ export class BacktestRequest {
     "affordable"?: boolean;
 
     /**
+     * WeightMode 是权重模式（仅质量成长）：空/score2（默认）或 equal（等权）。
+     */
+    "weightMode"?: string;
+
+    /**
+     * FilterByActualWeight 让可负担判断按"候选实际权重"算预算（测试开关）。
+     */
+    "filterByActualWeight"?: boolean;
+
+    /**
      * ChanlunAssist 非空且 Enable 时，在调仓计划上叠加缠论辅助：
      * 确认二买/三买加 1/2 层、确认一卖/二卖/三卖分批减 1/1/2 层。
      * 
@@ -793,10 +803,10 @@ export class BacktestRequest {
      * Creates a new BacktestRequest instance from a string or object.
      */
     static createFrom($$source: any = {}): BacktestRequest {
-        const $$createField8_0 = $$createType21;
+        const $$createField10_0 = $$createType21;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("chanlunAssist" in $$parsedSource) {
-            $$parsedSource["chanlunAssist"] = $$createField8_0($$parsedSource["chanlunAssist"]);
+            $$parsedSource["chanlunAssist"] = $$createField10_0($$parsedSource["chanlunAssist"]);
         }
         return new BacktestRequest($$parsedSource as Partial<BacktestRequest>);
     }

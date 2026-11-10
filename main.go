@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
@@ -65,9 +66,14 @@ func setupLogging() (io.Writer, func()) {
 }
 
 // logFilePaths 按优先级给出候选日志路径：
-// 先用户缓存目录，再退回程序所在目录（绿色版/受限环境常常只能写后者）。
+// 先容器/NAS 指定的数据目录，再用户缓存目录，最后退回程序所在目录
+// （绿色版/受限环境常常只能写后者）。
 func logFilePaths() []string {
 	var paths []string
+	// ⚠ 容器部署：日志必须落在挂载卷上，否则 docker logs 之外啥都留不下
+	if dir := strings.TrimSpace(os.Getenv("FREESTOCK_DATA_DIR")); dir != "" {
+		paths = append(paths, filepath.Join(dir, "logs", "freeStock.log"))
+	}
 	if dir, err := os.UserCacheDir(); err == nil && dir != "" {
 		paths = append(paths, filepath.Join(dir, "FreeStock", "freeStock.log"))
 	} else if err != nil {
@@ -79,6 +85,30 @@ func logFilePaths() []string {
 		log.Printf("[FreeStock] 无法获取程序路径: %v", err)
 	}
 	return paths
+}
+
+// serverHost / serverPort 决定 server 模式（-tags server）监听的地址。
+//
+// 这两个值在桌面构建里**完全被忽略**（只有 server 模式读 Options.Server），
+// 所以加在这里对 Windows 桌面包零影响。
+// 容器里由 Dockerfile / compose 注入 WAILS_SERVER_HOST=0.0.0.0；
+// 这里默认 0.0.0.0 是刻意的：容器内绑定 127.0.0.1 会导致端口映射不通，
+// 而这个二进制本来就是拿来当服务跑的。
+func serverHost() string {
+	if v := strings.TrimSpace(os.Getenv("WAILS_SERVER_HOST")); v != "" {
+		return v
+	}
+	return "0.0.0.0"
+}
+
+func serverPort() int {
+	if v := strings.TrimSpace(os.Getenv("WAILS_SERVER_PORT")); v != "" {
+		if p, err := strconv.Atoi(v); err == nil && p > 0 && p <= 65535 {
+			return p
+		}
+		log.Printf("[FreeStock] WAILS_SERVER_PORT=%q 不是合法端口，用默认 8080", v)
+	}
+	return 8080
 }
 
 // webviewDataPath 返回一个**确认可写**的 WebView2 用户数据目录。
@@ -157,7 +187,16 @@ func main() {
 			// 该目录不可写（或被其它 WebView2 程序占用）时，
 			// CreateCoreWebView2Controller 会直接失败（ERROR_BUSY / 0x800700AA），
 			// 表现就是「窗口一闪而过 / 完全没有界面」。
-			WebviewUserDataPath: webviewDataPath(),
+			//
+			// server 构建里该值为空（见 webview_server.go）——
+			// 容器没有 WebView2，也不该去写只读的程序目录。
+			WebviewUserDataPath: webviewDataPathOption(),
+		},
+		// Server 只在 `-tags server` 构建（容器/Linux/NAS）时被读取；
+		// 桌面构建里 wails 完全忽略这个字段，Windows 行为不变。
+		Server: application.ServerOptions{
+			Host: serverHost(),
+			Port: serverPort(),
 		},
 	})
 

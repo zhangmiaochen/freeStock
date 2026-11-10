@@ -353,18 +353,6 @@ func extractScriptPath(command string) string {
 	return strings.TrimSpace(m[1])
 }
 
-// validClock 校验 HH:MM（计划任务对格式敏感，非法值会让注册失败）。
-func validClock(v string) bool {
-	parts := strings.Split(strings.TrimSpace(v), ":")
-	if len(parts) != 2 {
-		return false
-	}
-	hour, minute := 0, 0
-	if _, err := fmt.Sscanf(parts[0], "%d", &hour); err != nil {
-		return false
-	}
-	if _, err := fmt.Sscanf(parts[1], "%d", &minute); err != nil {
-		return false
-	}
-	return hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59
-}
+// ⚠ validClock 已挪到 clock.go（不带 build tag）。
+// 它被 schedule_plan.go 使用，而后者在 Linux/NAS 上也要编译 ——
+// 留在这里会让 `GOOS=linux go build -tags server` 报 undefined。

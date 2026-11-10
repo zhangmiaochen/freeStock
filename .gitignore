@@ -1,48 +1,55 @@
-# 构建产物
+# ćĺťşäş§çŠ
 bin
 frontend/dist
 .task
 
-# 依赖
+# äžčľ
 frontend/node_modules
 .pnpm-store
 
-# 本地构建缓存（Go / 测试）
+# ćŹĺ°ćĺťşçźĺ­ďźGo / ćľčŻďź
 .gocache
 .gotmp
 .tmp
 
-# 黄金值生成脚本的 Python 缓存
+# éťéĺźçćčćŹç Python çźĺ­
 __pycache__
 *.pyc
 
-# 组合库（运行时数据，与 config.json 同目录的那个才是真的）
-# 这条是为了挡住测试写错路径时落在包目录里的残留
+# çťĺĺşďźčżčĄćść°ćŽďźä¸ config.json ĺçŽĺ˝çéŁä¸ŞććŻççďź
+# čżćĄćŻä¸şäşćĄä˝ćľčŻĺéčˇŻĺžćśč˝ĺ¨ĺçŽĺ˝éçćŽç
 portfolio.db
 
-# 运行期缓存（「按股票」日线派生缓存；正常情况下与 config.json 同目录）
+# čżčĄćçźĺ­ďźăćčĄçĽ¨ăćĽçşżć´žççźĺ­ďźć­Łĺ¸¸ćĺľä¸ä¸ config.json ĺçŽĺ˝ďź
 cache/
 
-# 运行日志
+# čżčĄćĽĺż
 debug.log
 log.txt
 
-# 安装包相关
+# ĺŽčŁĺç¸ĺł
 build/linux/appimage/build
 build/windows/nsis/MicrosoftEdgeWebview2Setup.exe
 
-# Android 构建产物（gradle 生成，不该进仓库）
+# Android ćĺťşäş§çŠďźgradle çćďźä¸čŻĽčżäťĺşďź
 build/android/.gradle
 build/android/build
 build/android/app/build
 build/android/local.properties
 
-# 编辑器 / 系统
+# çźčžĺ¨ / çłťçť
 .vscode/*
 !.vscode/extensions.json
 .idea
 .DS_Store
 Thumbs.db
 
-# CPU profile��FREESTOCK_PROF=1 ʱ�� valuation_budget_test.go ���ɣ�
+# CPU profileŁ¨FREESTOCK_PROF=1 ĘąÓÉ valuation_budget_test.go ÉúłÉŁŠ
 *.prof
+
+# Docker / NAS é¨ç˝˛ç¸ĺł
+# compose ç bind mount çŽĺ˝ďźconfig.jsonďźĺŤććććç ďźăportfolio.dbăćĽĺżé˝äźč˝ĺ¨čżé
+data/
+data-*/
+# CI / ćŹĺ°čˇ¨ĺšłĺ°çźčŻäş§çŠ
+dist-bin/

@@ -807,6 +807,9 @@ onUnmounted(stopPolling);
               </div>
             </div>
             <p v-if="schedule.summary" class="text-muted-foreground">{{ schedule.summary }}</p>
+            <!-- note 说明"谁在跑"：Windows 是 schtasks，Linux/NAS 是进程内调度器。
+                 不显示它的话，两边的行为差异（应用/容器停着会不会跑）用户看不到。 -->
+            <p v-if="schedule.note" class="text-muted-foreground">{{ schedule.note }}</p>
             <p v-if="schedule.wrapperPath" class="text-muted-foreground">
               包装脚本：<code>{{ schedule.wrapperPath }}</code>
             </p>
@@ -834,7 +837,7 @@ onUnmounted(stopPolling);
               <div class="flex items-start gap-2 text-xs">
                 <CircleAlert class="mt-0.5 size-4 shrink-0 text-amber-600" />
                 <div class="space-y-1">
-                  <div class="font-medium">将要对你机器上的计划任务做以下改动</div>
+                  <div class="font-medium">将要对你机器上的自动更新计划做以下改动</div>
                   <div v-for="c in plan.changes" :key="c.task" class="text-muted-foreground">
                     <template v-if="c.action === 'change'">
                       <code>{{ c.task }}</code>：{{ c.from }} → <strong>{{ c.to }}</strong>
@@ -850,7 +853,7 @@ onUnmounted(stopPolling);
               </div>
 
               <div v-if="plan.commands?.length" class="space-y-1">
-                <div class="text-[11px] font-medium">将要执行的命令（原样）：</div>
+                <div class="text-[11px] font-medium">将要执行的操作（原样）：</div>
                 <pre class="bg-muted overflow-auto rounded p-2 text-[11px]">{{ plan.commands.join("\n") }}</pre>
               </div>
 

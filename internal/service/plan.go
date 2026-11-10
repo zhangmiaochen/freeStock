@@ -626,6 +626,8 @@ func (s *PortfolioService) BuildPlan(portfolioID string) (*PlanResult, error) {
 	if err := s.savePlanSnapshots(store, item, result); err != nil {
 		slog.Warn("写入调仓建议留档失败", "portfolio", item.ID, "err", err)
 	}
+	// 所有策略都按实际本金折算目标股数/金额（失败不影响建议本身）
+	_ = s.ApplyMoneyToPlan(item.ID, result)
 	return result, nil
 }
 

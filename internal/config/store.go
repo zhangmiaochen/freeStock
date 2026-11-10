@@ -277,12 +277,24 @@ func legacyConfigPath() string {
 
 // ResolvePath 按优先级挑一个可写的配置文件路径。
 //
+//  0. 环境变量 FREESTOCK_DATA_DIR（**仅容器 / NAS 部署用**，见下）
 //  1. 程序目录（exeDir 为空则跳过）
 //  2. 用户配置目录
 //
 // 会真的写一个探测文件来确认目录可写 —— 装在 Program Files 下的场景
 // 目录是只读的，直接在那里建配置会失败。
+//
+// ⚠ `FREESTOCK_DATA_DIR` 是**纯增量**分支，Windows 桌面版不设这个变量，
+// 走的还是原来的"exe 同目录优先"，行为完全不变。
+// 容器里必须用它：镜像里的 /app 通常只读（非 root 用户），
+// 而配置、组合库、缓存都该落在挂载卷上，否则重建容器就全丢。
 func ResolvePath(exeDir string) string {
+	if dir := strings.TrimSpace(os.Getenv("FREESTOCK_DATA_DIR")); dir != "" {
+		if dirWritable(dir) {
+			return filepath.Join(dir, "config.json")
+		}
+		log.Printf("[FreeStock] FREESTOCK_DATA_DIR=%s 不可写，回退默认路径", dir)
+	}
 	if exeDir != "" && dirWritable(exeDir) {
 		return filepath.Join(exeDir, "config.json")
 	}

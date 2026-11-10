@@ -149,34 +149,33 @@ tasks:
   build:docker:
     summary: Builds a Docker image for server mode deployment
     desc: |
-      Creates a minimal Docker image containing the server mode binary.
-      The image is based on distroless for security and small size.
-      Usage: task build:docker [TAG=myapp:latest]
+      Uses the repository root Dockerfile (multi-stage: frontend → Go server → alpine).
+      This is the same file GitHub Actions builds, so local and CI results match.
+      Usage: task build:docker [TAG=myapp:latest] [PLATFORM=linux/amd64]
     cmds:
-      - docker build -t {{.TAG | default (printf "%s:latest" .APP_NAME)}} -f build/docker/Dockerfile.server .
+      - docker buildx build {{if .PLATFORM}}--platform {{.PLATFORM}}{{end}} -t {{.TAG | default (printf "%s:latest" .APP_NAME)}} -f Dockerfile .
     vars:
       TAG: "{{.TAG}}"
+      PLATFORM: "{{.PLATFORM}}"
     preconditions:
       - sh: docker info > /dev/null 2>&1
         msg: "Docker is required. Please install Docker first."
-      - sh: test -f build/docker/Dockerfile.server
-        msg: "Dockerfile.server not found. Run 'wails3 update build-assets' to generate it."
+      - sh: test -f Dockerfile
+        msg: "根目录 Dockerfile 不存在"
 
   run:docker:
-    summary: Builds and runs the Docker image
+    summary: Builds and runs the Docker image via compose
     desc: |
-      Builds the Docker image and runs it, exposing port 8080.
-      Usage: task run:docker [TAG=myapp:latest] [PORT=8080]
-      Note: The internal container port is always 8080. The PORT variable
-      only changes the host port mapping. Ensure your app uses port 8080
-      or modify the Dockerfile to match your ServerOptions.Port setting.
+      Prefers docker compose (handles volumes/healthcheck/knowledge of /data).
+      Usage: task run:docker [PORT=8080]
     deps:
       - task: build:docker
         vars:
           TAG:
             ref: .TAG
     cmds:
-      - docker run --rm -p {{.PORT | default "8080"}}:8080 {{.TAG | default (printf "%s:latest" .APP_NAME)}}
+      - docker compose up -d
+      - docker compose ps
     vars:
       TAG: "{{.TAG}}"
       PORT: "{{.PORT}}"

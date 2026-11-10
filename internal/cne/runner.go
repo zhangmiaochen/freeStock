@@ -210,9 +210,16 @@ func (r *Runner) executable() (string, error) {
 	if p, err := exec.LookPath("cne"); err == nil {
 		return p, nil
 	}
-	// 兜底常见位置（实测这台机器 cne.exe 在这里）
+	// 兜底常见位置。
+	//
+	// Windows 的 `D:\softInstal\...` 是实测那台机器的路径；
+	// 容器/NAS 上对应的是镜像约定好的 venv 位置（见 Dockerfile 的 PATH）——
+	// 这两个兜底只是"少填一个设置项"的便利，找不到也不影响：
+	// 用户仍可在界面里显式指定 CNEPath。
 	for _, cand := range []string{
 		`D:\softInstal\python3.11.3\Scripts\cne.exe`,
+		"/data/cne-venv/bin/cne", // 容器：装在数据卷上的 venv（推荐）
+		"/opt/cne-venv/bin/cne",  // 容器：构建镜像时装进去的 venv
 	} {
 		if _, err := os.Stat(cand); err == nil {
 			return cand, nil

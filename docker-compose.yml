@@ -1,0 +1,84 @@
+# FreeStock · docker compose
+#
+# 用法：
+#   docker compose up -d           # 构建并后台启动
+#   docker compose logs -f         # 看日志
+#   docker compose down            # 停止（数据在 ./data 里，不会删）
+#
+# 适配群晖 / 威联通等 NAS：
+#   - 把下面的 ./data 换成 NAS 上的共享文件夹路径
+#   - 群晖 Container Manager 里直接"项目 → 新增 → 上传 compose"即可
+#   - 架构：镜像同时发布 amd64 / arm64，白群晖和 arm 机型都能拉
+
+services:
+  freestock:
+    # 二选一：本地构建（默认）或直接用 GitHub Actions 推送的镜像
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # 想在镜像里就带 cne，取消下面两行注释并填正确的 PyPI 包名/版本：
+      # args:
+      #   CNE_PIP_SPEC: "cne==1.2.3"
+    # image: ghcr.io/zmc1994/freestock:latest
+    image: freestock:latest
+    container_name: freestock
+    restart: unless-stopped
+
+    ports:
+      # 左边是宿主机端口（NAS 上若 8080 被占用，改成 18080 之类）
+      - "8080:8080"
+
+    environment:
+      # 定时任务按本地时区判断"到点没有"，必须设对，否则 17:30 会跑偏
+      TZ: Asia/Shanghai
+      # 容器内监听地址；绑定 0.0.0.0 才能被端口映射访问到
+      WAILS_SERVER_HOST: 0.0.0.0
+      WAILS_SERVER_PORT: "8080"
+      # 配置 / 组合库 / 缓存 / 日志 / cne venv 都落在这里（挂载卷）
+      FREESTOCK_DATA_DIR: /data
+
+    volumes:
+      # ⚠ **必须挂载**：config.json、portfolio.db、cache/、logs/，
+      # 以及运行期装好的 cne 虚拟环境（/data/cne-venv，见文档 §4.4）。
+      # NAS 上换成比如 /volume1/docker/freestock:/data
+      #
+      # 目录属主由容器入口脚本自动修正（chown -R 10001:10001 /data），
+      # 所以首次启动后留意 logs 里有没有权限告警。
+      - ./data:/data
+
+      # ⚠ **cne 更新必需，且必须读写（不要加 :ro）**
+      # cne 会把新数据写进数据湖；只读挂载会让更新在最后一步失败。
+      # 左边换成 NAS 上 CNEquity 工程的实际路径（含 configs/cnequity.toml）。
+      # - /volume1/docker/CNEquity:/cne:rw
+
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+    # 安全基线：容器内不获取新权限
+    security_opt:
+      - no-new-privileges:true
+
+    # 日志滚动，避免 NAS 磁盘被日志吃满
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+# 说明：
+#   1. 数据卷用 bind mount（./data）而不是 named volume —— NAS 上用户
+#      需要能直接在文件管理器里看到 config.json / portfolio.db 并备份。
+#   2. 首次启动后访问 http://<NAS-IP>:8080 ，在「设置」里配置数据源。
+#      默认是 free-stockdb（http://127.0.0.1:7899），容器里 127.0.0.1
+#      是容器自己，要改成宿主机/上游服务的可达地址，或用 cnlake 本地数据湖。
+#   3. 定时任务在容器里由**应用进程内调度器**执行（不依赖 cron），
+#      容器停着不会跑；重启后若当天计划时间已过且还没跑过，会自动补跑一次。
+#   4. cne 装在**容器里**（不是 NAS 宿主机）：
+#        docker compose exec -u 10001:10001 freestock \
+#          sh -c 'python3 -m venv /data/cne-venv && /data/cne-venv/bin/pip install -U pip cne'
+#      装完 `cne --help` 可用，界面里的「cne 可执行文件」留空即可（走 PATH）。
+#      详见 docs/docker-nas-部署与gitflow.md §4.4。

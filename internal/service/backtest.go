@@ -260,6 +260,7 @@ func (s *PortfolioService) CreateBacktest(req BacktestRequest) (runResult *Backt
 		MaxLayersPerStock: maxLayersForBacktest(item.StrategyID, item.TotalLayers),
 		InitialCapital:    initialCapital,
 		MarketScope:       scopeOfPortfolio(item),
+		LotSize:           100, // A 股按 100 股整手下单
 	}
 
 	engine := backtest.New(cfg, days, bars, benchmark)
