@@ -273,7 +273,8 @@ func TestWriteCreatesDirectory(t *testing.T) {
 
 func TestReadOnlyPathDoesNotPanic(t *testing.T) {
 	// 不可写路径：内存里仍应生效，不 panic
-	store := NewStoreAt(`Z:\definitely\not\here\config.json`)
+	// （用平台感知的不可写路径，见 unwritableConfigPath 的说明）
+	store := NewStoreAt(unwritableConfigPath())
 	store.SetDataSource("http://127.0.0.1:7899", KindStockDB)
 	if got := store.DataSourceURL(); got != "http://127.0.0.1:7899" {
 		t.Errorf("内存中应生效: %q", got)
@@ -298,24 +299,24 @@ func TestResolvePathPrefersExecutableDir(t *testing.T) {
 	}
 }
 
-func TestResolvePathSkipsUnwritableDir(t *testing.T) {
-	// ⚠ 这个测试必须**按平台构造"不可写目录"**，不能用写死的 Windows 路径。
-	//
-	// 早先它用 `Z:\definitely\not\here`：在 Windows 上这是个不存在的盘符，
-	// 确实不可写；但在 Linux 上**反斜杠不是分隔符**，`Z:\definitely\not\here`
-	// 只是一个合法的单层目录名 —— MkdirAll 会把它**真的创建出来**，
-	// 于是"不可写目录"变成可写，断言失败。
-	// 更糟的是它会在工作目录里留下一个怪名字的目录。
-	var uncreatable string
+// unwritableConfigPath 返回当前平台上**不可能写入**的 config.json 路径。
+//
+// ⚠ 绝不能用写死的 Windows 路径模拟"不可写"：
+//   - Windows 上 `Z:\...` 是不存在的盘符，确实写不进去；
+//   - Linux 上**反斜杠不是分隔符**，`Z:\definitely\not\here\config.json`
+//     只是一个合法的单文件名 —— 写操作会真的成功，测试不但断言失败，
+//     还会在工作区留下一个名字里带反斜杠的垃圾文件。
+//
+// Unix 侧用 /proc：它是内核虚拟文件系统，任何用户都不允许在里面创建目录/文件。
+func unwritableConfigPath() string {
 	if runtime.GOOS == "windows" {
-		// Windows：不存在的盘符，MkdirAll 必定失败
-		uncreatable = `Z:\definitely\not\here`
-	} else {
-		// Unix：挂一个只读路径。`/proc/self/nonexistent` 在任何 Linux 上都不可创建
-		// （/proc 是内核虚拟文件系统，不允许建目录），且不会留下副作用。
-		uncreatable = "/proc/self/freeStock-test-uncreatable/config.json"
-		uncreatable = filepath.Dir(uncreatable)
+		return `Z:\definitely\not\here\config.json`
 	}
+	return "/proc/self/freeStock-test-unwritable/config.json"
+}
+
+func TestResolvePathSkipsUnwritableDir(t *testing.T) {
+	uncreatable := filepath.Dir(unwritableConfigPath())
 
 	got := ResolvePath(uncreatable)
 	if strings.HasPrefix(got, uncreatable) {
@@ -338,13 +339,8 @@ func TestResolvePathAlwaysReturnsSomething(t *testing.T) {
 	if got := ResolvePath(t.TempDir()); got == "" {
 		t.Error("不该返回空路径")
 	}
-	// 同样避免写死 Windows 路径：Linux 上 `Z:\nope` 会被真的建成目录。
-	// 用一个一定创建不出来的路径（见上一个测试的说明）。
-	uncreatable := `Z:\nope`
-	if runtime.GOOS != "windows" {
-		uncreatable = "/proc/self/freeStock-test-nope"
-	}
-	if got := ResolvePath(uncreatable); got == "" {
+	// 同样用平台感知的不可写路径：Linux 上 `Z:\nope` 会被真的创建出来
+	if got := ResolvePath(filepath.Dir(unwritableConfigPath())); got == "" {
 		t.Error("不可写时也应返回一个路径（写入失败会被忽略）")
 	}
 }
