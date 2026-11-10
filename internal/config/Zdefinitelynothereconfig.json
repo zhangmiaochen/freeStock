@@ -1,0 +1,53 @@
+{
+  "dataSourceUrl": "http://127.0.0.1:7899",
+  "dataSourceKind": "stockdb",
+  "cnLakeRoot": "",
+  "klinePrefs": {
+    "period": "day",
+    "adjust": "qfq",
+    "showBoll": false,
+    "showMacd": true,
+    "showVolume": true,
+    "showFlow": true,
+    "showFibonacci": false,
+    "showRangeSelect": false,
+    "showChanlun": false,
+    "chanlunLevel": "day",
+    "boll": {
+      "period": 20,
+      "mult": 2
+    },
+    "macd": {
+      "fast": 12,
+      "slow": 26,
+      "signal": 9
+    },
+    "maConfigs": [
+      {
+        "period": 5,
+        "color": "#f5c542",
+        "visible": true
+      },
+      {
+        "period": 20,
+        "color": "#ec4899",
+        "visible": true
+      },
+      {
+        "period": 60,
+        "color": "#38bdf8",
+        "visible": true
+      },
+      {
+        "period": 120,
+        "color": "#a78bfa",
+        "visible": true
+      },
+      {
+        "period": 250,
+        "color": "#34d399",
+        "visible": true
+      }
+    ]
+  }
+}
