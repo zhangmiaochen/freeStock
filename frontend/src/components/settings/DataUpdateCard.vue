@@ -127,6 +127,17 @@ async function toggleAutoUpdate(enabled: boolean) {
   try {
     const st = await api.setAutoUpdate(enabled);
     autoUpdate.value = st;
+    // ⚠ 同步到页面上的 prefs 缓存。
+    //
+    // 这个开关和「保存设置」写的是**同一份配置**里的 autoDaily/autoStale：
+    // 开关走 setAutoUpdate，保存走 setUpdatePrefs（整份覆盖）。
+    // 如果这里不跟新，之后点「保存设置」就会展开打开页面时那份缓存
+    // （autoDaily=false），把刚开启的开关又写回关闭 ——
+    // 这正是"开了自动更新，一保存设置就又变回关闭"的原因。
+    if (prefs.value?.prefs) {
+      prefs.value.prefs.autoDaily = enabled;
+      prefs.value.prefs.autoStale = enabled;
+    }
     message.value = enabled ? "自动更新已开启。" : "自动更新已关闭 —— 应用不运行时不会再自动更新。";
     await loadSchedule();
   } catch (e) {
@@ -407,9 +418,21 @@ async function savePrefs() {
   error.value = "";
   message.value = "";
   try {
-    const current = prefs.value?.prefs;
+    // ⚠ 合并底稿必须用**后端的最新设置**，不能用组件里的缓存。
+    //
+    // 「开启自动更新」是另一个按钮，它写的是同一份配置里的 autoDaily/autoStale；
+    // 而 setUpdatePrefs 是整份覆盖。拿打开页面时那份缓存去展开，
+    // 会把开关刚写好的 true 又盖回 false —— 表现为"开启后一保存就自动关闭"。
+    // 这里现取一次，再只覆盖界面上真正编辑的两个字段。
+    let latest = prefs.value?.prefs;
+    try {
+      latest = (await api.getUpdatePrefs())?.prefs ?? latest;
+    } catch {
+      // 取不到就退回缓存：宁可少一次刷新，也不能让保存本身失败
+    }
+
     const next: UpdatePrefs = {
-      ...(current ?? {
+      ...(latest ?? {
         autoDaily: false,
         dailyTime: "17:30",
         autoStale: false,

@@ -522,6 +522,19 @@ func (s *CneUpdateService) SetUpdatePrefs(prefs config.UpdatePrefs) (UpdatePrefs
 	if s.store == nil {
 		return UpdatePrefsInfo{}, errors.New("缺少配置存储")
 	}
+	// 自动更新的开关走 SetAutoUpdate，但本方法是**整份覆盖**。
+	// 前端若拿打开页面时的旧缓存来保存，就会把刚开启的开关盖回关闭
+	// （踩过：表现为"开启后一保存就又变回关闭"）。
+	//
+	// 这里**不强行改写**传入值 —— 往返语义（传什么就存什么）是有测试保证的契约，
+	// 由前端保证送来的开关是最新的（保存前会现取一次）。但要把差异记下来，
+	// 否则下次再出这类问题，日志里什么都看不到。
+	if before, _ := s.store.UpdatePrefs(); before.AutoDaily != prefs.AutoDaily ||
+		before.AutoStale != prefs.AutoStale {
+		slog.Warn("「保存设置」改动了自动更新开关（该开关只应由 setAutoUpdate 修改，注意前端是否用了旧缓存）",
+			"autoDaily", before.AutoDaily, "→", prefs.AutoDaily,
+			"autoStale", before.AutoStale, "→", prefs.AutoStale)
+	}
 	stored := s.store.SetUpdatePrefs(prefs)
 	// 让 Runner 立刻用上新设置（**带上 OnFinish 等其它选项**，
 	// 否则这里会把"更新结束 → 派生缓存失效"的回调悄悄丢掉）
