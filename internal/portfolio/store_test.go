@@ -713,11 +713,16 @@ func TestOverview(t *testing.T) {
 }
 
 func TestDefaultPath(t *testing.T) {
-	got := DefaultPath(`C:\Users\x\AppData\Roaming\FreeStock\config.json`)
+	// ⚠ 用 filepath.Join 按平台拼路径，**不要写死 `C:\...`**：
+	// Linux 上反斜杠不是分隔符，filepath.Dir(`C:\Users\...`) 会返回 "."，
+	// 断言必然失败。这里测的是"与 config.json 同目录"这个语义，与平台无关。
+	cfgDir := filepath.Join("some", "app", "FreeStock")
+	got := DefaultPath(filepath.Join(cfgDir, "config.json"))
+
 	if filepath.Base(got) != "portfolio.db" {
 		t.Errorf("组合库文件名应为 portfolio.db: %s", got)
 	}
-	if filepath.Dir(got) != `C:\Users\x\AppData\Roaming\FreeStock` {
-		t.Errorf("组合库应与 config.json 同目录: %s", got)
+	if filepath.Dir(got) != cfgDir {
+		t.Errorf("组合库应与 config.json 同目录: got %q，期望 %q", filepath.Dir(got), cfgDir)
 	}
 }

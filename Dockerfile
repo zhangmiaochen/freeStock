@@ -34,7 +34,14 @@ ARG CNE_PIP_SPEC=
 # ---------------------------------------------------------------------------
 # 阶段 1：前端产物（frontend/dist）
 # ---------------------------------------------------------------------------
-FROM node:${NODE_VERSION}-alpine AS frontend
+# ⚠ 这两个阶段都固定在 **BUILDPLATFORM（构建机本身，通常 amd64）**，
+# 只让产物交叉编译到目标架构 —— 这是多架构构建能不能在合理时间内跑完的关键。
+#
+# 如果不固定：buildx 会去拉 arm64 的 golang 镜像，然后在 QEMU 里**模拟执行
+# Go 编译器**。编译 parquet-go + modernc sqlite 这种体量的依赖，
+# 模拟编译要几十分钟（甚至超时）。Go 本来就原生支持交叉编译，
+# 在 amd64 上编 arm64 二进制只要几秒。
+FROM --platform=$BUILDPLATFORM node:${NODE_VERSION}-alpine AS frontend
 
 # pnpm 版本与前端 lockfile 对齐（lockfileVersion 9.0）。
 # ⚠ 必须**固定大版本**：pnpm 11+ 会校验 pnpm-workspace.yaml 里的
@@ -62,7 +69,13 @@ RUN test -f dist/index.html || (echo "前端构建没有产出 dist/index.html" 
 # ---------------------------------------------------------------------------
 # 阶段 2：Go 二进制（-tags server，纯静态）
 # ---------------------------------------------------------------------------
-FROM golang:${GO_VERSION}-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine AS builder
+
+# 这两行**不要给默认值**：buildx 会自动注入目标平台。
+# 一旦写成 `ARG TARGETARCH=amd64`，默认值会遮蔽注入值 ——
+# arm64 构建会静默产出 amd64 二进制，直到运行时报 "exec format error"。
+ARG TARGETOS
+ARG TARGETARCH
 
 # git 用于 go mod download 时拉取依赖（部分模块走 vcs）
 RUN apk add --no-cache git ca-certificates
@@ -81,16 +94,13 @@ COPY --from=frontend /src/frontend/dist ./frontend/dist
 
 # -tags server：wails 走无窗口 HTTP 服务端实现（application_server.go），
 #               不链接 GTK/WebView，因此不需要图形库。
-# CGO_ENABLED=0：纯静态 Go 二进制，不依赖目标机的 glibc/musl。
+# CGO_ENABLED=0：纯静态 Go 二进制，不依赖目标机的 glibc/musl；
+#               也是"能在 amd64 上交叉编译 arm64"的前提（关掉 CGO 才能跨架构）。
 #               本项目用的 modernc.org/sqlite / parquet-go 都是纯 Go，关掉没问题。
+# GOOS/GOARCH 取 buildx 注入的 TARGETOS/TARGETARCH。
 # -trimpath -ldflags "-s -w"：去掉本机路径与调试符号，镜像更小且可复现。
-#
-# ⚠ **不显式传 GOOS/GOARCH**：buildx 多架构构建时，golang 基础镜像本身
-# 就是目标架构（linux/arm64 会拉 arm64 的 golang 镜像），`go build` 天然
-# 产出该架构的二进制。手写 `ARG TARGETARCH` 反而有坑 ——
-# 带默认值的 stage 内 ARG 会**遮蔽** buildx 注入的全局自动平台参数，
-# arm64 构建会静默产出 amd64 二进制，直到运行时报 "exec format error"。
-RUN CGO_ENABLED=0 go build -tags server -trimpath \
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+      go build -tags server -trimpath \
       -ldflags "-s -w" \
       -o /out/freestock-server . \
  && ls -lh /out/freestock-server

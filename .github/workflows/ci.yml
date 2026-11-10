@@ -96,6 +96,20 @@ jobs:
   vet-and-test:
     name: go vet + 单元测试
     runs-on: ubuntu-latest
+    # ⚠ **CGO_ENABLED=0 必须显式设置，不能靠默认值。**
+    #
+    # Linux runner 上 CGO 默认是 1。此时 `go vet -tags server ./...` 会去编译
+    # wails 依赖里的 GTK/cgo 包 (`internal/operatingsystem`、
+    # `internal/assetserver/webview`)，而 runner 上没装 gtk4/webkitgtk 开发包，
+    # 于是报：
+    #
+    #	Package gtk4 was not found in the pkg-config search path
+    #
+    # 这个错跟我们的代码无关 —— 是"检查方式"和"实际构建方式"不一致造成的：
+    # 真正出镜像走的是 CGO_ENABLED=0（纯 Go），vet 也应当用同一套开关。
+    # 之前没发现是因为在 Windows 上交叉编译时本来就设了 0。
+    env:
+      CGO_ENABLED: "0"
     steps:
       - name: 检出代码
         uses: actions/checkout@v4

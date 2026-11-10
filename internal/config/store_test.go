@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -298,10 +299,27 @@ func TestResolvePathPrefersExecutableDir(t *testing.T) {
 }
 
 func TestResolvePathSkipsUnwritableDir(t *testing.T) {
-	// 用一个不可能创建的路径模拟只读的安装目录
-	got := ResolvePath(`Z:\definitely\not\here`)
-	if strings.HasPrefix(got, `Z:`) {
-		t.Errorf("不可写的目录不该被选用: %q", got)
+	// ⚠ 这个测试必须**按平台构造"不可写目录"**，不能用写死的 Windows 路径。
+	//
+	// 早先它用 `Z:\definitely\not\here`：在 Windows 上这是个不存在的盘符，
+	// 确实不可写；但在 Linux 上**反斜杠不是分隔符**，`Z:\definitely\not\here`
+	// 只是一个合法的单层目录名 —— MkdirAll 会把它**真的创建出来**，
+	// 于是"不可写目录"变成可写，断言失败。
+	// 更糟的是它会在工作目录里留下一个怪名字的目录。
+	var uncreatable string
+	if runtime.GOOS == "windows" {
+		// Windows：不存在的盘符，MkdirAll 必定失败
+		uncreatable = `Z:\definitely\not\here`
+	} else {
+		// Unix：挂一个只读路径。`/proc/self/nonexistent` 在任何 Linux 上都不可创建
+		// （/proc 是内核虚拟文件系统，不允许建目录），且不会留下副作用。
+		uncreatable = "/proc/self/freeStock-test-uncreatable/config.json"
+		uncreatable = filepath.Dir(uncreatable)
+	}
+
+	got := ResolvePath(uncreatable)
+	if strings.HasPrefix(got, uncreatable) {
+		t.Errorf("不可写的目录不该被选用: %q（输入 %q）", got, uncreatable)
 	}
 	if legacy := legacyConfigPath(); legacy != "" && got != legacy {
 		t.Errorf("应退回 %q，实际 %q", legacy, got)
@@ -320,7 +338,13 @@ func TestResolvePathAlwaysReturnsSomething(t *testing.T) {
 	if got := ResolvePath(t.TempDir()); got == "" {
 		t.Error("不该返回空路径")
 	}
-	if got := ResolvePath(`Z:\nope`); got == "" {
+	// 同样避免写死 Windows 路径：Linux 上 `Z:\nope` 会被真的建成目录。
+	// 用一个一定创建不出来的路径（见上一个测试的说明）。
+	uncreatable := `Z:\nope`
+	if runtime.GOOS != "windows" {
+		uncreatable = "/proc/self/freeStock-test-nope"
+	}
+	if got := ResolvePath(uncreatable); got == "" {
 		t.Error("不可写时也应返回一个路径（写入失败会被忽略）")
 	}
 }

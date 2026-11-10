@@ -34,6 +34,11 @@ webview2-data
 cne-schedule-state.json
 dist-bin
 
+# 已提交的桌面产物（43MB）。**镜像里不用它** —— server 模式会自己编一份，
+# 放进上下文只会让每次 docker build 多传 43MB。
+freestock.exe
+*.exe
+
 # 文档与实验产物（不影响构建）
 reports
 research
