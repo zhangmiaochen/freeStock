@@ -62,6 +62,17 @@ if [ "$(id -u)" = "0" ]; then
         exec setpriv --reuid="${APP_UID}" --regid="${APP_UID}" --init-groups "$@"
     fi
     log "警告：找不到 setpriv，将以 root 继续运行（不推荐）"
+else
+    # ── 非 root 启动（compose 里显式设了 user:）────────────────────────────
+    # 这时没法自动修属主，但至少要把"为什么写不了"直接说清楚 ——
+    # 否则用户只看到一串 permission denied，根本想不到是 uid 不匹配。
+    if [ -d "$DATA_DIR" ] && ! sh -c 'p="$1/.wprobe-$$"; { : >"$p"; } 2>/dev/null && rm -f "$p"' _ "$DATA_DIR"; then
+        log "错误：以 uid $(id -u):$(id -g) 运行，但 ${DATA_DIR} 不可写"
+        log "      当前属主：$(stat -c '%u:%g (%U:%G)' "$DATA_DIR" 2>/dev/null || echo 未知)"
+        log "      修法（宿主机上二选一）："
+        log "        1) chown -R $(id -u):$(id -g) <宿主机上对应 ${DATA_DIR} 的目录>"
+        log "        2) 去掉 compose 里的 user:，让入口以 root 启动并自动修属主"
+    fi
 fi
 
 exec "$@"

@@ -265,6 +265,53 @@ docker build --build-arg CNE_PIP_SPEC='cne==1.2.3' -t freestock:latest .
 装进 `/opt/cne-venv`（镜像内、不可变）。升级 cne 要重建镜像。
 `CNE_PIP_SPEC` 刻意**没有默认值**：包名/版本以 CNEquity 发行为准，这里不猜。
 
+#### 先分清三个路径（很容易填错）
+
+以 `/vol2/1001/stockTool/CNEquity` 这种典型布局为例：
+
+| 路径 | 是什么 | 填到哪里 |
+|---|---|---|
+| `/vol2/1001/stockTool/CNEquity` | **工程目录**，里面有 `configs/cnequity.toml` | 设置 → 数据更新 →「cne 工程目录」 |
+| `/vol2/1001/stockTool/CNEquity/data/cnequity` | **数据湖根目录**，里面有 `curated/` | 设置 → 数据源 →「数据湖根目录」 |
+| `/vol2/1001/xxx/cne-venv` | **cne 的 venv**（`command -v cne` 能看到） | 设置 → 数据更新 →「cne 目录 / 可执行文件」 |
+
+三者不是同一个东西。`configs/cnequity.toml` 里的数据湖路径通常就是第二行那个，
+所以**同路径挂载后一个字都不用改**。
+
+#### 属主：决定 cne 能不能写进数据湖
+
+容器默认以 uid **10001** 运行。如果数据湖属于别的用户（NAS 上很常见，比如 1001），
+cne 读得到、**写不进去**。两种解法，推荐第一种：
+
+**A. 让容器以数据属主身份运行（不改宿主机任何权限）**
+
+```yaml
+services:
+  freestock:
+    user: "1001:1001"        # 换成 ls -ldn 看到的属主
+```
+
+前置：`./data` 也要属于这个 uid（否则应用写不了配置）：
+
+```bash
+mkdir -p ./data && sudo chown 1001:1001 ./data
+```
+
+**B. 把数据湖属主改成 10001**
+
+```bash
+chown -R 10001:10001 /vol2/1001/stockTool/CNEquity
+```
+
+会连宿主机上 cne 的写入身份一起改掉 —— 如果宿主机上还以别的用户跑 cne，别用这个。
+
+查看当前属主与自己的 uid：
+
+```bash
+ls -ldn /vol2/1001/stockTool/CNEquity/data/cnequity   # 第一列是 uid、第二列是 gid
+id -u; id -g                                          # 你在宿主机上的 uid/gid
+```
+
 #### 设置项填什么
 
 | 设置项 | 填什么 | 说明 |
