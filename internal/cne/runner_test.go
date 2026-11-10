@@ -76,7 +76,21 @@ func TestRunnerReturnsImmediately(t *testing.T) {
 
 // OnFinish 必须在任务结束后被回调：派生缓存（按股票日线缓存）靠它
 // 在"数据湖刚落盘"的那一刻立刻失效，而不是等下一次查询去发现。
+//
+// ⚠ 这个用例要**真的起一个进程**，所以不能写死 `powershell.exe`：
+//   - Linux/NAS 上没有 powershell.exe；
+//   - 更隐蔽的是 WSL：它默认把 Windows 的 PATH 追加进来
+//     （appendWindowsPath=true），`powershell.exe` 居然能命中，
+//     所以在 Windows 开发机上用 WSL 跑测试是绿的，CI 上才炸。
+//
+// 按平台选一个必然存在的命令，Windows 侧行为与原来完全一致。
 func TestRunnerOnFinishFiresAfterJob(t *testing.T) {
+	exe, args := "powershell.exe",
+		[]string{"-NoProfile", "-NonInteractive", "-Command", "exit 0"}
+	if runtime.GOOS != "windows" {
+		exe, args = "/bin/sh", []string{"-c", "exit 0"}
+	}
+
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, "configs"), 0o755); err != nil {
 		t.Fatal(err)
@@ -87,7 +101,7 @@ func TestRunnerOnFinishFiresAfterJob(t *testing.T) {
 
 	done := make(chan struct{}, 1)
 	r := NewRunner(Options{
-		CNEPath:    "powershell.exe",
+		CNEPath:    exe,
 		ProjectDir: dir,
 		LogDir:     t.TempDir(),
 		OnFinish: func(job *Job, err error) {
@@ -98,7 +112,7 @@ func TestRunnerOnFinishFiresAfterJob(t *testing.T) {
 		},
 	})
 	r.buildArgs = func(kind string, extra []string) ([]string, error) {
-		return []string{"-NoProfile", "-NonInteractive", "-Command", "exit 0"}, nil
+		return args, nil
 	}
 	r.foreignRunning = func() (int, bool) { return 0, false }
 
