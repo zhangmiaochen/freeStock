@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -349,6 +350,15 @@ func (c *SymbolBarsCache) Build(l *Lake) (SymbolBarsManifest, error) {
 }
 
 // bucketize 顺序读完全部分区，按代码哈希把行写进 symbolBarsBuckets 个临时文件。
+// bucketize 扫一遍全部分区，按代码哈希分桶写临时文件。
+//
+// ⚠ **必须并发读**：数据湖按交易日分区，一年 250 个文件、多年就是几千个。
+// 串行读时瓶颈全在"每文件一次 open + 解析 footer + zstd 解压"上，
+// NAS 的机械盘尤其明显（实测这类构建从几十秒到几十分钟）。
+//
+// 解码在 worker 里并行做，**写桶串行**（一把锁）：写是顺序追加，
+// 串行既不会错乱，也不会让 64 个 writer 抢盘。
+// 内存只留"每个 worker 正在解码的那一个分区"，与总量无关。
 func (c *SymbolBarsCache) bucketize(files []string, dir string) error {
 	writers := make([]*parquet.GenericWriter[BarRow], symbolBarsBuckets)
 	handles := make([]*os.File, symbolBarsBuckets)
@@ -384,7 +394,35 @@ func (c *SymbolBarsCache) bucketize(files []string, dir string) error {
 		return nil
 	}
 
-	for _, path := range files {
+	var (
+		mu       sync.Mutex // 保护 buffers / writers / 错误
+		firstErr error
+		done     int
+	)
+
+	// 进度日志：构建可能持续几分钟，没有进度用户只会觉得"卡死了"。
+	const progressEvery = 500
+
+	appendRows := func(rows []BarRow) error {
+		mu.Lock()
+		defer mu.Unlock()
+		if firstErr != nil {
+			return firstErr
+		}
+		for i := range rows {
+			index := symbolBucket(rows[i].Symbol)
+			buffers[index] = append(buffers[index], rows[i])
+			if len(buffers[index]) >= batch {
+				if err := flush(index); err != nil {
+					firstErr = err
+					return err
+				}
+			}
+		}
+		return nil
+	}
+
+	readOne := func(path string) error {
 		handle, err := openParquet(path)
 		if err != nil {
 			return err
@@ -395,17 +433,61 @@ func (c *SymbolBarsCache) bucketize(files []string, dir string) error {
 		if err != nil {
 			return err
 		}
-		for i := range rows {
-			index := symbolBucket(rows[i].Symbol)
-			buffers[index] = append(buffers[index], rows[i])
-			if len(buffers[index]) >= batch {
-				if err := flush(index); err != nil {
-					return err
-				}
-			}
-		}
+		return appendRows(rows)
 	}
 
+	// 有界并发：留一个核给 HTTP/健康检查（见 lakeReadWorkerLimit）。
+	workers := lakeReadWorkerLimit()
+	if workers > len(files) {
+		workers = len(files)
+	}
+	if workers < 1 {
+		workers = 1
+	}
+
+	jobs := make(chan string)
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for path := range jobs {
+				if err := readOne(path); err != nil {
+					mu.Lock()
+					if firstErr == nil {
+						firstErr = err
+					}
+					mu.Unlock()
+					return
+				}
+				mu.Lock()
+				done++
+				n := done
+				mu.Unlock()
+				if n%progressEvery == 0 {
+					slog.Info("按股票缓存：分桶进度", "done", n, "total", len(files))
+				}
+			}
+		}()
+	}
+	for _, path := range files {
+		mu.Lock()
+		stop := firstErr != nil
+		mu.Unlock()
+		if stop {
+			break
+		}
+		jobs <- path
+	}
+	close(jobs)
+	wg.Wait()
+
+	if firstErr != nil {
+		return firstErr
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
 	for i := range writers {
 		if err := flush(i); err != nil {
 			return err

@@ -32,6 +32,27 @@ func (s *StockService) ServiceStartup(context.Context, application.ServiceOption
 // 预热失败也不影响启动（记一条日志，页面自己会再取一次并给出错误）。
 func (s *StockService) warmUp() {
 	started := time.Now()
+
+	// ⚠ **顺序是有讲究的：先建「按股票日线缓存」。**
+	//
+	// 它是 K 线页能不能秒开的分水岭：缓存就绪时一只股票一个文件（~2ms）；
+	// 没就绪时退回"打开区间内**每一个**日分区"，数据湖越大越慢
+	//（cne 每多回填一年就多 250 个分区）。本机实测这个退化路径 3.97s，
+	// NAS 机械盘 + cne 同时在写时会变成几十秒到几分钟 —— 表现就是
+	// "以前能打开的 K 线页，现在打不开了"。
+	//
+	// 而全量股票列表/板块区间只在首次加载时慢，之后有各自的缓存。
+	// 所以把 K 线的地基放在最前面。
+	if provider, _ := s.snapshot(); provider != nil {
+		if lake, ok := provider.(*lakeProvider); ok {
+			if lake.EnsureSymbolBars() {
+				slog.Info("预热：按股票日线缓存已是最新")
+			} else {
+				slog.Info("预热：按股票日线缓存正在后台重建（期间 K 线会走直读，较慢）")
+			}
+		}
+	}
+
 	universe, err := s.GetStockUniverse(false)
 	if err != nil {
 		slog.Info("预热：全量行情快照未就绪（页面会自己重试）", "err", err)
@@ -63,18 +84,4 @@ func (s *StockService) warmUp() {
 		slog.Debug("预热：指数历史就绪")
 	}
 
-	// 「按股票」日线派生缓存：K 线页与股票列表的"不限起点补抓"都靠它。
-	//
-	// 第一次要在后台重排全市场 700 多万行（本机约十几秒），放在最后做：
-	// 股票列表是首页，先让它热起来；这一步跑完之前打开 K 线会退化成
-	// "只读这一只股票"的直读（3.97s），比原来灌全市场（11.9s）已经快得多。
-	if provider, _ := s.snapshot(); provider != nil {
-		if lake, ok := provider.(*lakeProvider); ok {
-			if lake.EnsureSymbolBars() {
-				slog.Info("预热：按股票日线缓存已是最新")
-			} else {
-				slog.Info("预热：按股票日线缓存正在后台重建（期间 K 线走直读）")
-			}
-		}
-	}
 }
