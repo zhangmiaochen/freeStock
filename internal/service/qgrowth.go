@@ -89,6 +89,25 @@ func (s *PortfolioService) rawCloseFor(code string, date int) (float64, bool) {
 	if provider == nil {
 		return 0, false
 	}
+	// ⚠ **先试「按股票」缓存**，不要直接走 KlineHistory。
+	//
+	// KlineHistory 开头会 ensureMeta()（建股本索引 + 估值索引）——
+	// 用户 NAS 上实测 **36 秒**。而这里只要一个收盘价，完全不需要
+	// PE/PB/股本这些元数据。组合页首次加载因此卡 30s 以上
+	//（日志里那条"数据湖股本索引就绪"就是它）。
+	if lp, ok := provider.(*lakeProvider); ok {
+		if bars, found, err := lp.symbolBarsFor(code, date); err == nil && found {
+			best, px := int64(0), 0.0
+			for _, b := range bars {
+				if d := b.Date(); d <= int64(date) && d >= best && b.Close > 0 {
+					best, px = d, b.Close
+				}
+			}
+			if px > 0 {
+				return px, true
+			}
+		}
+	}
 	quotes, err := provider.KlineHistory(context.Background(), code, shiftBack(date, 30), date)
 	if err != nil || len(quotes) == 0 {
 		return 0, false
@@ -178,7 +197,7 @@ func (s *PortfolioService) loadQGrowthFundamentals(startYear, endYear int) (map[
 	// 避免后到的空值/旧值覆盖掉有效值。
 	type key struct{ sym, period string }
 	type itemVal struct {
-		value  float64
+		value    float64
 		announce int64
 	}
 	agg := make(map[key]map[string]itemVal, len(rows)/6)
@@ -824,16 +843,16 @@ func (s *PortfolioService) buildQualityGrowthPlanAt(item portfolio.Portfolio, st
 		StrategyID:    item.StrategyID,
 		StrategyLabel: item.StrategyLabel,
 		Config: score.StrategyConfig{
-			StrategyID:          item.StrategyID,
-			MarketState:         state.State,
-			TotalLayers:         100,
-			TargetCount:         cfg.N,
+			StrategyID:           item.StrategyID,
+			MarketState:          state.State,
+			TotalLayers:          100,
+			TargetCount:          cfg.N,
 			DesiredPositionCount: cfg.N,
-			DesiredTotalLayers:  100,
-			MaxLayersPerStock:   int(cfg.MaxWeight * 100),
-			AllowNewAdds:        true,
-			MarketScopeKey:      "all",
-			MaxReplaceCount:     cfg.N,
+			DesiredTotalLayers:   100,
+			MaxLayersPerStock:    int(cfg.MaxWeight * 100),
+			AllowNewAdds:         true,
+			MarketScopeKey:       "all",
+			MaxReplaceCount:      cfg.N,
 		},
 		MarketState:    state,
 		StrengthDate:   latest,
@@ -1076,4 +1095,3 @@ func (s *PortfolioService) createQualityGrowthBacktest(
 		OK: true, RunID: runID, Metrics: metrics, Message: "质量成长回测完成",
 	}, nil
 }
-
