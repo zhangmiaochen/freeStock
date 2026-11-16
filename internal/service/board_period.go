@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"sort"
+	"strings"
 	"time"
 
 	"freestock/internal/stockdb"
@@ -76,8 +78,27 @@ const (
 	// 超时后不再等：GetBoardQuotes 会把 periodErr 变成 PeriodNotice，
 	// 界面照常显示**当日行情**，只是没有区间列 —— 比一直转圈、
 	// 最后被 HTTP 层掐断（前端 "Failed to fetch"）好得多。
-	boardPeriodBudget = 45 * time.Second
+	boardPeriodDefaultBudget = 45 * time.Second
 )
+
+// boardPeriodBudget 返回板块区间取数的预算，可用环境变量覆盖。
+//
+// 为什么要可调：数据湖在 NAS/机械盘上、或 cne 正在写同一批分区时，
+// 一次区间回看可能远超 45 秒。此时页面会"永远显示不出区间列"——
+// 每次都撞预算。留一个环境变量（FREESTOCK_BOARD_PERIOD_BUDGET=3m）
+// 比改代码重新构建现实得多。
+func boardPeriodBudget() time.Duration {
+	raw := strings.TrimSpace(os.Getenv("FREESTOCK_BOARD_PERIOD_BUDGET"))
+	if raw == "" {
+		return boardPeriodDefaultBudget
+	}
+	if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+		return d
+	}
+	slog.Warn("FREESTOCK_BOARD_PERIOD_BUDGET 无法解析（需形如 90s / 3m），用默认值",
+		"value", raw, "default", boardPeriodDefaultBudget)
+	return boardPeriodDefaultBudget
+}
 
 // NormalizeBoardPeriods 把界面传来的周期列表规范化：丢弃当日（<2）、升序、去重、限幅。
 //
@@ -274,7 +295,7 @@ func (s *StockService) periodClosesLocked(periods []int, tradeDate int) (*boardP
 	// NAS 上、尤其 cne 正在写同一批分区时，这一步可能远超页面能等的时长。
 	// 超时就放弃区间列（界面会显示 PeriodNotice + 当日行情），
 	// 而不是让整页一直转圈或被 HTTP 层掐断。
-	ctx, cancel := context.WithTimeout(context.Background(), boardPeriodBudget)
+	ctx, cancel := context.WithTimeout(context.Background(), boardPeriodBudget())
 	defer cancel()
 
 	// ---- 1. 交易日历 ----

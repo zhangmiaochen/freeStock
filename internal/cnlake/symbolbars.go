@@ -452,13 +452,23 @@ func (c *SymbolBarsCache) bucketize(files []string, dir string) error {
 		go func() {
 			defer wg.Done()
 			for path := range jobs {
+				// ⚠ 出错时**不能 return**：jobs 是无缓冲的，主循环还在发；
+				// 若所有 worker 都退出，发送方会永久阻塞（缓存构建从此挂死，
+				// 而且没有任何报错）。这里改成"记下首个错误、继续排空"：
+				// 后面每个文件只做一次判空跳过，不再读盘。
+				mu.Lock()
+				failed := firstErr != nil
+				mu.Unlock()
+				if failed {
+					continue
+				}
 				if err := readOne(path); err != nil {
 					mu.Lock()
 					if firstErr == nil {
 						firstErr = err
 					}
 					mu.Unlock()
-					return
+					continue
 				}
 				mu.Lock()
 				done++
@@ -471,12 +481,6 @@ func (c *SymbolBarsCache) bucketize(files []string, dir string) error {
 		}()
 	}
 	for _, path := range files {
-		mu.Lock()
-		stop := firstErr != nil
-		mu.Unlock()
-		if stop {
-			break
-		}
 		jobs <- path
 	}
 	close(jobs)

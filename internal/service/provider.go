@@ -632,7 +632,11 @@ func (p *lakeProvider) triggerSymbolBuild() {
 	if !cache.AcquireBuild() {
 		return
 	}
-	go func() {
+	// ⚠ 用 goSafe 而不是裸 go：这个任务要扫几千个 parquet 分区、写几百万行，
+	// 是进程里最重的一条后台路径。裸 goroutine 里一旦 panic，Go 会**终止整个
+	// 进程**（net/http 只能 recover 它自己调用的 handler），表现就是
+	// "所有页面突然空响应 + 容器重启"。
+	goSafe("symbolBarsBuild", func() {
 		defer cache.ReleaseBuild()
 		began := time.Now()
 		manifest, err := cache.Build(p.lake)
@@ -656,7 +660,7 @@ func (p *lakeProvider) triggerSymbolBuild() {
 			"latest", manifest.LatestDate, "sourceThrough", manifest.SourceThrough,
 			"sourceFiles", manifest.SourceFiles,
 			"elapsed", time.Since(began).Round(time.Millisecond).String())
-	}()
+	})
 }
 
 // InvalidateSymbolBars 让缓存立刻失效并触发一次重建。

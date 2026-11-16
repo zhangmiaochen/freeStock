@@ -545,6 +545,10 @@ func probeLakeReadable(lake *cnlake.Lake) (string, bool) {
 	}
 
 	// 抽样两三只，确认 daily_bars 真能解析出来（这一步才会暴露权限/半截文件）
+	//
+	// ⚠ 这里**直接读湖**，不要走 provider.LatestQuotes：
+	// 那条路径会触发「按股票日线缓存」的重建（几分钟的重活），
+	// 让"点一下测试连通性"变成"后台开始跑重活" —— 不是诊断该有的副作用。
 	sample := make([]string, 0, 3)
 	for _, list := range codes {
 		for _, code := range list {
@@ -557,18 +561,19 @@ func probeLakeReadable(lake *cnlake.Lake) (string, bool) {
 			break
 		}
 	}
-	quotes, err := provider.LatestQuotes(ctx, sample, tradeDate)
+	day := int64(tradeDate)
+	rows, err := lake.DailyBarsInRange(sample, day, day)
 	if err != nil {
 		return fmt.Sprintf("最新交易日 %d，标的 %d 只，但抽样读日线失败：%v",
 			tradeDate, total, err), false
 	}
-	if len(quotes) == 0 {
+	if len(rows) == 0 {
 		return fmt.Sprintf("最新交易日 %d（%d 只标的），但抽样 %d 只都没读到行情 —— "+
 			"日线分区可能还没写到这一天，或文件正在被 cne 写入",
 			tradeDate, total, len(sample)), false
 	}
-	return fmt.Sprintf("最新交易日 %d，标的 %d 只，抽样 %d 只取到 %d 只行情",
-		tradeDate, total, len(sample), len(quotes)), true
+	return fmt.Sprintf("最新交易日 %d，标的 %d 只，抽样 %d 只取到 %d 行日线",
+		tradeDate, total, len(sample), len(rows)), true
 }
 
 // lakeCanServeQuotes 判断数据湖能不能当行情源用。
