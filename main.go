@@ -114,28 +114,30 @@ func serverPort() int {
 	return 8080
 }
 
-// serverWriteTimeout 是 HTTP 响应写超时（0 = 不限制）。
+// serverWriteTimeout 是 HTTP 响应写超时。
 //
-// wails 默认 30s，而这个应用"首次加载要扫数据湖"动辄几十秒到几分钟，
-// 超时后 net/http 会掐断连接，前端只能看到 "Failed to fetch"，
-// 且服务端的活还在继续跑 —— 症状极具误导性。
+// ⚠ **不能返回 0**：wails 会把 0 替换成它自己的 30 秒默认值
+// （application_server.go 里 `if writeTimeout == 0 { ... 30s }`）。
+// 传 0 等于什么都没改，而且日志还会骗你说"不限制"。
 //
-// 所以默认**不限制**（返回 0），需要时用
-// FREESTOCK_SERVER_WRITE_TIMEOUT=90s 之类的值显式收紧。
+// 默认 30 分钟：覆盖最慢的冷启动（扫数据湖），同时给卡死的请求一个上限。
+// 需要收紧时用 FREESTOCK_SERVER_WRITE_TIMEOUT=90s 这类值覆盖。
 func serverWriteTimeout() time.Duration {
+	const fallback = 30 * time.Minute
+
 	raw := strings.TrimSpace(os.Getenv("FREESTOCK_SERVER_WRITE_TIMEOUT"))
 	if raw == "" {
-		return 0
-	}
-	if raw == "0" {
-		return 0
+		// 一定要打出来：这条日志是"是否为新构建"的可靠标记，
+		// 也是排查"请求被掐断"时第一个要看的事实。
+		log.Printf("[FreeStock] HTTP 写超时 = %s（默认，可用 FREESTOCK_SERVER_WRITE_TIMEOUT 覆盖）", fallback)
+		return fallback
 	}
 	if d, err := time.ParseDuration(raw); err == nil && d > 0 {
 		log.Printf("[FreeStock] HTTP 写超时 = %s", d)
 		return d
 	}
-	log.Printf("[FreeStock] FREESTOCK_SERVER_WRITE_TIMEOUT=%q 无法解析，按不限制处理", raw)
-	return 0
+	log.Printf("[FreeStock] FREESTOCK_SERVER_WRITE_TIMEOUT=%q 无法解析（必须为正数），用默认 %s", raw, fallback)
+	return fallback
 }
 
 // logFrontendBundle 在启动日志里报出**这次运行的是哪一版前端**。
@@ -251,16 +253,25 @@ func main() {
 		Server: application.ServerOptions{
 			Host: serverHost(),
 			Port: serverPort(),
-			// ⚠ **必须显式设置 WriteTimeout**。
+			// ⚠⚠ **写超时是这套部署里最坑的一个值**，说明写在这里：
 			//
-			// wails 的默认值是 **30 秒**：请求处理超过 30s，net/http 会直接
-			// 掐断连接 —— 浏览器那边只能报 "Failed to fetch"（网络层错误），
-			// 而 Go 里的活还在继续跑。表现为"页面转圈很久 → 报错 → CPU/内存
-			// 先升后降"，极难判断到底发生了什么。
+			// wails v3.1.0 的 application_server.go 里是这么处理的：
 			//
-			// 这个应用有"首次加载要扫数据湖"的重活（冷启动几十秒到几分钟），
-			// 30 秒的上限是必然踩到的。默认改成不限制，由各个取数函数自己的
-			// 超时（15 分钟）+ 前端重试来兜底。
+			//	writeTimeout := opts.WriteTimeout
+			//	if writeTimeout == 0 {
+			//	    writeTimeout = 30 * time.Second     // ← 传 0 会被换成 30 秒！
+			//	}
+			//
+			// 也就是说 **`WriteTimeout: 0` 不是"不限制"，而是"30 秒"**。
+			// 我上一轮就是踩了这个坑：以为传 0 关掉了超时，实际什么都没改。
+			// 于是任何超过 30s 的请求（冷启动扫数据湖、板块区间回看）都会被
+			// net/http 掐断连接 —— 浏览器看到的是 ERR_EMPTY_RESPONSE /
+			// Failed to fetch（一个字节都没收到），而 Go 里的计算还在继续跑，
+			// 表现成"CPU 先升后降、时好时坏"。
+			//
+			// 正确做法是传一个**非 0 的大值**（传负数也能绕过判断，但可读性差）。
+			// 这里默认 30 分钟，足够覆盖最慢的冷启动，又不至于让一个卡住的
+			// 请求永久占着连接。
 			WriteTimeout: serverWriteTimeout(),
 			// 读超时保持较短：它只覆盖"读完请求头/体"，与业务耗时无关。
 			ReadTimeout: 60 * time.Second,
