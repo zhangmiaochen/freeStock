@@ -390,7 +390,12 @@ func (s *PortfolioService) DeletePortfolio(id string) error {
 }
 
 // GetPortfolioDetail 返回组合详情：持仓（含现价与盈亏）、流水、汇总。
-func (s *PortfolioService) GetPortfolioDetail(id string) (*portfolio.Detail, error) {
+func (s *PortfolioService) GetPortfolioDetail(id string) (out *portfolio.Detail, err error) {
+	// 组合页挂载必经此路：它内部会做一次性初始化（修正成本价、补股数），
+	// 还会为持仓取价。panic 会让 net/http 直接关连接 —— 前端只看到
+	// "加载不出来"，日志里连 Binding call complete 都没有。这里兜住并打堆栈。
+	defer recoverAsError("GetPortfolioDetail", &err)
+
 	// 一次性修正：早期"一键应用"把复权价记成了成本价，这里改成原始价
 	s.fixEntryOnce.Do(func() { s.fixAdjustedEntryPrices() })
 	store, err := s.db()
@@ -413,7 +418,8 @@ func (s *PortfolioService) GetPortfolioDetail(id string) (*portfolio.Detail, err
 	// 的排序结果，SQL 里是 `position_weight DESC, entry_date ASC, ts_code ASC`。
 	// 这里再排一次会把 `entry_date` 那一维丢掉 ——
 	// 同权重、不同建仓日的持仓顺序将与原版不同。
-	return &detail, nil
+	out = &detail
+	return out, nil
 }
 
 // GetPortfolioOverview 返回所有组合的总览统计。
