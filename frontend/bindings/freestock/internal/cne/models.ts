@@ -716,6 +716,13 @@ export class TaskInfo {
     "nextRun": string;
 
     /**
+     * ConfiguredTime 是**配置里**设定的时间（HH:MM），与任务是否启用无关。
+     * Windows 侧暂时留空（schtasks 对禁用任务只报 N/A，拿不到 StartBoundary），
+     * 保留字段是为了两个平台的 TaskInfo 完全一致、前端不用分叉。
+     */
+    "configuredTime"?: string;
+
+    /**
      * Status 是 Ready / Running / Disabled 之类
      */
     "status": string;

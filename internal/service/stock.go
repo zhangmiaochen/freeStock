@@ -4,7 +4,6 @@ package service
 import (
 	"context"
 	"crypto/sha256"
-	"errors"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -649,28 +648,6 @@ func (s *StockService) ClearCache() {
 	s.tradeDateMu.Unlock()
 }
 
-// lockUniverse 在预算内尝试拿到 universe 锁；超时返回 false（不排队干等）。
-func (s *StockService) lockUniverse(budget time.Duration) bool {
-	deadline := time.Now().Add(budget)
-	for {
-		if s.universeMu.TryLock() {
-			return true
-		}
-		if time.Now().After(deadline) {
-			return false
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-}
-
-// universeWaitBudget 是"等别人把全量快照建完"的最长时间。
-//
-// 启动预热会先占着这把锁跑完整个构建（数据湖上可能几十秒到几分钟）。
-// 页面请求如果直接排队干等，就会一直转圈，最后被 HTTP 层掐断连接
-// （表现是 "Failed to fetch"）。所以这里只等一小会儿，
-// 超了就返回一个能看懂的"正在准备"，让前端过几秒重试。
-const universeWaitBudget = 20 * time.Second
-
 // universeQuoteBudget 是"取全量行情"这一步的预算。
 //
 // 超过它就先返回部分结果：页面能正常渲染，缺行情的那些显示「—」，
@@ -678,14 +655,19 @@ const universeWaitBudget = 20 * time.Second
 // 60s 是可接受的折中 —— 关键是**不要无限期挂着**。
 const universeQuoteBudget = 60 * time.Second
 
-// errUniverseBusy 表示"快照正在构建，先别等"。
-var errUniverseBusy = errors.New("数据正在准备中（首次加载较慢，或 cne 正在更新数据），请稍等几秒后重试")
-
 // GetStockUniverse 返回全量股票列表（含最新行情），refresh=true 时强制刷新。
+//
+// ⚠ 这里的锁**必须老老实实等**，不能"等不到就返回错误"。
+//
+// 原因是 wails 会把 Go 方法返回的 error 映射成 **HTTP 422**，
+// 而前端拿到的是一个失败的 binding 调用 —— 页面直接白屏/报错，
+// 用户看到的是"打不开"，完全无法据此判断"还在准备数据"。
+//
+// 请求超时这边已经解决（ServerOptions.WriteTimeout 默认不限制），
+// 所以正确做法是：等构建完成，然后返回**真实数据**。
+// 首次冷启动确实要等几十秒到几分钟，前端显示加载中是对的。
 func (s *StockService) GetStockUniverse(refresh bool) (*StockUniverse, error) {
-	if !s.lockUniverse(universeWaitBudget) {
-		return nil, errUniverseBusy
-	}
+	s.universeMu.Lock()
 	defer s.universeMu.Unlock()
 
 	if !refresh && s.universe != nil && time.Since(s.universeAt) < universeTTL {

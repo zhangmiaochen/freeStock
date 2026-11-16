@@ -5,6 +5,26 @@
     <link rel="icon" type="image/png" href="/wails.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>FreeStock · A 股数据工具</title>
+    <script>
+      // ⚠ 给 Wails 运行时打底，**必须放在任何 bundle 之前**。
+      //
+      // 前端依赖 @wailsio/runtime，它里面有些代码是
+      //   window._wails.environment.Debug        ← 没有空判断
+      // 而在 server 模式（容器/Linux）下，`environment` 是由 wails 的
+      // 资源服务器在返回 index.html 时注入的。一旦那次注入没生效
+      // （例如运行时就绪顺序、或页面被代理缓存），这里就会抛
+      //   TypeError: Cannot read properties of undefined (reading 'Debug')
+      // 整个应用白屏 —— 而这跟"数据加载失败"毫无关系，极难定位。
+      //
+      // 先补一份默认值：真值稍后由 wails 注入覆盖；覆盖不了也只是
+      // 拿不到 OS/Arch 这类提示信息，不会崩。
+      window._wails = window._wails || {};
+      window._wails.environment = window._wails.environment || {
+        OS: "linux",
+        Arch: "amd64",
+        Debug: false,
+      };
+    </script>
   </head>
   <body>
     <div id="app"></div>
