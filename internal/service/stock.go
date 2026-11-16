@@ -666,7 +666,10 @@ const universeQuoteBudget = 60 * time.Second
 // 请求超时这边已经解决（ServerOptions.WriteTimeout 默认不限制），
 // 所以正确做法是：等构建完成，然后返回**真实数据**。
 // 首次冷启动确实要等几十秒到几分钟，前端显示加载中是对的。
-func (s *StockService) GetStockUniverse(refresh bool) (*StockUniverse, error) {
+func (s *StockService) GetStockUniverse(refresh bool) (out *StockUniverse, err error) {
+	// panic 会变成可显示的 error（否则前端只看到 ERR_EMPTY_RESPONSE）
+	defer recoverAsError("GetStockUniverse", &err)
+
 	s.universeMu.Lock()
 	defer s.universeMu.Unlock()
 

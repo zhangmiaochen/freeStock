@@ -111,7 +111,10 @@ type BoardQuoteResult struct {
 //
 // limit > 0 时只返回涨跌幅绝对值最大的前 limit 个（概念板块有近千个，
 // 全量返回对界面没意义），但统计数字仍按全量计算。
-func (s *StockService) GetBoardQuotes(category string, periodDays []int, limit int) (*BoardQuoteResult, error) {
+func (s *StockService) GetBoardQuotes(category string, periodDays []int, limit int) (out *BoardQuoteResult, err error) {
+	// panic 会变成可显示的 error（否则前端只看到 ERR_EMPTY_RESPONSE）
+	defer recoverAsError("GetBoardQuotes", &err)
+
 	started := time.Now()
 	periods := NormalizeBoardPeriods(periodDays)
 
