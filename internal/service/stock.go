@@ -481,6 +481,24 @@ func (s *StockService) testLake(rawRoot string) SourceStatus {
 	lake := cnlake.Open(root)
 	status := SourceStatus{URL: lake.Root(), Kind: config.KindCnLake}
 
+	// ⚠ 先看"是不是正在重建缓存"。
+	//
+	// 重建在 NAS 上会长时间占满磁盘 IO，期间**任何**读湖操作都会慢到像卡住。
+	// 这时候去探测只会再添一次超时，而且给不出任何有用信息。
+	// 更关键的是：构建进度本身就在证明"数据湖是能读的"——它正在逐个文件读。
+	if done, total, building := cnlake.SymbolBuildProgress(); building {
+		status.OK = done > 0
+		if done > 0 {
+			status.Message = fmt.Sprintf(
+				"数据湖可读（按股票缓存正在构建 %d/%d，磁盘正忙）。"+
+					"构建期间股票列表/K 线会明显变慢，构建完成后才恢复；"+
+					"此时不需要再测连通性", done, total)
+		} else {
+			status.Message = "按股票缓存刚开始构建（磁盘正忙），请过一会儿再测"
+		}
+		return status
+	}
+
 	if !lake.Available() {
 		status.Message = "没有找到数据湖（需要包含 curated 子目录）。请设置数据湖根目录，或设置环境变量 FREESTOCK_CNLAKE。"
 		return status
@@ -500,7 +518,12 @@ func (s *StockService) testLake(rawRoot string) SourceStatus {
 		// ⚠ 只检查"目录结构"是不够的：容器里路径存在、但**读不出 parquet**
 		//（没挂载对、权限不对、文件正在被 cne 写）时，页面照样"数据读取失败"，
 		// 而这里会显示"可用"，非常误导。所以再跑一次真实的端到端探测。
-		if probe, ok := probeLakeReadable(lake); ok {
+		//
+		// ⚠⚠ 探测必须有**硬超时**：如果 /vol2 这类挂载点已经僵死（NFS/SMB
+		// 掉线、磁盘掉盘），底层系统调用会一直阻塞，ctx 根本管不到它。
+		// 那样"测试连通性"就会像卡死一样永远不返回 —— 用户连一句报错都拿不到。
+		probe, ok := probeWithHardTimeout(lake)
+		if ok {
 			status.Message += "；" + probe
 		} else {
 			status.OK = false
@@ -512,6 +535,37 @@ func (s *StockService) testLake(rawRoot string) SourceStatus {
 		status.Message = fmt.Sprintf("数据湖可用，共 %d 个数据集；缺少 instruments / daily_bars，暂时只能作为财务数据来源", len(datasets))
 	}
 	return status
+}
+
+// lakeProbeHardTimeout 是探测的墙钟上限。
+//
+// 比 probeLakeReadable 内部的 ctx 预算略长：正常慢一点能跑完，真卡死就立刻报。
+const lakeProbeHardTimeout = 25 * time.Second
+
+// probeWithHardTimeout 在**墙钟**层面兜住探测，避免僵死挂载让请求永不返回。
+//
+// 卡住的 goroutine 无法被强行取消（阻塞在系统调用里），会一直挂着；
+// 这是有意的取舍：一个泄漏的 goroutine 换来"界面一定给出结论"。
+// 重启容器即可清理，而用户不必再对着转圈猜。
+func probeWithHardTimeout(lake *cnlake.Lake) (string, bool) {
+	type result struct {
+		text string
+		ok   bool
+	}
+	ch := make(chan result, 1)
+	go func() {
+		text, ok := probeLakeReadable(lake)
+		ch <- result{text: text, ok: ok}
+	}()
+
+	select {
+	case r := <-ch:
+		return r.text, r.ok
+	case <-time.After(lakeProbeHardTimeout):
+		return fmt.Sprintf("探测 %s 内没有返回：数据湖路径可能挂载僵死或磁盘无响应。"+
+			"请在容器里执行 `timeout 10 ls <湖根>` 确认——若它也卡住，问题在挂载/磁盘，不在程序",
+			lakeProbeHardTimeout), false
+	}
 }
 
 // probeLakeReadable 真的去读一次日线，验证"路径存在"之外的可用性。

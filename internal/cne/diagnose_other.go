@@ -4,6 +4,7 @@ package cne
 
 import (
 	"fmt"
+	"freestock/internal/cnlake"
 	"freestock/internal/rtinfo"
 	"os"
 	"strings"
@@ -69,6 +70,21 @@ func Diagnose() string {
 	p("=== 内存（容器里响应中断多半与它有关）===")
 	for _, line := range strings.Split(rtinfo.Describe(), "\n") {
 		p("%s", line)
+	}
+
+	// 按股票缓存的构建进度：它跑起来会占满磁盘 IO，期间所有读湖操作都变慢。
+	// 用户看到"进度在涨"就能确认是在干活，而不是卡死。
+	p("")
+	if done, total, building := cnlake.SymbolBuildProgress(); building {
+		p("=== 按股票缓存 ===")
+		if total > 0 {
+			p("正在构建：%d/%d（磁盘正忙，构建完成后 K 线/股票列表才快）", done, total)
+		} else {
+			p("正在准备构建（磁盘正忙）")
+		}
+	} else {
+		p("=== 按股票缓存 ===")
+		p("当前不在构建（就绪时 K 线为毫秒级）")
 	}
 
 	p("")

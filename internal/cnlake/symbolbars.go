@@ -23,6 +23,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/parquet-go/parquet-go"
@@ -71,6 +72,22 @@ var buildGate = struct {
 	inflight map[string]struct{}
 }{inflight: map[string]struct{}{}}
 
+// symbolBuildProgress 记录"当前是否有重建在跑、跑到哪了"。
+//
+// 为什么需要进程级可见：重建会在 NAS 上长时间占满磁盘 IO，期间**任何**读湖
+// 操作都会明显变慢甚至像是卡住。有了这组数字，界面/诊断可以立刻回答
+// "是在忙，还是路径有问题"，而不是让人对着转圈猜。
+var symbolBuildProgress struct {
+	building atomic.Bool
+	done     atomic.Int64
+	total    atomic.Int64
+}
+
+// SymbolBuildProgress 返回按股票缓存的构建进度（done, total, 是否在构建）。
+func SymbolBuildProgress() (int64, int64, bool) {
+	return symbolBuildProgress.done.Load(), symbolBuildProgress.total.Load(), symbolBuildProgress.building.Load()
+}
+
 // AcquireBuild 尝试占用"重建中"标记；返回 false 表示已有重建在跑，直接放弃。
 func (c *SymbolBarsCache) AcquireBuild() bool {
 	if c == nil {
@@ -82,6 +99,9 @@ func (c *SymbolBarsCache) AcquireBuild() bool {
 		return false
 	}
 	buildGate.inflight[c.root] = struct{}{}
+	symbolBuildProgress.building.Store(true)
+	symbolBuildProgress.done.Store(0)
+	symbolBuildProgress.total.Store(0)
 	return true
 }
 
@@ -93,6 +113,7 @@ func (c *SymbolBarsCache) ReleaseBuild() {
 	buildGate.Lock()
 	delete(buildGate.inflight, c.root)
 	buildGate.Unlock()
+	symbolBuildProgress.building.Store(false)
 }
 
 // NewSymbolBarsCache 在 root 下建立缓存句柄；root 为空时返回 nil（表示不用缓存）。
@@ -474,6 +495,9 @@ func (c *SymbolBarsCache) bucketize(files []string, dir string) error {
 				done++
 				n := done
 				mu.Unlock()
+				// 进度对内外都可见：界面/诊断靠它区分"磁盘忙"与"路径不对"。
+				symbolBuildProgress.done.Store(int64(n))
+				symbolBuildProgress.total.Store(int64(len(files)))
 				if n%progressEvery == 0 {
 					slog.Info("按股票缓存：分桶进度", "done", n, "total", len(files))
 				}
