@@ -411,6 +411,8 @@ type lakeProvider struct {
 	// 1.5GB 内存（实测 11.9s）——而 K 线只需要一只股票的 1396 行。
 	symbolMu   sync.Mutex
 	symbolBars *cnlake.SymbolBarsCache
+	// noSymbolRebuild 关闭"自动后台重建"（仅测试使用，见 DisableSymbolBarsRebuild）
+	noSymbolRebuild bool
 	// 数据湖当前水位（最后一个有日线的交易日）缓存
 	symbolLatest   int64
 	symbolLatestAt time.Time
@@ -518,6 +520,23 @@ const symbolBuildRetryDelay = 10 * time.Minute
 // 就重建"会退化成一直重建。冷却期内查询走直读（慢但对），数据不会因此变旧。
 const symbolBuildCooldown = 2 * time.Minute
 
+// symbolBuildDisabled 报告是否禁用了"自动后台重建"（仅测试会打开）。
+func (p *lakeProvider) symbolBuildDisabled() bool {
+	p.symbolMu.Lock()
+	defer p.symbolMu.Unlock()
+	return p.noSymbolRebuild
+}
+
+// DisableSymbolBarsRebuild 关闭"发现缓存过期就后台重建"。
+//
+// ⚠ **仅供测试**：用于精确控制"缓存内容 vs 源文件"的先后关系。
+// 生产路径不要调用 —— 关掉之后过期缓存只能靠直读兜底（慢，但结果仍然正确）。
+func (p *lakeProvider) DisableSymbolBarsRebuild() {
+	p.symbolMu.Lock()
+	p.noSymbolRebuild = true
+	p.symbolMu.Unlock()
+}
+
 // symbolCacheState 判断缓存当前能不能用、以及是不是已经覆盖到最新。
 //
 // 返回：
@@ -609,6 +628,13 @@ func (p *lakeProvider) symbolCacheReady() (cnlake.SymbolBarsManifest, bool) {
 func (p *lakeProvider) triggerSymbolBuild() {
 	cache := p.symbolCache()
 	if cache == nil {
+		return
+	}
+
+	// 测试会关掉它：有些用例要精确控制"缓存内容 vs 源文件"的先后关系，
+	// 后台重建一旦在中间完成，用例的前提就不成立了（它本来测的是
+	// "过期缓存不能被信任"，而重建恰好合法地修好了过期）。
+	if p.symbolBuildDisabled() {
 		return
 	}
 

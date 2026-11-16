@@ -143,6 +143,9 @@ func TestKlineHistorySeesRewrittenSource(t *testing.T) {
 		t.Fatalf("建缓存失败：%v", err)
 	}
 	provider.SetSymbolBarsCache(cache)
+	// 关掉后台重建：本用例要验证"过期缓存不能被信任"，
+	// 而自动重建会在重写后合法地把缓存修好，破坏用例前提（且有竞态）。
+	provider.DisableSymbolBarsRebuild()
 
 	before, err := provider.KlineHistory(ctx, "600519", 19900101, 20261231)
 	if err != nil {
