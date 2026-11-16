@@ -250,7 +250,7 @@ func (l *localScheduler) start() {
 	}
 	l.started = true
 	l.mu.Unlock()
-	go l.loop()
+	goSafe("localScheduler", l.loop)
 }
 
 // stop 停掉 ticker（满足 scheduleBackend 接口）。

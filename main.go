@@ -192,6 +192,10 @@ func main() {
 	// 服务层用 slog.Info/Error 打点，这里设为默认 logger，日志才能进同一个文件
 	slog.SetDefault(logger)
 
+	// 容器里按 cgroup 上限设 Go 软内存上限：接近上限时主动 GC，
+	// 而不是先被内核 OOM kill（那个表现为"响应截断/空响应/时好时坏"）。
+	applyContainerMemoryLimit()
+
 	logFrontendBundle()
 
 	store := config.NewStore()

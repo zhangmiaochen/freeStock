@@ -234,7 +234,7 @@ func (s *emailScheduler) startOnce() {
 	s.running = true
 	s.mu.Unlock()
 
-	go s.loop()
+	goSafe("emailLoop", s.loop)
 }
 
 // loop 每 30 秒看一次"到点了吗"。

@@ -14,7 +14,7 @@ import (
 // 进度事件能正常发到前端（`emit` 自带 nil 判断，最坏情况也只是丢一条事件）。
 // **不阻塞启动** —— 只是起一个后台协程，失败也只记日志。
 func (s *StockService) ServiceStartup(context.Context, application.ServiceOptions) error {
-	go s.warmUp()
+	goSafe("warmUp", s.warmUp)
 	return nil
 }
 

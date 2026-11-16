@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -1162,6 +1163,15 @@ func runWorkers(ctx context.Context, workers, total int, fn func(int)) {
 	for w := 0; w < workers; w++ {
 		go func() {
 			defer wg.Done()
+			// worker 里的 panic 必须兜住：这个 goroutine 不在 handler 调用链上，
+			// net/http recover 不到，panic 会直接终止整个进程
+			//（表现就是"接口偶发空响应、时好时坏"）。
+			defer func() {
+				if r := recover(); r != nil {
+					slog.Error("worker panic（已兜住）",
+						"panic", fmt.Sprint(r), "stack", string(debug.Stack()))
+				}
+			}()
 			for {
 				index := int(next.Add(1)) - 1
 				if index >= total || ctx.Err() != nil {
