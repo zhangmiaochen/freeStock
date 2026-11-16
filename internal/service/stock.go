@@ -2,9 +2,9 @@
 package service
 
 import (
-	"errors"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -662,6 +662,7 @@ func (s *StockService) lockUniverse(budget time.Duration) bool {
 		time.Sleep(100 * time.Millisecond)
 	}
 }
+
 // universeWaitBudget 是"等别人把全量快照建完"的最长时间。
 //
 // 启动预热会先占着这把锁跑完整个构建（数据湖上可能几十秒到几分钟）。

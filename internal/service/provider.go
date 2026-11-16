@@ -1,8 +1,8 @@
 package service
 
 import (
-	"errors"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -1673,6 +1673,19 @@ func (p *lakeProvider) LatestQuotes(ctx context.Context, codes []string, date in
 	// 所以改用**结果缓存**：同一天里"历史最后几根 K 线"不会变，
 	// 缓住之后 10 分钟后重建全量列表（universeTTL）不必再扫一遍。
 	if len(missed) > 0 {
+		// ⚠ 这一步是"可选增强"：只为退市/长期停牌的老标的补最后一根 K 线。
+		// 它要扫**整个** daily_bars（几千个分区），在 NAS 上、尤其 cne 正在写
+		// 同一批分区时可能要几十秒到几分钟 —— 而这期间页面只能干等。
+		//
+		// 所以：按股票缓存还没就绪、且缺行情的代码很多时，**先跳过**，
+		// 把已经拿到的行情返回出去（缺价的显示「—」），
+		// 让后台预热把缓存建好，下次刷新自然补齐。
+		if _, cacheReady := p.symbolCacheReady(); !cacheReady && len(missed) >= retrySkipThreshold {
+			slog.Info("跳过不限起点补抓（按股票缓存未就绪）",
+				"missing", len(missed), "threshold", retrySkipThreshold,
+				"hint", "预热完成后这些标的会自动补上，或稍后刷新")
+			return out, nil
+		}
 		filled, retryErr := p.retryQuotes(ctx, missed, date)
 		if retryErr != nil {
 			if isCanceled(retryErr) {
@@ -1688,6 +1701,13 @@ func (p *lakeProvider) LatestQuotes(ctx context.Context, codes []string, date in
 	}
 	return out, nil
 }
+
+// retrySkipThreshold 是"缺行情的代码多到这个数就先跳过补抓"的阈值。
+//
+// 实测一只票的补抓成本极低（按股票缓存 2ms 全答完），但**扫全表**那条路
+// 是几千个分区的固定成本。缺的代码越多，越说明是一批老标的在拖时间，
+// 越不值得为了它们让整页等几分钟。
+const retrySkipThreshold = 300
 
 // isCanceled 判断错误是否来自 ctx 超时/取消。
 //

@@ -301,30 +301,55 @@ func latestSnapshot[T any](rows []T, entity func(T) string, asOf func(T) int32, 
 // 类型化读取
 // ---------------------------------------------------------------------------
 
-// readTyped 按列裁剪读取一组 parquet 文件，keep 为 nil 时全取。
+// readFileGuarded 读一个 parquet 文件，并把**解析期的 panic 转成 error**。
 //
-// **并发读**：数据集的文件数很多（`daily_bars` 上万、`financial_statement_items` 两百多），
-// 而且每读一个文件都要 `os.Open` + 解析 parquet footer —— 串行跑满一核、
-// 磁盘却闲着。这里用有界工作池并发读。
-//
-// ⚠ **结果按文件顺序合并**，与串行版本逐字节一致 ——
-// 有些数据集（如 `trading_calendar`）依赖顺序，不能让并发打乱它。
+// 为什么必须兜住：cne 正在更新数据时，分区文件可能只写了一半，
+// 而 parquet-go 遇到截断/损坏的 footer 不一定返回 error —— 有些路径会 panic。
+// Go 里**任何 goroutine panic 都会终止整个进程**，表现就是：
+// 页面请求的连接被重置（前端 "Failed to fetch"）、容器重启、内存回落。
+// 一个坏文件不该带走整个应用。
+func readFileGuarded[T any](path string, keep func(*T) bool) (rows []T, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("解析 %s 失败（文件可能正在被 cne 写入）：%v", filepath.Base(path), r)
+		}
+	}()
+	handle, err := openParquet(path)
+	if err != nil {
+		return nil, err
+	}
+	defer handle.Close()
+	out := make([]T, 0, 256)
+	if err := readTypedFile(handle, keep, &out); err != nil {
+		return out, err
+	}
+	return out, nil
+}
+
+// readFileEachGuarded 同 readFileGuarded，但逐行回调。
+func readFileEachGuarded[T any](path string, keep func(*T) bool, each func(*T)) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("解析 %s 失败（文件可能正在被 cne 写入）：%v", filepath.Base(path), r)
+		}
+	}()
+	handle, err := openParquet(path)
+	if err != nil {
+		return err
+	}
+	defer handle.Close()
+	return readTypedFileEach(handle, keep, each)
+}
+
+// readTyped 并发读多个文件，任一条解析 panic 都只记为该文件的错误。
 func readTyped[T any](files []string, keep func(*T) bool) ([]T, error) {
 	if len(files) == 0 {
 		return nil, nil
 	}
 	// 单文件没必要起协程
 	if len(files) == 1 {
-		out := make([]T, 0, 1024)
-		handle, err := openParquet(files[0])
-		if err != nil {
-			return out, err
-		}
-		defer handle.Close()
-		if err := readTypedFile(handle, keep, &out); err != nil {
-			return out, err
-		}
-		return out, nil
+		rows, err := readFileGuarded(files[0], keep)
+		return rows, err
 	}
 
 	// 每个文件写自己的槽位，最后按序拼接 —— 不用锁，也不打乱顺序
@@ -338,18 +363,11 @@ func readTyped[T any](files []string, keep func(*T) bool) ([]T, error) {
 		go func() {
 			defer wg.Done()
 			for i := range jobs {
-				handle, err := openParquet(files[i])
+				rows, err := readFileGuarded(files[i], keep)
 				if err != nil {
 					errs[i] = err
 					continue
 				}
-				rows := make([]T, 0, 256)
-				if err := readTypedFile(handle, keep, &rows); err != nil {
-					handle.Close()
-					errs[i] = err
-					continue
-				}
-				handle.Close()
 				perFile[i] = rows
 			}
 		}()
@@ -632,15 +650,11 @@ func (l *Lake) DailyBarsInRangeEach(ctx context.Context, codes []string, startDa
 					errs[i] = ctx.Err()
 					continue
 				}
-				handle, err := openParquet(files[i])
-				if err != nil {
-					errs[i] = err
-					continue
-				}
-				if err := readTypedFileEach(handle, keep, emit); err != nil {
+				// 单个文件解析 panic 只记为该文件的错误，不能带走整个进程
+				//（cne 正在写分区时，可能读到写了一半的 parquet）。
+				if err := readFileEachGuarded(files[i], keep, emit); err != nil {
 					errs[i] = err
 				}
-				handle.Close()
 			}
 		}()
 	}

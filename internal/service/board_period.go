@@ -70,6 +70,13 @@ const (
 	// 取一次全市场五个基准日要好几秒，10 分钟就过期会让每次进板块页都要重新等；
 	// 而交易日一变（`tradeDate` 字段）缓存立刻作废，不会有跨日串味。
 	boardPeriodTTL = 6 * time.Hour
+
+	// boardPeriodBudget 是板块区间行情取数的预算。
+	//
+	// 超时后不再等：GetBoardQuotes 会把 periodErr 变成 PeriodNotice，
+	// 界面照常显示**当日行情**，只是没有区间列 —— 比一直转圈、
+	// 最后被 HTTP 层掐断（前端 "Failed to fetch"）好得多。
+	boardPeriodBudget = 45 * time.Second
 )
 
 // NormalizeBoardPeriods 把界面传来的周期列表规范化：丢弃当日（<2）、升序、去重、限幅。
@@ -263,7 +270,11 @@ func (s *StockService) periodClosesLocked(periods []int, tradeDate int) (*boardP
 	}
 
 	provider, source := s.snapshot()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	// 预算：板块区间要回看一百多个交易日（可能上千个文件）。
+	// NAS 上、尤其 cne 正在写同一批分区时，这一步可能远超页面能等的时长。
+	// 超时就放弃区间列（界面会显示 PeriodNotice + 当日行情），
+	// 而不是让整页一直转圈或被 HTTP 层掐断。
+	ctx, cancel := context.WithTimeout(context.Background(), boardPeriodBudget)
 	defer cancel()
 
 	// ---- 1. 交易日历 ----
