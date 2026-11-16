@@ -481,24 +481,6 @@ func (s *StockService) testLake(rawRoot string) SourceStatus {
 	lake := cnlake.Open(root)
 	status := SourceStatus{URL: lake.Root(), Kind: config.KindCnLake}
 
-	// ⚠ 先看"是不是正在重建缓存"。
-	//
-	// 重建在 NAS 上会长时间占满磁盘 IO，期间**任何**读湖操作都会慢到像卡住。
-	// 这时候去探测只会再添一次超时，而且给不出任何有用信息。
-	// 更关键的是：构建进度本身就在证明"数据湖是能读的"——它正在逐个文件读。
-	if done, total, building := cnlake.SymbolBuildProgress(); building {
-		status.OK = done > 0
-		if done > 0 {
-			status.Message = fmt.Sprintf(
-				"数据湖可读（按股票缓存正在构建 %d/%d，磁盘正忙）。"+
-					"构建期间股票列表/K 线会明显变慢，构建完成后才恢复；"+
-					"此时不需要再测连通性", done, total)
-		} else {
-			status.Message = "按股票缓存刚开始构建（磁盘正忙），请过一会儿再测"
-		}
-		return status
-	}
-
 	if !lake.Available() {
 		status.Message = "没有找到数据湖（需要包含 curated 子目录）。请设置数据湖根目录，或设置环境变量 FREESTOCK_CNLAKE。"
 		return status

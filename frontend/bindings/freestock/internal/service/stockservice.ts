@@ -250,6 +250,16 @@ export function GetScreenOptions(): $CancellablePromise<$models.ScreenOptions | 
 
 /**
  * GetStockUniverse 返回全量股票列表（含最新行情），refresh=true 时强制刷新。
+ * 
+ * ⚠ 这里的锁**必须老老实实等**，不能"等不到就返回错误"。
+ * 
+ * 原因是 wails 会把 Go 方法返回的 error 映射成 **HTTP 422**，
+ * 而前端拿到的是一个失败的 binding 调用 —— 页面直接白屏/报错，
+ * 用户看到的是"打不开"，完全无法据此判断"还在准备数据"。
+ * 
+ * 请求超时这边已经解决（ServerOptions.WriteTimeout 默认不限制），
+ * 所以正确做法是：等构建完成，然后返回**真实数据**。
+ * 首次冷启动确实要等几十秒到几分钟，前端显示加载中是对的。
  */
 export function GetStockUniverse(refresh: boolean): $CancellablePromise<$models.StockUniverse | null> {
     return $Call.ByID(2542377399, refresh).then(($result: any) => {
@@ -401,6 +411,13 @@ export function SetDataSource(kind: string, rawURL: string): $CancellablePromise
 /**
  * TestDataSource 探测某个来源是否可用（不改变当前数据源）。
  * kind 为 config.KindCnLake 时检测数据湖；否则按 HTTP 地址探测 free-stockdb。
+ * TestDataSource 检测某个数据源是否可用（界面上「测试连通性」）。
+ * 
+ * ⚠ 这个方法要**兜 panic**：它自己会去读数据湖（列目录、抽样读日线），
+ * 而这些操作在容器里最容易碰到"路径存在但读不出内容/文件正被写"的情况。
+ * 一旦 panic，net/http 会直接关连接，前端只看到 net::ERR_EMPTY_RESPONSE /
+ * Failed to fetch —— 用户拿不到任何信息，只能来问"连接失败"。
+ * SourceStatus 有 Message 字段，正好把 panic 内容显示出来。
  */
 export function TestDataSource(kind: string, rawURL: string): $CancellablePromise<$models.SourceStatus> {
     return $Call.ByID(2806700859, kind, rawURL).then(($result: any) => {

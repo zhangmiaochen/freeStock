@@ -33,25 +33,13 @@ func (s *StockService) ServiceStartup(context.Context, application.ServiceOption
 func (s *StockService) warmUp() {
 	started := time.Now()
 
-	// ⚠ **顺序是有讲究的：先建「按股票日线缓存」。**
+	// 「按股票」日线缓存放**最后**，且用 defer 保证前面失败也照样建。
 	//
-	// 它是 K 线页能不能秒开的分水岭：缓存就绪时一只股票一个文件（~2ms）；
-	// 没就绪时退回"打开区间内**每一个**日分区"，数据湖越大越慢
-	//（cne 每多回填一年就多 250 个分区）。本机实测这个退化路径 3.97s，
-	// NAS 机械盘 + cne 同时在写时会变成几十秒到几分钟 —— 表现就是
-	// "以前能打开的 K 线页，现在打不开了"。
-	//
-	// 而全量股票列表/板块区间只在首次加载时慢，之后有各自的缓存。
-	// 所以把 K 线的地基放在最前面。
-	if provider, _ := s.snapshot(); provider != nil {
-		if lake, ok := provider.(*lakeProvider); ok {
-			if lake.EnsureSymbolBars() {
-				slog.Info("预热：按股票日线缓存已是最新")
-			} else {
-				slog.Info("预热：按股票日线缓存正在后台重建（期间 K 线会走直读，较慢）")
-			}
-		}
-	}
+	// ⚠ 顺序是有意为之：它要扫全部日分区（用户湖上是 323 个按月的大文件）、
+	// 写几千个股票文件，是进程里最重的后台任务。放在最前面会与首次加载
+	// **抢磁盘**，于是股票列表、组合列表、板块行情一起变慢 ——
+	// 实测就是这样被反馈的（"组合列表加载很久出不来"）。
+	defer s.warmSymbolBars()
 
 	universe, err := s.GetStockUniverse(false)
 	if err != nil {
@@ -83,5 +71,25 @@ func (s *StockService) warmUp() {
 	if _, _, _, err := s.loadMarketIndices(); err == nil {
 		slog.Debug("预热：指数历史就绪")
 	}
+}
 
+// warmSymbolBars 触发（或确认）「按股票」日线派生缓存。
+//
+// 它决定 K 线页是毫秒级还是"打开区间内每一个日分区"：
+// 缓存就绪时一只股票一个文件；没就绪时走直读，数据越多越慢
+// （cne 每多回填一年就多约 250 个日分区）。构建本身在后台跑，不阻塞这里。
+func (s *StockService) warmSymbolBars() {
+	provider, _ := s.snapshot()
+	if provider == nil {
+		return
+	}
+	lake, ok := provider.(*lakeProvider)
+	if !ok {
+		return
+	}
+	if lake.EnsureSymbolBars() {
+		slog.Info("预热：按股票日线缓存已是最新")
+		return
+	}
+	slog.Info("预热：按股票日线缓存正在后台重建（期间 K 线走直读，较慢）")
 }

@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"math"
@@ -277,32 +278,50 @@ func (s *PortfolioService) LatestClose(codes []string, strategyID string) (map[s
 	}
 
 	// 2) 兜底：该策略还没有评分数据时用最新交易日收盘价
+	//
+	// ⚠ **不能用 GetStockUniverse 兜底。**
+	//
+	// 原来这里为了拿几只持仓的收盘价，去要**全市场**快照（5400 只）。
+	// 那是个几十秒到几分钟的重活，还要排队等 universeMu ——
+	// 而组合列表页首次加载就落在这一步上（策略还没评分时必然走到），
+	// 于是"组合列表加载很久出不来"。冷启动时若再有缓存重建在跑，
+	// 等待会成倍放大。
+	//
+	// 这里只需要**这几只**的行情：直接用 LatestQuotes 按代码取，
+	// 成本与持仓数成正比，与全市场规模无关。
 	if s.stock == nil {
 		return out, nil
 	}
-	universe, err := s.stock.GetStockUniverse(false)
+	provider, source := s.stock.snapshot()
+	if provider == nil {
+		return out, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	tradeDate, err := provider.LatestTradeDate(ctx)
 	if err != nil {
 		return out, fmt.Errorf("取行情失败：%w", err)
 	}
-	want := make(map[string]bool, len(codes))
-	for _, code := range codes {
-		want[code] = true
+	quotes, err := provider.LatestQuotes(ctx, codes, tradeDate)
+	if err != nil {
+		return out, fmt.Errorf("取行情失败（%s）：%w", source.Name, err)
 	}
-	for _, item := range universe.Stocks {
-		if !want[item.Code] || !item.HasQuote || item.Close <= 0 {
+	for code, quote := range quotes {
+		if quote == nil || quote.Close <= 0 {
 			continue
 		}
 		date := ""
-		if item.Date > 0 {
-			date = fmt.Sprintf("%d", item.Date)
+		if quote.Date > 0 {
+			date = fmt.Sprintf("%d", quote.Date)
 		}
-		closePx := item.Close
-		if item.Date > 0 {
-			if v, ok := s.rawCloseFor(item.Code, int(item.Date)); ok {
+		closePx := quote.Close
+		if quote.Date > 0 {
+			if v, ok := s.rawCloseFor(code, int(quote.Date)); ok {
 				closePx = v
 			}
 		}
-		out[item.Code] = portfolio.PricePoint{Close: closePx, Date: date}
+		out[code] = portfolio.PricePoint{Close: closePx, Date: date}
 	}
 	return out, nil
 }
