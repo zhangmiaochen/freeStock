@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -136,8 +137,24 @@ func serverWriteTimeout() time.Duration {
 	return 0
 }
 
-// webviewDataPath 返回一个**确认可写**的 WebView2 用户数据目录。
+// logFrontendBundle 在启动日志里报出**这次运行的是哪一版前端**。
 //
+// 为什么值得单独一行：容器里前端是**嵌进二进制**的，而浏览器报的错里带着
+// bundle 文件名（`index-9t_7-KdC.js`）。如果用户换了镜像但日志里仍是旧名字，
+// 说明跑的还是旧镜像/旧缓存 —— 这条能一句话区分"代码没修好"和"镜像没更新"，
+// 省掉整轮来回。
+func logFrontendBundle() {
+	raw, err := assets.ReadFile("frontend/dist/index.html")
+	if err != nil {
+		return
+	}
+	// 抓第一个 assets/*.js（Vite 的主入口）
+	re := regexp.MustCompile(`assets/([A-Za-z0-9._-]+\.js)`)
+	if m := re.FindSubmatch(raw); len(m) == 2 {
+		log.Printf("[FreeStock] 前端产物: %s", string(m[1]))
+	}
+}
+
 // WebView2 需要在这个目录里建浏览器进程；目录不可用时窗口根本创建不出来。
 // 这里按优先级挑第一个能创建成功的：用户缓存目录 -> 程序目录。
 func webviewDataPath() string {
@@ -174,6 +191,8 @@ func main() {
 	logger := slog.New(slog.NewTextHandler(sink, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	// 服务层用 slog.Info/Error 打点，这里设为默认 logger，日志才能进同一个文件
 	slog.SetDefault(logger)
+
+	logFrontendBundle()
 
 	store := config.NewStore()
 	stockService := service.NewStockService(store)
