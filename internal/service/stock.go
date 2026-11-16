@@ -688,12 +688,12 @@ func (s *StockService) GetStockUniverse(refresh bool) (out *StockUniverse, err e
 
 	tradeDate, err := provider.LatestTradeDate(ctx)
 	if err != nil {
-		return nil, err
+		return nil, s.explainSourceError(err, source)
 	}
 
 	result, err := s.buildUniverse(ctx, provider, source, tradeDate, started)
 	if err != nil {
-		return nil, err
+		return nil, s.explainSourceError(err, source)
 	}
 
 	// 加载期间数据源换过 → 这份结果属于**旧源**，不能写进缓存，
@@ -888,6 +888,36 @@ func (s *StockService) peekUniverse() *StockUniverse {
 		return nil
 	}
 	return s.universe
+}
+
+// explainSourceError 给"取不到行情"的错误补一句**可操作**的提示。
+//
+// 为什么需要：容器/NAS 部署时最常见的坑不是代码坏了，而是数据源仍指向
+// `http://127.0.0.1:7899`（free-stockdb）—— 容器里的 127.0.0.1 是**容器自己**，
+// 那里通常什么都没装，于是每个要行情的页面都失败，而报错只说"确认
+// free-stockdb 已启动"，把人往错误方向带。
+//
+// 检测到本地数据湖时，直接把"应该切到本地数据湖"写进错误里。
+func (s *StockService) explainSourceError(err error, source config.DataSource) error {
+	if err == nil {
+		return nil
+	}
+	if source.Kind != config.KindStockDB {
+		return err
+	}
+	root := ""
+	if s.cfg != nil {
+		root = s.cfg.CnLakeRoot()
+	}
+	if root == "" {
+		root = s.lakeHandle().Root()
+	}
+	if root == "" {
+		return err
+	}
+	return fmt.Errorf("%w\n提示：检测到本地数据湖 %s。容器/NAS 上通常应切到「本地数据湖」"+
+		"（设置 → 数据源 → 本地数据湖），而不是 free-stockdb —— 容器里的 127.0.0.1 是容器自己",
+		err, root)
 }
 
 // universeOn 返回**指定交易日**的全量快照，供条件选股的历史筛选使用。

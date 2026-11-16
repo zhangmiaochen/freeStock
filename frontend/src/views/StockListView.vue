@@ -203,7 +203,13 @@ function chipClass(active: boolean) {
       <Badge variant="destructive">数据读取失败</Badge>
       <p class="max-w-xl text-sm">{{ store.error }}</p>
       <p class="text-muted-foreground max-w-xl text-xs">
-        请确认 free-stockdb 已经启动（默认为 http://127.0.0.1:7899），或在「数据源设置」中切换到可用的数据源。
+        <b>NAS / 容器部署</b>请用「本地数据湖」：容器里的 <code>127.0.0.1</code> 指的是容器自己，
+        通常没有 free-stockdb。
+        先到「设置 → 财务数据来源」填数据湖根目录（含 curated 的那一级），
+        再去「设置 → 数据源」点「本地数据湖」。
+      </p>
+      <p class="text-muted-foreground max-w-xl text-xs">
+        桌面端如果用的是 free-stockdb，请确认它已启动（默认 <code>http://127.0.0.1:7899</code>）。
       </p>
       <div class="mt-1 flex gap-2">
         <Button size="sm" @click="store.loadUniverse(false)">
