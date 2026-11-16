@@ -1186,6 +1186,41 @@ func (p *lakeProvider) barsFor(code string, start, end int) ([]cnlake.BarRow, er
 	return p.lake.DailyBars(code, start/10000, end/10000)
 }
 
+// alignMonthStart 把 YYYYMMDD 拉到**所在月的 1 号**。
+//
+// 分区粒度可能是月（cne 当前布局 `trade_date=2026-09`），逐日推进时
+// 不把区间对齐到月边界，就会把同一个月文件反复读（22 个交易日 = 22 遍）。
+// 对齐后每个分区一次重算只读一次。
+func alignMonthStart(date int) int {
+	y, m, ok := splitYMD(date)
+	if !ok {
+		return date
+	}
+	return y*10000 + m*100 + 1
+}
+
+// alignMonthEnd 把 YYYYMMDD 拉到**所在月的最后一天**。
+func alignMonthEnd(date int) int {
+	y, m, ok := splitYMD(date)
+	if !ok {
+		return date
+	}
+	// 下个月的第 0 天 = 本月最后一天
+	first := time.Date(y, time.Month(m)+1, 0, 0, 0, 0, 0, time.UTC)
+	return first.Year()*10000 + int(first.Month())*100 + first.Day()
+}
+
+func splitYMD(date int) (int, int, bool) {
+	if date <= 0 {
+		return 0, 0, false
+	}
+	y, m := date/10000, (date/100)%100
+	if y < 1900 || m < 1 || m > 12 {
+		return 0, 0, false
+	}
+	return y, m, true
+}
+
 // mergeSortedBars 把已排序的 `add` 并入已排序的 `have`，结果仍按日期升序。
 //
 // ⚠ **不能直接 append。** 分块读只有在"块按日期递增"时才有序，
@@ -1412,6 +1447,18 @@ func (p *lakeProvider) fillBulk(start, end int) error {
 			return nil
 		}
 	}
+
+	// **把读取区间对齐到分区边界（月初/月末）。**
+	//
+	// 为什么关键：回填是**逐日**往前推的，第 i 天只向右补一天。而 cne 的
+	// 分区粒度是**月**（`trade_date=2026-09`）——于是"补一天"实际上要把
+	// 那一个月的大文件整个读一遍。一个月 22 个交易日 = 同一个文件被读 22 遍。
+	//
+	// 26 年 × 12 个月 × 22 遍 ≈ 每次全量重算要读几十 GB，这就是 NAS 上
+	// "很慢、最后还会失败"的直接原因（Windows 的 SSD 把这个量级掩盖了）。
+	//
+	// 对齐之后，每个分区在一次重算里**只读一次**，后面的日期直接命中内存。
+	readFrom, readTo = alignMonthStart(readFrom), alignMonthEnd(readTo)
 
 	// **按日分区列表分块读。**
 	//

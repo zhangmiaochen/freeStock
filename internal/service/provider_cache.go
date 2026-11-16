@@ -95,6 +95,18 @@ func (p *rangeCachingProvider) cachedCodes() int {
 func (p *rangeCachingProvider) DailyHistory(
 	ctx context.Context, code string, start, end int,
 ) ([]*stockdb.Quote, error) {
+	// ⚠ **底层自带"按日分区批量缓存"时让路**（与 DailyBars 同一理由）。
+	//
+	// 这层缓存对每只股票按**整个预取窗口**缓存一份 Quote。全量重算的窗口是
+	// 2000→今天（约 6500 个交易日），5400 只 × 6500 行 ≈ 3500 万行 Quote ——
+	// 光这一层就要几 GB，正是"跑到后面失败"的来源（Windows 内存大，掩盖了它）。
+	//
+	// 数据湖自己的 `bulkBars` 已经是"每个日分区只读一次、全市场共享"，
+	// 再叠一层 per-code 全历史缓存纯属反向优化。
+	if _, isLake := p.Provider.(*lakeProvider); isLake {
+		return p.Provider.DailyHistory(ctx, code, start, end)
+	}
+
 	// 请求区间必须落在预取窗口内才敢用缓存；
 	// 否则（比如别处要更早的数据）老实走真实请求，避免少给数据。
 	if start < p.from || end > p.to {
