@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"freestock/internal/portfolio"
@@ -36,7 +37,15 @@ func (s *PortfolioService) syncMoneyFor(portfolioID, strategyID string) error {
 }
 
 // GetPortfolioMoney 读资金视图。
-func (s *PortfolioService) GetPortfolioMoney(portfolioID string) (*MoneyView, error) {
+func (s *PortfolioService) GetPortfolioMoney(portfolioID string) (out *MoneyView, err error) {
+	began := time.Now()
+	// 组合页挂载时必经此路：之前它慢是因为 rawPriceOr 会为每只持仓要全量快照。
+	// 留一条耗时日志，下次"某页慢"能直接定位到方法，而不是靠猜。
+	defer func() {
+		slog.Info("组合金额耗时", "portfolio", portfolioID,
+			"elapsed", time.Since(began).Round(time.Millisecond).String())
+	}()
+
 	store, err := s.db()
 	if err != nil {
 		return nil, err
@@ -64,7 +73,7 @@ func (s *PortfolioService) GetPortfolioMoney(portfolioID string) (*MoneyView, er
 		}
 	}
 	equity := money.Cash + mv
-	out := &MoneyView{
+	out = &MoneyView{
 		InitialCapital: money.InitialCapital,
 		Cash:           money.Cash,
 		MarketValue:    mv,
