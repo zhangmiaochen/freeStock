@@ -1,10 +1,10 @@
-package main
+package rtinfo
 
 import "testing"
 
 // cgroup 的 limit 文件有几种"表示不限制"的写法，解析必须都能识别成 0，
 // 否则会算出一个天文数字的软上限（等于没设），问题被掩盖。
-func TestParseMemoryLimit(t *testing.T) {
+func TestParseLimit(t *testing.T) {
 	cases := []struct {
 		name string
 		in   string
@@ -22,10 +22,7 @@ func TestParseMemoryLimit(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := parseMemoryLimit(tc.in)
-			if err != nil {
-				t.Fatalf("不应返回错误：%v", err)
-			}
+			got := ParseLimit(tc.in)
 			if got != tc.want {
 				t.Errorf("in=%q 应为 %d，实际 %d", tc.in, tc.want, got)
 			}
@@ -34,7 +31,7 @@ func TestParseMemoryLimit(t *testing.T) {
 }
 
 // 日志里的可读单位（纯粹为了排错方便，算错不影响功能但要准）。
-func TestHumanBytes(t *testing.T) {
+func TestFormat(t *testing.T) {
 	cases := []struct {
 		in   int64
 		want string
@@ -44,7 +41,7 @@ func TestHumanBytes(t *testing.T) {
 		{2 << 30, "2.0GiB"},
 	}
 	for _, tc := range cases {
-		if got := humanBytes(tc.in); got != tc.want {
+		if got := Format(tc.in); got != tc.want {
 			t.Errorf("%d 应为 %q，实际 %q", tc.in, tc.want, got)
 		}
 	}

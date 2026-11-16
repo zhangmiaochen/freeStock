@@ -16,6 +16,7 @@ import (
 	"github.com/wailsapp/wails/v3/pkg/application"
 
 	"freestock/internal/config"
+	"freestock/internal/rtinfo"
 	"freestock/internal/service"
 )
 
@@ -194,7 +195,12 @@ func main() {
 
 	// 容器里按 cgroup 上限设 Go 软内存上限：接近上限时主动 GC，
 	// 而不是先被内核 OOM kill（那个表现为"响应截断/空响应/时好时坏"）。
-	applyContainerMemoryLimit()
+	if soft, note := rtinfo.SetSoftLimit(); note != "" {
+		log.Printf("[FreeStock] %s", note)
+		if soft > 0 {
+			log.Printf("[FreeStock] 内存软上限已生效: %s", rtinfo.Format(soft))
+		}
+	}
 
 	logFrontendBundle()
 

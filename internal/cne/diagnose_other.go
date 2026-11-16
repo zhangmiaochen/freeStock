@@ -4,6 +4,7 @@ package cne
 
 import (
 	"fmt"
+	"freestock/internal/rtinfo"
 	"os"
 	"strings"
 	"time"
@@ -60,6 +61,14 @@ func Diagnose() string {
 		p("cne: %s", pth)
 	} else {
 		p("⚠ 找不到 cne：%v —— 到点会发起失败（查询功能不受影响）", err)
+	}
+
+	// 4. 内存：容器里"响应截断 / ERR_EMPTY_RESPONSE / 时好时坏"最常见的原因是
+	//    被 cgroup 卡死。把真实数字摊在界面上，用户不必进容器敲命令。
+	p("")
+	p("=== 内存（容器里响应中断多半与它有关）===")
+	for _, line := range strings.Split(rtinfo.Describe(), "\n") {
+		p("%s", line)
 	}
 
 	p("")
