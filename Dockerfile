@@ -189,7 +189,11 @@ VOLUME ["/data"]
 EXPOSE 8080
 
 # wails server 模式自带 /health（见 application_server.go）
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+#
+# ⚠ 参数刻意放宽：冷启动扫描数据湖时 CPU 会被吃满（parquet 解码），
+# 若健康检查 5s 内没响应、连续 3 次失败，编排层/NAS 可能直接重启容器，
+# 前端就会看到 "Failed to fetch" —— 与"内存暴涨"极像，很难分辨。
+HEALTHCHECK --interval=60s --timeout=15s --start-period=180s --retries=5 \
   CMD wget -qO- "http://127.0.0.1:${WAILS_SERVER_PORT}/health" > /dev/null 2>&1 || exit 1
 
 # 用 exec 形式：SIGTERM 直接到进程，容器停止时能优雅关闭（wails 有信号处理）

@@ -397,13 +397,17 @@ func readTyped[T any](files []string, keep func(*T) bool) ([]T, error) {
 
 // lakeReadWorkers 按文件数与 CPU 数决定并发度。
 //
-// 上限设 8：这是**磁盘 IO 密集**的活，再多的协程只会互相抢 IO，
-// 而且每个文件都要读 footer，随机寻道会变多。
+// ⚠ 上限**不是越大越好**，也不是纯粹的"性能参数"：
+//
+//	parquet 解码是 CPU 密集型（zstd + thrift），并发开满会把所有核吃干。
+//	而同一个进程里还有 HTTP 处理与**健康检查**要跑 —— NAS 上核少（常见 4 核），
+//	32 路解码会把 /health 拖到几秒不响应，容器被判成不健康、进而重启，
+//	前端看到的就是 "Failed to fetch"。这个现象和"内存暴涨"极像，很难分辨。
+//
+// 所以：默认留出余量（最多 NumCPU-1，且不超过 8），并可用
+// FREESTOCK_LAKE_WORKERS 覆盖（批量回填想更快时调大即可）。
 func lakeReadWorkers(fileCount int) int {
-	workers := runtime.NumCPU()
-	if workers > lakeReadMaxWorkers {
-		workers = lakeReadMaxWorkers
-	}
+	workers := lakeReadWorkerLimit()
 	if workers > fileCount {
 		workers = fileCount
 	}
@@ -413,17 +417,28 @@ func lakeReadWorkers(fileCount int) int {
 	return workers
 }
 
-// lakeReadMaxWorkers 是并行读文件的上限。
-//
-// ⚠ 原来这里硬编码 **8**，理由是"这是磁盘 IO 密集的活，再多的协程只会互相抢 IO"。
-// **这个判断是错的**：parquet 读取里占大头的是 **zstd 解压 + thrift 解码 +
-// 列转换**，CPU profile 上全是热点 —— 它是 **CPU 密集**的。
-// 实测环境 16 逻辑核，压在 8 等于白扔一半算力。
-//
-// 上限仍然保留（32），避免在文件数极大时开过多协程。
-// 放开并发**不改变任何数据结果**：只是同时读多个文件，
-// 每个文件的解码路径与顺序完全未变。
-const lakeReadMaxWorkers = 32
+// lakeReadMaxWorkers 是默认并发上限（不含"留一个核"的调整）。
+const lakeReadMaxWorkers = 8
+
+// lakeReadWorkerLimit 计算并发上限：默认 min(NumCPU-1, 8)，可用环境变量覆盖。
+func lakeReadWorkerLimit() int {
+	if v := strings.TrimSpace(os.Getenv("FREESTOCK_LAKE_WORKERS")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			if n > 32 {
+				n = 32
+			}
+			return n
+		}
+	}
+	workers := runtime.NumCPU() - 1 // 留一个核给 HTTP / 健康检查
+	if workers < 1 {
+		workers = 1
+	}
+	if workers > lakeReadMaxWorkers {
+		workers = lakeReadMaxWorkers
+	}
+	return workers
+}
 
 func readTypedFile[T any](handle *parquetHandle, keep func(*T) bool, out *[]T) error {
 	reader := parquet.NewGenericReader[T](handle.file)

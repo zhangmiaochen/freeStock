@@ -76,10 +76,13 @@ services:
 
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
-      interval: 30s
-      timeout: 5s
-      start_period: 20s
-      retries: 3
+      # 放宽是有意的：冷启动扫数据湖时 CPU 会被吃满，健康检查可能慢几秒。
+      # 太紧会被编排层判成不健康 → 重启容器 → 前端 "Failed to fetch"，
+      # 而这个现象和"程序崩了"几乎无法区分。
+      interval: 60s
+      timeout: 15s
+      start_period: 180s
+      retries: 5
 
     # 安全基线：容器内不获取新权限
     security_opt:
