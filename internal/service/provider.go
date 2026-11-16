@@ -1757,10 +1757,15 @@ func (p *lakeProvider) LatestQuotes(ctx context.Context, codes []string, date in
 		// 所以：按股票缓存还没就绪、且缺行情的代码很多时，**先跳过**，
 		// 把已经拿到的行情返回出去（缺价的显示「—」），
 		// 让后台预热把缓存建好，下次刷新自然补齐。
-		if _, cacheReady := p.symbolCacheReady(); !cacheReady && len(missed) >= retrySkipThreshold {
-			slog.Info("跳过不限起点补抓（按股票缓存未就绪）",
+		// ⚠ **缺行情的代码很多时，一律跳过补抓**（不再看缓存是否就绪）。
+		//
+		// 实测（用户 NAS）：请求 2506 只、命中仅 247 只，却花了 **41 秒**，
+		// 而且它挡在全量快照的必经路径上 —— 前端全局搜索框/组合页都要等它。
+		// 这些是退市/长期停牌的标的，缺价只是"显示 —"，不是核心数据。
+		if len(missed) >= retrySkipThreshold {
+			slog.Info("跳过不限起点补抓（缺行情的代码太多，不值得为它们拖慢首次加载）",
 				"missing", len(missed), "threshold", retrySkipThreshold,
-				"hint", "预热完成后这些标的会自动补上，或稍后刷新")
+				"hint", "这些标的会显示「—」，刷新或数据更新后可再补")
 			return out, nil
 		}
 		filled, retryErr := p.retryQuotes(ctx, missed, date)
