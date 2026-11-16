@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
@@ -126,14 +127,14 @@ func TestKlinePerfProbe(t *testing.T) {
 		lake.retryCache = nil
 		lake.retryMu.Unlock()
 		began = time.Now()
-		if _, _, err := lake.retryFill(noQuote, int(universe.TradeDate)); err != nil {
+		if _, _, err := lake.retryFill(context.Background(), noQuote, int(universe.TradeDate)); err != nil {
 			t.Fatalf("retryFill 失败：%v", err)
 		}
 		t.Logf("PROBE retryFillWithCache codes=%d elapsed=%s", len(noQuote), time.Since(began).Round(time.Millisecond))
 
 		lake.SetSymbolBarsCache(nil)
 		began = time.Now()
-		if _, _, err := lake.bulkQuotes(noQuote, 0, int(universe.TradeDate)); err != nil {
+		if _, _, err := lake.bulkQuotes(context.Background(), noQuote, 0, int(universe.TradeDate)); err != nil {
 			t.Fatalf("bulkQuotes 失败：%v", err)
 		}
 		t.Logf("PROBE retryFillFullScan codes=%d elapsed=%s", len(noQuote), time.Since(began).Round(time.Millisecond))

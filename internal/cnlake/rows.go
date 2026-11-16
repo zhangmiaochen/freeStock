@@ -1,6 +1,7 @@
 package cnlake
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -580,8 +581,8 @@ func (l *Lake) DailyBarsInRange(codes []string, startDate, endDate int64) ([]Bar
 // 先把几十万行读进内存再逐行挑，是这个页面内存暴涨的直接原因。
 //
 // ⚠ 回调会被**多个 worker 并发**调用（读取是并行的），且行序**不保证**有序 ——
-// 调用方自己加锁/维护状态。返回值只表示是否读取失败。
-func (l *Lake) DailyBarsInRangeEach(codes []string, startDate, endDate int64, each func(BarRow)) error {
+// 调用方自己加锁/维护状态。返回值只表示是否读取失败（或 ctx 被取消）。
+func (l *Lake) DailyBarsInRangeEach(ctx context.Context, codes []string, startDate, endDate int64, each func(BarRow)) error {
 	if each == nil {
 		return nil
 	}
@@ -625,6 +626,12 @@ func (l *Lake) DailyBarsInRangeEach(codes []string, startDate, endDate int64, ea
 		go func() {
 			defer wg.Done()
 			for i := range jobs {
+				// ctx 取消后不再开新文件：冷启动扫描可能长达几分钟，
+				// 而页面请求有预算 —— 超时就要能真的停下来，不能继续烧 CPU。
+				if ctx != nil && ctx.Err() != nil {
+					errs[i] = ctx.Err()
+					continue
+				}
 				handle, err := openParquet(files[i])
 				if err != nil {
 					errs[i] = err

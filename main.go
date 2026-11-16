@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 
@@ -111,6 +112,30 @@ func serverPort() int {
 	return 8080
 }
 
+// serverWriteTimeout 是 HTTP 响应写超时（0 = 不限制）。
+//
+// wails 默认 30s，而这个应用"首次加载要扫数据湖"动辄几十秒到几分钟，
+// 超时后 net/http 会掐断连接，前端只能看到 "Failed to fetch"，
+// 且服务端的活还在继续跑 —— 症状极具误导性。
+//
+// 所以默认**不限制**（返回 0），需要时用
+// FREESTOCK_SERVER_WRITE_TIMEOUT=90s 之类的值显式收紧。
+func serverWriteTimeout() time.Duration {
+	raw := strings.TrimSpace(os.Getenv("FREESTOCK_SERVER_WRITE_TIMEOUT"))
+	if raw == "" {
+		return 0
+	}
+	if raw == "0" {
+		return 0
+	}
+	if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+		log.Printf("[FreeStock] HTTP 写超时 = %s", d)
+		return d
+	}
+	log.Printf("[FreeStock] FREESTOCK_SERVER_WRITE_TIMEOUT=%q 无法解析，按不限制处理", raw)
+	return 0
+}
+
 // webviewDataPath 返回一个**确认可写**的 WebView2 用户数据目录。
 //
 // WebView2 需要在这个目录里建浏览器进程；目录不可用时窗口根本创建不出来。
@@ -197,6 +222,19 @@ func main() {
 		Server: application.ServerOptions{
 			Host: serverHost(),
 			Port: serverPort(),
+			// ⚠ **必须显式设置 WriteTimeout**。
+			//
+			// wails 的默认值是 **30 秒**：请求处理超过 30s，net/http 会直接
+			// 掐断连接 —— 浏览器那边只能报 "Failed to fetch"（网络层错误），
+			// 而 Go 里的活还在继续跑。表现为"页面转圈很久 → 报错 → CPU/内存
+			// 先升后降"，极难判断到底发生了什么。
+			//
+			// 这个应用有"首次加载要扫数据湖"的重活（冷启动几十秒到几分钟），
+			// 30 秒的上限是必然踩到的。默认改成不限制，由各个取数函数自己的
+			// 超时（15 分钟）+ 前端重试来兜底。
+			WriteTimeout: serverWriteTimeout(),
+			// 读超时保持较短：它只覆盖"读完请求头/体"，与业务耗时无关。
+			ReadTimeout: 60 * time.Second,
 		},
 	})
 

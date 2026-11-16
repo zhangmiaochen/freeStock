@@ -2,6 +2,7 @@
 package service
 
 import (
+	"errors"
 	"context"
 	"crypto/sha256"
 	"fmt"
@@ -648,9 +649,42 @@ func (s *StockService) ClearCache() {
 	s.tradeDateMu.Unlock()
 }
 
+// lockUniverse 在预算内尝试拿到 universe 锁；超时返回 false（不排队干等）。
+func (s *StockService) lockUniverse(budget time.Duration) bool {
+	deadline := time.Now().Add(budget)
+	for {
+		if s.universeMu.TryLock() {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+// universeWaitBudget 是"等别人把全量快照建完"的最长时间。
+//
+// 启动预热会先占着这把锁跑完整个构建（数据湖上可能几十秒到几分钟）。
+// 页面请求如果直接排队干等，就会一直转圈，最后被 HTTP 层掐断连接
+// （表现是 "Failed to fetch"）。所以这里只等一小会儿，
+// 超了就返回一个能看懂的"正在准备"，让前端过几秒重试。
+const universeWaitBudget = 20 * time.Second
+
+// universeQuoteBudget 是"取全量行情"这一步的预算。
+//
+// 超过它就先返回部分结果：页面能正常渲染，缺行情的那些显示「—」，
+// 下一次刷新补齐。首次冷启动、或 cne 正在写同一批分区时会明显偏慢，
+// 60s 是可接受的折中 —— 关键是**不要无限期挂着**。
+const universeQuoteBudget = 60 * time.Second
+
+// errUniverseBusy 表示"快照正在构建，先别等"。
+var errUniverseBusy = errors.New("数据正在准备中（首次加载较慢，或 cne 正在更新数据），请稍等几秒后重试")
+
 // GetStockUniverse 返回全量股票列表（含最新行情），refresh=true 时强制刷新。
 func (s *StockService) GetStockUniverse(refresh bool) (*StockUniverse, error) {
-	s.universeMu.Lock()
+	if !s.lockUniverse(universeWaitBudget) {
+		return nil, errUniverseBusy
+	}
 	defer s.universeMu.Unlock()
 
 	if !refresh && s.universe != nil && time.Since(s.universeAt) < universeTTL {
@@ -752,9 +786,15 @@ func (s *StockService) buildUniverse(
 		done     atomic.Int64
 	)
 
-	byCode, bulkErr := provider.LatestQuotes(ctx, codes, tradeDate)
+	// 取行情给一个**预算**：数据湖冷启动（尤其是 cne 正在写同一批分区时）
+	// 可能远超前端能接受的等待时间。超时就带着"已拿到的部分"返回，
+	// 页面照常渲染，缺行情的那些显示「—」，下次刷新补齐 ——
+	// 总比转圈几分钟最后报 Failed to fetch 好。
+	quoteCtx, cancelQuotes := context.WithTimeout(ctx, universeQuoteBudget)
+	byCode, bulkErr := provider.LatestQuotes(quoteCtx, codes, tradeDate)
+	cancelQuotes()
 	if bulkErr != nil {
-		slog.Warn("批量取行情失败", "err", bulkErr)
+		slog.Warn("批量取行情未全部完成", "err", bulkErr, "got", len(byCode), "want", len(codes))
 	}
 	for i, code := range codes {
 		if quote, ok := byCode[code]; ok && quote != nil {

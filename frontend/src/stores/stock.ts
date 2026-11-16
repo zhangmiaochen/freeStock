@@ -220,22 +220,43 @@ export const useStockStore = defineStore("stock", () => {
     progress.value = null;
     ensureProgressSubscription();
 
+    // 「数据正在准备中」不是错误，是**还没好**：后端在构建全量快照（首次很慢，
+    // 尤其 cne 正在更新数据时）。这种情况自动等一会儿重试，别让用户看到红字。
+    // 最多重试 8 次（约 40 秒），之后才把最后一次的提示显示出来。
+    let lastErr = "";
     try {
-      const result = await api.getStockUniverse(refresh);
-      if (!result) {
-        throw new Error("后端没有返回股票列表");
+      for (let attempt = 0; attempt < 8; attempt += 1) {
+        try {
+          const result = await api.getStockUniverse(refresh);
+          if (!result) {
+            throw new Error("后端没有返回股票列表");
+          }
+          universe.value = result;
+          // 市场列表来自后端，若当前选中的市场已不存在则回到「全部」
+          if (marketKey.value !== "all" && !result.markets.some((m) => m.key === marketKey.value)) {
+            marketKey.value = "all";
+          }
+          return;
+        } catch (err) {
+          lastErr = errorMessage(err);
+          if (!isWarmingUp(lastErr)) {
+            error.value = lastErr;
+            return;
+          }
+          // 预算内重试：3s 起步，逐步拉长到 6s
+          await new Promise((resolve) => setTimeout(resolve, Math.min(3000 + attempt * 500, 6000)));
+        }
       }
-      universe.value = result;
-      // 市场列表来自后端，若当前选中的市场已不存在则回到「全部」
-      if (marketKey.value !== "all" && !result.markets.some((m) => m.key === marketKey.value)) {
-        marketKey.value = "all";
-      }
-    } catch (err) {
-      error.value = errorMessage(err);
+      error.value = lastErr;
     } finally {
       loading.value = false;
       progress.value = null;
     }
+  }
+
+  /** 判断错误是不是"数据还在准备中"（后端 errUniverseBusy 的文案）。 */
+  function isWarmingUp(message: string): boolean {
+    return message.includes("正在准备中") || message.includes("请稍等几秒后重试");
   }
 
   async function loadCategories() {

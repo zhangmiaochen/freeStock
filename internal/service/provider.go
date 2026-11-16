@@ -1,6 +1,7 @@
 package service
 
 import (
+	"errors"
 	"context"
 	"fmt"
 	"log/slog"
@@ -1038,7 +1039,7 @@ func (p *lakeProvider) ClosesBefore(ctx context.Context, codes []string, dates [
 		best[i] = make(map[string]snapshot, len(codes))
 	}
 
-	err := p.lake.DailyBarsInRangeEach(codes, int64(from), int64(sorted[len(sorted)-1]), func(row cnlake.BarRow) {
+	err := p.lake.DailyBarsInRangeEach(ctx, codes, int64(from), int64(sorted[len(sorted)-1]), func(row cnlake.BarRow) {
 		// 与 barsFromQuotes 一致：收盘价无效的行不要
 		if row.Close <= 0 {
 			return
@@ -1642,8 +1643,14 @@ func (p *lakeProvider) LatestQuotes(ctx context.Context, codes []string, date in
 	}
 
 	start := shiftBack(date, quoteLookbackDays)
-	quotes, missed, err := p.bulkQuotes(codes, start, date)
+	quotes, missed, err := p.bulkQuotes(ctx, codes, start, date)
 	if err != nil {
+		if isCanceled(err) {
+			// 预算用尽：把已经拿到的给出去，别让整页失败。
+			// 调用方会在日志里看到"仅部分行情"，刷新一次就能补齐。
+			slog.Warn("取行情超时，返回已拿到的部分", "got", len(out), "err", err)
+			return out, nil
+		}
 		return nil, err
 	}
 	for code, quote := range quotes {
@@ -1666,8 +1673,13 @@ func (p *lakeProvider) LatestQuotes(ctx context.Context, codes []string, date in
 	// 所以改用**结果缓存**：同一天里"历史最后几根 K 线"不会变，
 	// 缓住之后 10 分钟后重建全量列表（universeTTL）不必再扫一遍。
 	if len(missed) > 0 {
-		filled, retryErr := p.retryQuotes(missed, date)
+		filled, retryErr := p.retryQuotes(ctx, missed, date)
 		if retryErr != nil {
+			if isCanceled(retryErr) {
+				slog.Warn("不限起点补抓超时，仅返回已有行情",
+					"missing", len(missed), "got", len(out), "err", retryErr)
+				return out, nil
+			}
 			return out, retryErr
 		}
 		for code, quote := range filled {
@@ -1675,6 +1687,14 @@ func (p *lakeProvider) LatestQuotes(ctx context.Context, codes []string, date in
 		}
 	}
 	return out, nil
+}
+
+// isCanceled 判断错误是否来自 ctx 超时/取消。
+//
+// 这两类错误**不是数据问题**：lake 可能只是慢（比如 cne 正在写同一批分区），
+// 上层应当"给部分结果 + 记日志"，而不是把整页打红。
+func isCanceled(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 // retryQuoteCache 是"不限起点重取"的结果缓存。
@@ -1694,7 +1714,7 @@ type retryQuoteCache struct {
 }
 
 // retryQuotes 取"没有近期行情的代码"的历史最后几根 K 线（带缓存）。
-func (p *lakeProvider) retryQuotes(codes []string, date int) (map[string]*stockdb.Quote, error) {
+func (p *lakeProvider) retryQuotes(ctx context.Context, codes []string, date int) (map[string]*stockdb.Quote, error) {
 	p.retryMu.Lock()
 	cached := p.retryCache
 	p.retryMu.Unlock()
@@ -1718,7 +1738,7 @@ func (p *lakeProvider) retryQuotes(codes []string, date int) (map[string]*stockd
 	}
 
 	if len(todo) > 0 || cached == nil || cached.date != date {
-		filled, still, err := p.retryFill(todo, date)
+		filled, still, err := p.retryFill(ctx, todo, date)
 		if err != nil {
 			return out, err
 		}
@@ -1760,7 +1780,7 @@ func (p *lakeProvider) retryQuotes(codes []string, date int) (map[string]*stockd
 // ⚠ 只在缓存**新鲜**时才走快路。"水位旧的缓存里没有文件"还有另一种解释：
 // 这只票是在水位之后才上市/入库的 —— 那样直接判成"没有历史"就会漏掉它
 // 最后几根 K 线。所以不新鲜时退回全表扫描（同时后台重建，几十秒后下一次就快）。
-func (p *lakeProvider) retryFill(codes []string, date int) (map[string]*stockdb.Quote, []string, error) {
+func (p *lakeProvider) retryFill(ctx context.Context, codes []string, date int) (map[string]*stockdb.Quote, []string, error) {
 	if len(codes) == 0 {
 		return map[string]*stockdb.Quote{}, nil, nil
 	}
@@ -1771,7 +1791,7 @@ func (p *lakeProvider) retryFill(codes []string, date int) (map[string]*stockdb.
 		}
 		slog.Warn("按股票日线缓存读失败，退回全表扫描", "err", err)
 	}
-	return p.bulkQuotes(codes, 0, date)
+	return p.bulkQuotes(ctx, codes, 0, date)
 }
 
 // bulkQuotes 一次读完区间内所有相关股票，返回每只（不晚于 end 的）最新一根行情，
@@ -1787,7 +1807,7 @@ func (p *lakeProvider) retryFill(codes []string, date int) (map[string]*stockdb.
 //
 // 真正用到的其实只有：末日一根、前收一根、量比分母 5 根 —— 共 volumeRatioDays+1 根。
 // 改成流式读取、每只票只维护这一个小尾巴，内存与历史长度**无关**。
-func (p *lakeProvider) bulkQuotes(codes []string, start, end int) (map[string]*stockdb.Quote, []string, error) {
+func (p *lakeProvider) bulkQuotes(ctx context.Context, codes []string, start, end int) (map[string]*stockdb.Quote, []string, error) {
 	if start <= 0 {
 		start = 19900101
 	}
@@ -1799,7 +1819,7 @@ func (p *lakeProvider) bulkQuotes(codes []string, start, end int) (map[string]*s
 	const keepBars = volumeRatioDays + 1
 
 	tails := make(map[string][]cnlake.BarRow, len(codes))
-	err := p.lake.DailyBarsInRangeEach(codes, int64(start), int64(end), func(bar cnlake.BarRow) {
+	err := p.lake.DailyBarsInRangeEach(ctx, codes, int64(start), int64(end), func(bar cnlake.BarRow) {
 		date := bar.Date()
 		if date < int64(start) || date > int64(end) {
 			return

@@ -29,7 +29,7 @@ func TestLakeRetryQuotesCache(t *testing.T) {
 	dateInt := int(date)
 
 	// 取一批"最近窗口内没有数据"的代码：先用 RecentQuotes 找出缺口
-	recent, missed, err := provider.bulkQuotes([]string{"000001", "600519"}, shiftBack(dateInt, quoteLookbackDays), dateInt)
+	recent, missed, err := provider.bulkQuotes(context.Background(), []string{"000001", "600519"}, shiftBack(dateInt, quoteLookbackDays), dateInt)
 	if err != nil {
 		t.Fatalf("bulkQuotes 失败: %v", err)
 	}
@@ -52,7 +52,7 @@ func TestLakeRetryQuotesCache(t *testing.T) {
 	}
 
 	// 第一次：真实扫描（可能什么也找不到，那也是有效结果）
-	first, err := provider.retryQuotes(delisted, dateInt)
+	first, err := provider.retryQuotes(context.Background(), delisted, dateInt)
 	if err != nil {
 		t.Fatalf("第一次 retryQuotes 失败: %v", err)
 	}
@@ -69,7 +69,7 @@ func TestLakeRetryQuotesCache(t *testing.T) {
 	t.Logf("第一次：得到 %d 条行情，%d 个确认无数据（缓存已就绪）", filled, empty)
 
 	// 第二次：必须完全走缓存、结果一致
-	second, err := provider.retryQuotes(delisted, dateInt)
+	second, err := provider.retryQuotes(context.Background(), delisted, dateInt)
 	if err != nil {
 		t.Fatalf("第二次 retryQuotes 失败: %v", err)
 	}
@@ -92,7 +92,7 @@ func TestLakeRetryQuotesCache(t *testing.T) {
 	provider.retryMu.Lock()
 	before := provider.retryCache
 	provider.retryMu.Unlock()
-	if _, err := provider.retryQuotes(subset, dateInt); err != nil {
+	if _, err := provider.retryQuotes(context.Background(), subset, dateInt); err != nil {
 		t.Fatalf("子集请求失败: %v", err)
 	}
 	provider.retryMu.Lock()

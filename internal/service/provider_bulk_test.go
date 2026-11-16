@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"testing"
 
 	"freestock/internal/cnlake"
@@ -51,7 +52,7 @@ func TestLakeBulkQuotesUsesLastBarWithPrevClose(t *testing.T) {
 	p := &lakeProvider{lake: lake}
 
 	// start 给到很早：这就是"不限起点补抓"那条路
-	got, missed, err := p.bulkQuotes([]string{"600519.SH"}, 19900101, 20260108)
+	got, missed, err := p.bulkQuotes(context.Background(), []string{"600519.SH"}, 19900101, 20260108)
 	if err != nil {
 		t.Fatalf("bulkQuotes 失败：%v", err)
 	}
@@ -77,7 +78,7 @@ func TestLakeBulkQuotesSingleBar(t *testing.T) {
 	})
 	p := &lakeProvider{lake: lake}
 
-	got, missed, err := p.bulkQuotes([]string{"300750.SZ"}, 19900101, 20260108)
+	got, missed, err := p.bulkQuotes(context.Background(), []string{"300750.SZ"}, 19900101, 20260108)
 	if err != nil {
 		t.Fatalf("bulkQuotes 失败：%v", err)
 	}
@@ -96,7 +97,7 @@ func TestLakeBulkQuotesMissed(t *testing.T) {
 	})
 	p := &lakeProvider{lake: lake}
 
-	_, missed, err := p.bulkQuotes([]string{"600519.SH", "000002.SZ"}, 19900101, 20260108)
+	_, missed, err := p.bulkQuotes(context.Background(), []string{"600519.SH", "000002.SZ"}, 19900101, 20260108)
 	if err != nil {
 		t.Fatalf("bulkQuotes 失败：%v", err)
 	}
@@ -112,7 +113,7 @@ func TestLakeBulkQuotesRespectsEnd(t *testing.T) {
 	})
 	p := &lakeProvider{lake: lake}
 
-	got, _, err := p.bulkQuotes([]string{"600519.SH"}, 19900101, 20260107)
+	got, _, err := p.bulkQuotes(context.Background(), []string{"600519.SH"}, 19900101, 20260107)
 	if err != nil {
 		t.Fatalf("bulkQuotes 失败：%v", err)
 	}

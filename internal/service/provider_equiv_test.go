@@ -215,7 +215,7 @@ func TestBulkQuotesMatchesOldAlgorithm(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, _, err := p.bulkQuotes(symbols, tc.start, tc.end)
+			got, _, err := p.bulkQuotes(context.Background(), symbols, tc.start, tc.end)
 			if err != nil {
 				t.Fatalf("新实现失败：%v", err)
 			}
