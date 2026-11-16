@@ -33,6 +33,9 @@ func goSafe(name string, fn func()) {
 	}()
 }
 
+// debugStack 是 runtime/debug.Stack 的薄封装，便于在 service 包内统一调用。
+func debugStack() []byte { return debug.Stack() }
+
 // recoverAsError 把**绑定方法里的 panic** 变成一个普通 error。
 //
 // 为什么需要它：

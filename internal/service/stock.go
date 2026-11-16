@@ -420,13 +420,37 @@ func (s *StockService) GetCurrentDataSource() DataSourceInfo {
 
 // TestDataSource 探测某个来源是否可用（不改变当前数据源）。
 // kind 为 config.KindCnLake 时检测数据湖；否则按 HTTP 地址探测 free-stockdb。
-func (s *StockService) TestDataSource(kind, rawURL string) SourceStatus {
+// TestDataSource 检测某个数据源是否可用（界面上「测试连通性」）。
+//
+// ⚠ 这个方法要**兜 panic**：它自己会去读数据湖（列目录、抽样读日线），
+// 而这些操作在容器里最容易碰到"路径存在但读不出内容/文件正被写"的情况。
+// 一旦 panic，net/http 会直接关连接，前端只看到 net::ERR_EMPTY_RESPONSE /
+// Failed to fetch —— 用户拿不到任何信息，只能来问"连接失败"。
+// SourceStatus 有 Message 字段，正好把 panic 内容显示出来。
+func (s *StockService) TestDataSource(kind, rawURL string) (status SourceStatus) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("测试数据源时 panic（已兜住，转成可见信息）",
+				"kind", kind, "url", rawURL,
+				"panic", fmt.Sprint(r),
+				"stack", string(debugStack()),
+			)
+			status = SourceStatus{
+				URL:  rawURL,
+				Kind: kind,
+				OK:   false,
+				Message: fmt.Sprintf("探测时发生内部错误：%v\n详情见容器日志（grep panic）。"+
+					"这通常意味着读数据湖时崩了，而不是路径没配好", r),
+			}
+		}
+	}()
+
 	if kind == config.KindCnLake {
 		return s.testLake(rawURL)
 	}
 
 	candidate := normalizeURL(rawURL)
-	status := SourceStatus{URL: candidate, Kind: config.KindStockDB}
+	status = SourceStatus{URL: candidate, Kind: config.KindStockDB}
 	if candidate == "" {
 		status.Message = "地址无效，请填写形如 http://127.0.0.1:7899 的地址"
 		return status
