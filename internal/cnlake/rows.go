@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -708,8 +709,20 @@ func (l *Lake) DatesInRange(startDate, endDate int64) ([]int64, error) {
 
 // filesForDateRange 找出落在 [startDate, endDate] 内的日分区 parquet 文件。
 //
-// 直接按分区目录名筛（`trade_date=2016-01-04`），不必打开任何文件；
-// 分区名不是日期时回落到"读内容拿日期清单"那条路（见 BarPartitionDates）。
+// 直接按分区目录名筛，不必打开任何文件。分区粒度**不一定是日**：
+//
+//	trade_date=2026-11-14   日
+//	trade_date=2026-11      月   ← cne 的按月布局
+//	trade_date=2026Q4       季   ← 部分数据集
+//	trade_date=2026         年   ← 合成湖/部分数据集
+//
+// ⚠ 这里曾有个严重 bug：只认"8 位数字"的日分区，其它名字一律记为 unparsed，
+// 而只要有 unparsed 就**返回全部文件**（日期范围被彻底忽略）。于是按月分区的
+// 数据湖上，**每个**区间查询都会扫全部 323 个分区 —— 数据越多越慢，
+// 并发读大文件还会把内存顶到容器上限。用户看到的"以前能开、现在打不开"
+// 就是这么来的。
+//
+// 现在：把分区名解析成**日期区间**（首日, 末日），与 [start,end] 求交集。
 func (l *Lake) filesForDateRange(startDate, endDate int64) ([]string, error) {
 	dir := l.DatasetDir("daily_bars")
 	entries, err := os.ReadDir(dir)
@@ -724,24 +737,19 @@ func (l *Lake) filesForDateRange(startDate, endDate int64) ([]string, error) {
 			continue
 		}
 		name := entry.Name()
-		const prefix = "trade_date="
-		if !strings.HasPrefix(name, prefix) {
+		if !strings.HasPrefix(name, "trade_date=") {
 			continue
 		}
-		raw := strings.ReplaceAll(strings.TrimPrefix(name, prefix), "-", "")
-		if len(raw) != 8 {
-			unparsed = append(unparsed, entry.Name())
+		first, last, ok := partitionInterval(name)
+		if !ok {
+			unparsed = append(unparsed, name)
 			continue
 		}
-		date, err := strconv.ParseInt(raw, 10, 64)
-		if err != nil || date <= 0 {
-			unparsed = append(unparsed, entry.Name())
+		// 区间**不相交**就跳过（分区覆盖 first..last，查询要 start..end）
+		if startDate > 0 && last < startDate {
 			continue
 		}
-		if startDate > 0 && date < startDate {
-			continue
-		}
-		if endDate > 0 && date > endDate {
+		if endDate > 0 && first > endDate {
 			continue
 		}
 		partition := filepath.Join(dir, name)
@@ -752,29 +760,74 @@ func (l *Lake) filesForDateRange(startDate, endDate int64) ([]string, error) {
 		out = append(out, files...)
 	}
 
-	// 有分区名不是日期（例如按年分区）→ 退回按内容筛
+	// 仍有无法识别的分区名 → 只能退回"全取"（正确但慢）。
+	// 日/月/季/年都能解析，走到这里说明命名很特殊，记一条日志便于排查。
 	if len(unparsed) > 0 {
-		all := l.DatasetFiles("daily_bars")
-		dates, err := l.BarPartitionDates()
-		if err != nil {
-			return nil, err
-		}
-		keep := map[int64]bool{}
-		for _, date := range dates {
-			if startDate > 0 && date < startDate {
-				continue
-			}
-			if endDate > 0 && date > endDate {
-				continue
-			}
-			keep[date] = true
-		}
-		out = all
-		_ = keep
+		slog.Warn("daily_bars 存在无法解析的分区名，本次查询只能读取全部分区",
+			"count", len(unparsed), "examples", unparsed[:min(len(unparsed), 3)])
+		out = out[:0]
+		out = append(out, l.DatasetFiles("daily_bars")...)
 	}
 
 	sort.Strings(out)
 	return out, nil
+}
+
+// partitionInterval 把典型的分区目录名解析成"它覆盖的日期区间"（YYYYMMDD 首日/末日）。
+//
+// 支持：trade_date=2026-11-14 / 20261114 / 2026-11 / 202611 / 2026Q4 / 2026。
+// 返回 false 表示名字不是这几种形状（调用方会退回"全取"）。
+func partitionInterval(name string) (int64, int64, bool) {
+	raw := strings.TrimSpace(strings.TrimPrefix(name, "trade_date="))
+	if raw == "" {
+		return 0, 0, false
+	}
+	upper := strings.ToUpper(raw)
+
+	// 季度：2026Q4
+	if len(upper) == 6 && upper[4] == 'Q' {
+		year, err1 := strconv.Atoi(upper[:4])
+		q, err2 := strconv.Atoi(upper[5:])
+		if err1 != nil || err2 != nil || q < 1 || q > 4 {
+			return 0, 0, false
+		}
+		firstMonth := time.Month((q-1)*3 + 1)
+		first := time.Date(year, firstMonth, 1, 0, 0, 0, 0, time.UTC)
+		last := time.Date(year, firstMonth+3, 0, 0, 0, 0, 0, time.UTC)
+		return ymdInt(first), ymdInt(last), true
+	}
+
+	digits := strings.ReplaceAll(raw, "-", "")
+	switch len(digits) {
+	case 8: // 日：2026-11-14
+		date, err := strconv.Atoi(digits)
+		if err != nil || date <= 0 {
+			return 0, 0, false
+		}
+		return int64(date), int64(date), true
+	case 6: // 月：2026-11
+		year, err1 := strconv.Atoi(digits[:4])
+		month, err2 := strconv.Atoi(digits[4:])
+		if err1 != nil || err2 != nil || month < 1 || month > 12 {
+			return 0, 0, false
+		}
+		first := time.Date(year, time.Month(month), 1, 0, 0, 0, 0, time.UTC)
+		last := time.Date(year, time.Month(month)+1, 0, 0, 0, 0, 0, time.UTC)
+		return ymdInt(first), ymdInt(last), true
+	case 4: // 年：2026
+		year, err := strconv.Atoi(digits)
+		if err != nil || year <= 0 {
+			return 0, 0, false
+		}
+		return int64(year*10000 + 101), int64(year*10000 + 1231), true
+	default:
+		return 0, 0, false
+	}
+}
+
+// ymdInt 把 time.Time 变成 YYYYMMDD 整数。
+func ymdInt(t time.Time) int64 {
+	return int64(t.Year()*10000 + int(t.Month())*100 + t.Day())
 }
 
 // ---------------------------------------------------------------------------
