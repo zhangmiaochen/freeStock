@@ -8,18 +8,29 @@
     <script>
       // ⚠ 给 Wails 运行时打底，**必须放在任何 bundle 之前**。
       //
-      // 前端依赖 @wailsio/runtime，它里面有些代码是
-      //   window._wails.environment.Debug        ← 没有空判断
-      // 而在 server 模式（容器/Linux）下，`environment` 是由 wails 的
-      // 资源服务器在返回 index.html 时注入的。一旦那次注入没生效
-      // （例如运行时就绪顺序、或页面被代理缓存），这里就会抛
-      //   TypeError: Cannot read properties of undefined (reading 'Debug')
-      // 整个应用白屏 —— 而这跟"数据加载失败"毫无关系，极难定位。
+      // 背景（wails v3.1.0 源码事实，不是猜测）：
+      //   `_wails.environment` 由 runtime.Core() 设置，而 Core() 只在
+      //   webview_window_{windows,linux,darwin}.go 里被调用 —— 也就是说
+      //   **只有桌面版（有 webview）才会注入**。
+      //   server 模式（容器/Linux/NAS）只额外注入了 /wails/custom.js（事件 WS），
+      //   从来没有 environment 这个东西。
       //
-      // 先补一份默认值：真值稍后由 wails 注入覆盖；覆盖不了也只是
-      // 拿不到 OS/Arch 这类提示信息，不会崩。
+      // 而 @wailsio/runtime 里有这样的代码（没有空判断）：
+      //     Cp() { return window._wails.environment.OS === "windows" }
+      //     G0() { return !!window._wails.environment.Debug }
+      // 于是：桌面版一切正常；容器里任何走到这些判断的组件
+      // （板块行情、股票列表）都会抛
+      //     TypeError: Cannot read properties of undefined (reading 'OS' / 'Debug')
+      // 直接白屏 —— 和数据加载毫无关系，极难定位。
+      //
+      // 这里补齐 runtime.Core() 会设置的那几个全局量，让 server 模式
+      // 与桌面版在这些判断上行为一致。真值若被注入会覆盖这里。
       window._wails = window._wails || {};
+      window._wails.flags = window._wails.flags || {};
+      window.wails = window.wails || {};
       window._wails.environment = window._wails.environment || {
+        // server 构建只会跑在 Linux 上；Arch 仅被桌面窗口辅助函数使用，
+        // 这里给 amd64 只是占位（arm 机型也不影响功能）。
         OS: "linux",
         Arch: "amd64",
         Debug: false,
