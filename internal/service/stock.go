@@ -698,6 +698,9 @@ func (s *StockService) GetStockUniverse(refresh bool) (*StockUniverse, error) {
 		"tradeDate", result.TradeDate,
 		"markets", len(result.Markets),
 		"elapsed", result.Elapsed,
+		// 这个页面曾把"全市场 × 三十多年"的日线和估值读进内存导致容器卡死。
+		// 把堆占用打出来，下次再出现类似问题能一眼看出是不是取数阶段涨的。
+		"heapMB", heapAllocMB(),
 	)
 	return result, nil
 }

@@ -1776,52 +1776,94 @@ func (p *lakeProvider) retryFill(codes []string, date int) (map[string]*stockdb.
 
 // bulkQuotes 一次读完区间内所有相关股票，返回每只（不晚于 end 的）最新一根行情，
 // 以及在这个区间里一根都没找到的代码。
+//
+// ⚠ **每只股票只留最近几根日线**，绝不把整段历史读进内存。
+//
+// 这里原来把区间内所有行读成 []BarRow 再按代码分组。平时区间很窄（近几天）
+// 还好，但 `LatestQuotes` 在"近期没有行情"时会以 **start=1990** 重取一次，
+// 那就是全市场 × 三十多年 ≈ 上千万行、几百 MB；再叠加 readTyped 的
+// "每文件一份 + 拼接一份"，真机（NAS 容器）上就是点开股票列表内存暴涨、
+// 随后卡死。
+//
+// 真正用到的其实只有：末日一根、前收一根、量比分母 5 根 —— 共 volumeRatioDays+1 根。
+// 改成流式读取、每只票只维护这一个小尾巴，内存与历史长度**无关**。
 func (p *lakeProvider) bulkQuotes(codes []string, start, end int) (map[string]*stockdb.Quote, []string, error) {
 	if start <= 0 {
 		start = 19900101
 	}
-	startYear, endYear := start/10000, end/10000
+	if end <= 0 {
+		return nil, nil, fmt.Errorf("缺少有效的截止交易日")
+	}
 
-	// ⚠ 用**按交易日分区**的读法：只打开 [start, end] 内的日分区。
-	//
-	// `DailyBarsMulti(codes, startYear, endYear)` 会把**整年**的日文件全读一遍
-	// 再按代码过滤 —— 股票列表和条件选股每次都走这条路，一个"取最新价"
-	// 的请求要扫 250 个文件。而区间读只打开真正需要的那几个。
-	bars, err := p.lake.DailyBarsInRange(codes, int64(start), int64(end))
+	// 末日 + 前收 + 量比窗口
+	const keepBars = volumeRatioDays + 1
+
+	tails := make(map[string][]cnlake.BarRow, len(codes))
+	err := p.lake.DailyBarsInRangeEach(codes, int64(start), int64(end), func(bar cnlake.BarRow) {
+		date := bar.Date()
+		if date < int64(start) || date > int64(end) {
+			return
+		}
+		code := cnlake.BareSymbol(bar.Symbol)
+		if code == "" {
+			return
+		}
+		list := tails[code]
+		// 已经攒满、而且这根比手里最旧的还旧 → 直接丢（绝大多数行走这里，
+		// 一万多行历史里只有最后一小段有用）
+		if len(list) == keepBars && date <= list[0].Date() {
+			return
+		}
+		tails[code] = keepLastBar(list, bar, keepBars)
+	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("读取数据湖 daily_bars 失败：%w", err)
 	}
 
-	grouped := make(map[string][]cnlake.BarRow, len(codes))
-	for _, bar := range bars {
-		date := bar.Date()
-		if date < int64(start) || date > int64(end) {
-			continue
+	missed := make([]string, 0, 16)
+	for _, code := range codes {
+		if len(tails[cnlake.BareSymbol(code)]) == 0 {
+			missed = append(missed, cnlake.BareSymbol(code))
 		}
-		code := cnlake.BareSymbol(bar.Symbol)
-		grouped[code] = append(grouped[code], bar)
 	}
 
-	valuations, _ := p.lake.ValuationsMulti(codes, startYear, endYear)
-	valuationIndex := make(map[string]map[int64]cnlake.ValuationRow, len(codes))
-	for _, row := range valuations {
-		code := cnlake.BareSymbol(row.Symbol)
-		if valuationIndex[code] == nil {
-			valuationIndex[code] = map[int64]cnlake.ValuationRow{}
+	// 估值只取**末日所在年份**。原来按 [startYear, endYear] 取，
+	// 在 start=1990 的补抓路径上会把 valuation_metrics 从 1990 年读到现在
+	//（另一个上千万行的数据集）——这是同一个页面上的第二个内存炸弹。
+	minYear, maxYear := 0, 0
+	for _, list := range tails {
+		year := int(list[len(list)-1].Date() / 10000)
+		if minYear == 0 || year < minYear {
+			minYear = year
 		}
-		valuationIndex[code][row.Date()] = row
+		if year > maxYear {
+			maxYear = year
+		}
+	}
+
+	valuationIndex := make(map[string]map[int64]cnlake.ValuationRow, len(codes))
+	if minYear > 0 {
+		valuations, vErr := p.lake.ValuationsMulti(codes, minYear, maxYear)
+		if vErr != nil {
+			// 估值缺失不该让整页失败：行情照出，只是没有 PE/PB
+			slog.Warn("读取估值失败，行情将缺少 PE/PB", "err", vErr)
+		}
+		for _, row := range valuations {
+			code := cnlake.BareSymbol(row.Symbol)
+			if valuationIndex[code] == nil {
+				valuationIndex[code] = map[int64]cnlake.ValuationRow{}
+			}
+			valuationIndex[code][row.Date()] = row
+		}
 	}
 
 	out := make(map[string]*stockdb.Quote, len(codes))
-	missed := make([]string, 0, 16)
 	for _, code := range codes {
 		bare := cnlake.BareSymbol(code)
-		list := grouped[bare]
+		list := tails[bare]
 		if len(list) == 0 {
-			missed = append(missed, bare)
-			continue
+			continue // 已在 missed 里
 		}
-		sort.Slice(list, func(i, j int) bool { return list[i].TradeDate < list[j].TradeDate })
 
 		last := list[len(list)-1]
 		var prevClose float64
@@ -1832,12 +1874,30 @@ func (p *lakeProvider) bulkQuotes(codes []string, start, end int) (map[string]*s
 		if found, ok := valuationIndex[bare][last.Date()]; ok {
 			valuation = &found
 		}
-		// list 是升序的全部日线，末根当日 → 前面的是量比分母
+		// list 是升序的尾巴，末根当日 → 前面的是量比分母
 		out[bare] = p.buildQuote(
 			bare, p.name(bare), last, prevClose, valuation,
 			p.shareHistory(bare), priorVolumes(list))
 	}
 	return out, missed, nil
+}
+
+// keepLastBar 把 bar 插入升序尾巴，超过 max 就丢掉最旧的一根。
+//
+// 尾巴最多几根，插入用 sort.Search + copy，成本 O(max)，与历史长度无关。
+func keepLastBar(list []cnlake.BarRow, bar cnlake.BarRow, max int) []cnlake.BarRow {
+	i := sort.Search(len(list), func(i int) bool { return list[i].TradeDate >= bar.TradeDate })
+	if i < len(list) && list[i].TradeDate == bar.TradeDate {
+		list[i] = bar // 同一天重复（多份快照/重复写）以最后一根为准
+		return list
+	}
+	list = append(list, cnlake.BarRow{})
+	copy(list[i+1:], list[i:])
+	list[i] = bar
+	if len(list) > max {
+		list = list[1:]
+	}
+	return list
 }
 
 // shareHistory 取某只股票的股本结构历史（带缓存）。
