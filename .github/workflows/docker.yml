@@ -30,6 +30,14 @@ jobs:
     permissions:
       contents: read
       packages: write
+    env:
+      # Docker Hub 凭据是**可选**的：配了就用它登录（避免匿名拉取被拒），
+      # 没配这两个 secret 时值为空，下面那步会自动跳过。
+      #
+      # ⚠ 放 job 级 env 而不是写在 step 的 if 里：GitHub 的 step `if`
+      # **不允许使用 secrets 上下文**，只能通过 env 间接判断。
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
 
     steps:
       - name: 检出代码
@@ -49,6 +57,24 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 可选但**强烈建议**：登录 Docker Hub，避免匿名拉取被拒。
+      #
+      # 失败长这样（只在"构建并推送"这一步，且和代码无关）：
+      #   failed to build: failed to solve: failed to fetch oauth token: denied: denied
+      # 原因：基础镜像（node / golang / debian）都在 Docker Hub，共享 runner 的
+      # 匿名拉取配额会被拒/抖动；同一份 Dockerfile 上一次能成功、下一次就失败。
+      #
+      # 配法：仓库 Settings → Secrets 里加 DOCKERHUB_USERNAME / DOCKERHUB_TOKEN
+      # （Token 用 Docker Hub 的 Access Token，只读权限即可）。
+      # **没配就自动跳过**，不会因为缺 secret 而失败。
+      - name: 登录 Docker Hub（可选，配了 secrets 才生效）
+        if: github.event_name != 'pull_request' && env.DOCKERHUB_USERNAME != ''
+        uses: docker/login-action@v3
+        with:
+          registry: docker.io
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ env.DOCKERHUB_TOKEN }}
 
       - name: 计算镜像名（GHCR 要求全小写）
         id: image
@@ -76,6 +102,10 @@ jobs:
             org.opencontainers.image.licenses=MIT
 
       - name: 构建并推送
+        id: build
+        # 拉基础镜像被 registry 拒绝/抖动是**偶发**的（同样的 Dockerfile 这次成功、
+        # 下次 denied）。别让它把一次正常的发布打成红叉：这里失败后重试一次。
+        continue-on-error: true
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -97,7 +127,26 @@ jobs:
             # 在仓库 Settings → Variables 里设 CNE_PIP_SPEC 即可生效。
             CNE_PIP_SPEC=${{ vars.CNE_PIP_SPEC }}
 
+      - name: 构建并推送（首次失败后重试一次）
+        if: steps.build.outcome == 'failure'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            GO_VERSION=1.26
+            NODE_VERSION=22
+            PNPM_VERSION=12
+            CNE_PIP_SPEC=${{ vars.CNE_PIP_SPEC }}
+
       - name: 输出摘要
+        if: always()
         run: |
           {
             echo "### Docker 镜像构建完成"
