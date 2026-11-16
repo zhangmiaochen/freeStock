@@ -473,12 +473,78 @@ func (s *StockService) testLake(rawRoot string) SourceStatus {
 	switch {
 	case hasBars && hasInstruments:
 		status.Message = fmt.Sprintf("数据湖可用，共 %d 个数据集；行情与标的齐备，可作为行情源", len(datasets))
+		// ⚠ 只检查"目录结构"是不够的：容器里路径存在、但**读不出 parquet**
+		//（没挂载对、权限不对、文件正在被 cne 写）时，页面照样"数据读取失败"，
+		// 而这里会显示"可用"，非常误导。所以再跑一次真实的端到端探测。
+		if probe, ok := probeLakeReadable(lake); ok {
+			status.Message += "；" + probe
+		} else {
+			status.OK = false
+			status.Message += "；但读取探测失败：" + probe
+		}
 	case hasInstruments:
 		status.Message = fmt.Sprintf("数据湖可用，共 %d 个数据集；但缺少 daily_bars（日线），暂时只能作为财务数据来源", len(datasets))
 	default:
 		status.Message = fmt.Sprintf("数据湖可用，共 %d 个数据集；缺少 instruments / daily_bars，暂时只能作为财务数据来源", len(datasets))
 	}
 	return status
+}
+
+// probeLakeReadable 真的去读一次日线，验证"路径存在"之外的可用性。
+//
+// 返回 (说明文字, 是否成功)。失败时的文字就是**真实原因**（权限/路径/文件半截），
+// 直接展示给用户，省掉一轮"看起来配好了但读不出来"。
+func probeLakeReadable(lake *cnlake.Lake) (string, bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	provider := NewLakeProvider(lake)
+
+	tradeDate, err := provider.LatestTradeDate(ctx)
+	if err != nil {
+		return fmt.Sprintf("读不到最新交易日：%v", err), false
+	}
+	if tradeDate <= 0 {
+		return "数据湖里没有任何日线分区", false
+	}
+
+	codes, err := provider.StockCodes(ctx)
+	if err != nil {
+		return fmt.Sprintf("读不到标的清单：%v", err), false
+	}
+	total := 0
+	for _, list := range codes {
+		total += len(list)
+	}
+	if total == 0 {
+		return "标的清单为空", false
+	}
+
+	// 抽样两三只，确认 daily_bars 真能解析出来（这一步才会暴露权限/半截文件）
+	sample := make([]string, 0, 3)
+	for _, list := range codes {
+		for _, code := range list {
+			if len(sample) >= 3 {
+				break
+			}
+			sample = append(sample, code)
+		}
+		if len(sample) >= 3 {
+			break
+		}
+	}
+	quotes, err := provider.LatestQuotes(ctx, sample, tradeDate)
+	if err != nil {
+		return fmt.Sprintf("最新交易日 %d，标的 %d 只，但抽样读日线失败：%v",
+			tradeDate, total, err), false
+	}
+	if len(quotes) == 0 {
+		return fmt.Sprintf("最新交易日 %d（%d 只标的），但抽样 %d 只都没读到行情 —— "+
+			"日线分区可能还没写到这一天，或文件正在被 cne 写入",
+			tradeDate, total, len(sample)), false
+	}
+	return fmt.Sprintf("最新交易日 %d，标的 %d 只，抽样 %d 只取到 %d 只行情",
+		tradeDate, total, len(sample), len(quotes)), true
 }
 
 // lakeCanServeQuotes 判断数据湖能不能当行情源用。
