@@ -313,25 +313,20 @@ func (s *PortfolioService) LatestClose(codes []string, strategyID string) (map[s
 	if err != nil {
 		return out, fmt.Errorf("取行情失败：%w", err)
 	}
-	quotes, err := provider.LatestQuotes(ctx, codes, tradeDate)
-	if err != nil {
-		return out, fmt.Errorf("取行情失败（%s）：%w", source.Name, err)
-	}
-	for code, quote := range quotes {
-		if quote == nil || quote.Close <= 0 {
-			continue
+	// ⚠ **逐只取，不要用 provider.LatestQuotes。**
+	//
+	// LatestQuotes 是"全市场"语义：它会触发不限起点补抓（2506 只）+ 批量读
+	// 全市场近 3 个月（5229 只、实测 30s）。而这里只关心持仓那几只 ——
+	// 用一次全市场操作换几只股票的收盘价，正是"组合列表加载很久"的根源
+	//（日志里 method=4287571721 那次调用就是它）。
+	//
+	// rawCloseFor 是真正的逐只查询：读该日期所在月份的 1~2 个分区，
+	// 成本与持仓数成正比。
+	_ = source
+	for _, code := range codes {
+		if px, ok := s.rawCloseFor(code, tradeDate); ok && px > 0 {
+			out[code] = portfolio.PricePoint{Close: px, Date: fmt.Sprintf("%d", tradeDate)}
 		}
-		date := ""
-		if quote.Date > 0 {
-			date = fmt.Sprintf("%d", quote.Date)
-		}
-		closePx := quote.Close
-		if quote.Date > 0 {
-			if v, ok := s.rawCloseFor(code, int(quote.Date)); ok {
-				closePx = v
-			}
-		}
-		out[code] = portfolio.PricePoint{Close: closePx, Date: date}
 	}
 	return out, nil
 }
