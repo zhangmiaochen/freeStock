@@ -37,6 +37,19 @@ services:
       # 配置 / 组合库 / 缓存 / 日志 / cne venv 都落在这里（挂载卷）
       FREESTOCK_DATA_DIR: /data
 
+      # ── 内存保护（NAS 上建议开）────────────────────────────────────
+      # Go 默认会等堆涨到活跃对象的 2 倍才回收。板块行情这类页面要一次性
+      # 读一段历史日线，峰值容易把 NAS 内存吃满，甚至把整机拖住。
+      #
+      # GOMEMLIMIT 给 Go 一个**软上限**：接近它时提前加速 GC，而不是先撑爆容器。
+      # 取值要**小于**容器可用内存（下面的 mem_limit 或 NAS 给容器的配额），
+      # 例如容器给 2G 就设 1500MiB。设太小会变成 GC 空转，反而更慢。
+      # GOMEMLIMIT: 1500MiB
+
+    # 容器内存硬上限：超了只杀这个容器（restart 会拉起），不会拖垮整台 NAS。
+    # 按 NAS 实际内存调，别超过物理内存的一半。
+    # mem_limit: 2g
+
     volumes:
       # ⚠ **必须挂载**：config.json、portfolio.db、cache/、logs/。
       # NAS 上换成比如 /volume1/docker/freestock:/data

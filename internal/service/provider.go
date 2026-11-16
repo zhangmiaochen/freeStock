@@ -98,16 +98,6 @@ type Provider interface {
 	Boards(ctx context.Context) ([]stockdb.Board, error)
 }
 
-// miniBar 是只保留**区间计算**所需字段的日线（日期 / 收盘）。
-//
-// 为什么单独一个类型：板块的「最近 N 个交易日涨跌幅」只需要基准日与最新日的收盘价。
-// 数据湖那条路一次扫全市场几十万行，用 `stockdb.Quote` 会多解码 18 个字段、
-// 多组装一次股本/换手率，每行多花的时间会直接乘上百万倍。
-type miniBar struct {
-	Date  int64
-	Close float64
-}
-
 // ---------------------------------------------------------------------------
 // free-stockdb
 // ---------------------------------------------------------------------------
@@ -1025,58 +1015,64 @@ func (p *lakeProvider) ClosesBefore(ctx context.Context, codes []string, dates [
 	sort.Ints(sorted)
 	from := shiftBack(sorted[0], closesLookbackDays)
 
-	bars, err := p.dailyBarsMulti(codes, from, sorted[len(sorted)-1])
-	if err != nil {
-		return nil, err
-	}
-
+	// ⚠ 这里**不能**先把区间内所有日线读成切片再逐行挑。
+	//
+	// 板块区间行情要的是"全市场 × 最近一百多个交易日"的收盘价：
+	// 全市场约 5500 只 × 130 个交易日 ≈ 70 万行，光 BarRow 就几十 MB，
+	// 而 readTyped 还要"每个文件各存一份再拼接"，峰值翻倍。
+	// 真机上（NAS 容器）表现就是点开板块行情页面内存暴涨、随后卡死。
+	//
+	// 改用流式回调：每行到达时只更新"该代码在每个基准日上、日期最大的那根收盘价"，
+	// 内存从 O(行数) 降到 O(代码数 × 基准日数)（约 5 × 5500 个 float）。
+	// 语义与原来的二分查找完全一致：都是"不晚于基准日的最后一根"。
 	for _, date := range dates {
 		out[date] = make(map[string]float64, len(codes))
 	}
-	for code, list := range bars {
-		for _, date := range sorted {
-			idx := sort.Search(len(list), func(i int) bool { return list[i].Date > int64(date) })
-			if idx == 0 {
-				continue // 该日之前这根票还没有数据
-			}
-			out[date][code] = list[idx-1].Close
+
+	type snapshot struct {
+		date  int64
+		close float64
+	}
+	best := make([]map[string]snapshot, len(sorted))
+	for i := range best {
+		best[i] = make(map[string]snapshot, len(codes))
+	}
+
+	err := p.lake.DailyBarsInRangeEach(codes, int64(from), int64(sorted[len(sorted)-1]), func(row cnlake.BarRow) {
+		// 与 barsFromQuotes 一致：收盘价无效的行不要
+		if row.Close <= 0 {
+			return
 		}
-	}
-	return out, nil
-}
-
-// dailyBarsMulti 一次扫完区间内的日分区，取回这一批股票的收盘价序列。
-//
-// `cnlake.Lake.DailyBarsInRange` 返回的行按 (交易日, 代码) 升序，
-// 所以同一只股票内部天然按日期升序 —— 不需要再排序。
-func (p *lakeProvider) dailyBarsMulti(codes []string, start, end int) (map[string][]miniBar, error) {
-	if start <= 0 {
-		start = 19900101
-	}
-	if end <= 0 {
-		end = 20991231
-	}
-
-	rows, err := p.lake.DailyBarsInRange(codes, int64(start), int64(end))
+		date := row.Date()
+		if date < int64(from) {
+			return
+		}
+		bare := cnlake.BareSymbol(row.Symbol)
+		if bare == "" {
+			return
+		}
+		// 只有"不晚于基准日"的那些周期需要这根；sorted 升序，二分即可定位起点。
+		start := sort.SearchInts(sorted, int(date))
+		for j := start; j < len(sorted); j++ {
+			base := int64(sorted[j])
+			if date > base {
+				break
+			}
+			cur, ok := best[j][bare]
+			if ok && cur.date >= date {
+				continue // 已经有更近的一根
+			}
+			best[j][bare] = snapshot{date: date, close: row.Close}
+		}
+	})
 	if err != nil {
 		return nil, fmt.Errorf("读取数据湖 daily_bars 失败：%w", err)
 	}
 
-	out := make(map[string][]miniBar, len(codes))
-	for _, row := range rows {
-		// 与 barsFromQuotes / scoredBarsFrom 一致：收盘价无效的行不要
-		if row.Close <= 0 {
-			continue
+	for j, date := range sorted {
+		for code, snap := range best[j] {
+			out[date][code] = snap.close
 		}
-		date := row.Date()
-		if date < int64(start) || date > int64(end) {
-			continue
-		}
-		bare := cnlake.BareSymbol(row.Symbol)
-		if bare == "" {
-			continue
-		}
-		out[bare] = append(out[bare], miniBar{Date: date, Close: row.Close})
 	}
 	return out, nil
 }

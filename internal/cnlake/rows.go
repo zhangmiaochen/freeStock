@@ -359,12 +359,19 @@ func readTyped[T any](files []string, keep func(*T) bool) ([]T, error) {
 	close(jobs)
 	wg.Wait()
 
-	out := make([]T, 0, 1024)
+	// 先汇总再按**精确容量**分配：
+	// 用 append 一路增长会让底层数组反复翻倍，峰值是最终大小的 2 倍以上。
+	total := 0
+	for i := range perFile {
+		total += len(perFile[i])
+	}
+	out := make([]T, 0, total)
 	for i := range files {
 		if errs[i] != nil {
 			return out, errs[i]
 		}
 		out = append(out, perFile[i]...)
+		perFile[i] = nil // 尽早让 GC 回收，别把两份同时留在堆上
 	}
 	return out, nil
 }
@@ -410,6 +417,32 @@ func readTypedFile[T any](handle *parquetHandle, keep func(*T) bool, out *[]T) e
 		for i := 0; i < count; i++ {
 			if keep == nil || keep(&buffer[i]) {
 				*out = append(*out, buffer[i])
+			}
+		}
+		if err != nil {
+			return nil // io.EOF 属正常结束
+		}
+		if count == 0 {
+			return nil
+		}
+	}
+}
+
+// readTypedFileEach 与 readTypedFile 同源，但**每行直接回调**，不累积切片。
+//
+// 给"只用到极少数行"的场景用：全市场 × 一段区间的行数可以是几十万，
+// 而调用方真正需要的可能只有每个基准日各一行。
+func readTypedFileEach[T any](handle *parquetHandle, keep func(*T) bool, each func(*T)) error {
+	reader := parquet.NewGenericReader[T](handle.file)
+	defer reader.Close()
+
+	const batch = 2048
+	buffer := make([]T, batch)
+	for {
+		count, err := reader.Read(buffer)
+		for i := 0; i < count; i++ {
+			if keep == nil || keep(&buffer[i]) {
+				each(&buffer[i])
 			}
 		}
 		if err != nil {
@@ -536,6 +569,86 @@ func (l *Lake) DailyBarsInRange(codes []string, startDate, endDate int64) ([]Bar
 		return rows[i].Symbol < rows[j].Symbol
 	})
 	return rows, nil
+}
+
+// DailyBarsInRangeEach 逐行回调 [startDate, endDate] 内的日线，**不在内存里累积**。
+//
+// 与 DailyBarsInRange 的唯一区别：不把结果拼成一个 []BarRow。
+//
+// 存在的理由：板块区间行情要"全市场 × 最近一百多个交易日"的收盘价，
+// 那会有几十万行（几十 MB）；而真正用到的只有**每个基准日各取一行**。
+// 先把几十万行读进内存再逐行挑，是这个页面内存暴涨的直接原因。
+//
+// ⚠ 回调会被**多个 worker 并发**调用（读取是并行的），且行序**不保证**有序 ——
+// 调用方自己加锁/维护状态。返回值只表示是否读取失败。
+func (l *Lake) DailyBarsInRangeEach(codes []string, startDate, endDate int64, each func(BarRow)) error {
+	if each == nil {
+		return nil
+	}
+	want := map[string]struct{}{}
+	for _, code := range codes {
+		if bare := BareSymbol(code); bare != "" {
+			want[bare] = struct{}{}
+		}
+	}
+	all := len(want) == 0
+
+	files, err := l.filesForDateRange(startDate, endDate)
+	if err != nil {
+		return err
+	}
+	if len(files) == 0 {
+		return nil
+	}
+
+	keep := func(row *BarRow) bool {
+		if all {
+			return true
+		}
+		_, ok := want[BareSymbol(row.Symbol)]
+		return ok
+	}
+
+	// 每行立即回调，峰值只有"一个文件的批缓冲 × 并发数"，与区间长度无关。
+	var mu sync.Mutex
+	emit := func(row *BarRow) {
+		mu.Lock()
+		each(*row)
+		mu.Unlock()
+	}
+
+	errs := make([]error, len(files))
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	for w := 0; w < lakeReadWorkers(len(files)); w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range jobs {
+				handle, err := openParquet(files[i])
+				if err != nil {
+					errs[i] = err
+					continue
+				}
+				if err := readTypedFileEach(handle, keep, emit); err != nil {
+					errs[i] = err
+				}
+				handle.Close()
+			}
+		}()
+	}
+	for i := range files {
+		jobs <- i
+	}
+	close(jobs)
+	wg.Wait()
+
+	for _, err := range errs {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // DatesInRange 返回 [startDate, endDate] 之内**实际有数据**的交易日（升序）。

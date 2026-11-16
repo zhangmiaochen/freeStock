@@ -3,6 +3,7 @@ package service
 import (
 	"fmt"
 	"log/slog"
+	"runtime"
 	"sort"
 	"time"
 
@@ -118,11 +119,13 @@ func (s *StockService) GetBoardQuotes(category string, periodDays []int, limit i
 	if err != nil {
 		return nil, err
 	}
+	heapAfterBoards := heapAllocMB()
 
 	universe, err := s.GetStockUniverse(false)
 	if err != nil {
 		return nil, err
 	}
+	heapAfterUniverse := heapAllocMB()
 
 	// 成分股行情索引：板块聚合要按代码反复查，必须先建索引
 	quotes := make(map[string]StockItem, len(universe.Stocks))
@@ -202,11 +205,45 @@ func (s *StockService) GetBoardQuotes(category string, periodDays []int, limit i
 	result.Boards = all
 	result.Elapsed = time.Since(started).Round(time.Millisecond).String()
 
+	heapAfterPeriods := heapAllocMB()
+	peakMB := heapAfterPeriods
+	if heapAfterUniverse > peakMB {
+		peakMB = heapAfterUniverse
+	}
+
 	slog.Info("板块行情就绪",
 		"category", category, "boards", result.BoardCount,
 		"returned", len(all), "up", result.UpBoards, "down", result.DownBoards,
-		"elapsed", result.Elapsed)
+		"elapsed", result.Elapsed,
+		// 堆占用按阶段打出来：这个页面曾因为"把全市场一百多天的日线
+		// 读成切片再逐行挑"把容器内存撑爆。有问题时这三个数字能直接指出
+		// 是板块名单、行情快照，还是区间历史那一步。
+		"heapMB", fmt.Sprintf("boards=%.0f universe=%.0f periods=%.0f",
+			heapAfterBoards, heapAfterUniverse, heapAfterPeriods))
+
+	// 单次请求把堆抬得很高时明确提示：多半是自定义周期太长（回看窗口按周期放大）。
+	if peakMB >= boardHeapWarnMB {
+		slog.Warn("板块行情占用内存偏高",
+			"heapMB", peakMB, "periods", periods,
+			"hint", "缩短自定义周期（或去掉自定义列）可以显著降低内存占用")
+	}
 	return result, nil
+}
+
+// boardHeapWarnMB 是"这一次请求把堆抬到多高就值得警告"的阈值（MB）。
+//
+// 取 512：正常的板块行情（默认 5/10/15/30/60）在几百只票的湖上是几十 MB 级，
+// 超过这个数说明回看区间或代码数远超预期，值得提醒用户缩短周期。
+const boardHeapWarnMB = 512
+
+// heapAllocMB 返回当前堆上活跃对象占用（MB）。
+//
+// 用 runtime.MemStats 而不是 metrics：一次调用约 1ms 的 STW，
+// 在一个页面级请求里打几次完全可接受，换来的是"哪个阶段涨的"这个关键信息。
+func heapAllocMB() float64 {
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+	return float64(ms.HeapAlloc) / (1 << 20)
 }
 
 // aggregateBoard 把成分股行情聚合成板块行情。
