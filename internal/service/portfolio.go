@@ -50,6 +50,16 @@ type PortfolioService struct {
 	// 它的锁与上面的 mu **分开**：发送要跑 BuildPlan（可能几秒），
 	// 不能占着 db() 的互斥锁。见 internal/service/email.go。
 	emailSched *emailScheduler
+
+	// tradeDate 缓存"最新交易日"，只给"取某只股票收盘价"这类高频小查询用。
+	//
+	// ⚠ 为什么需要：`rawPriceOr` 原来每次都调 `GetStockUniverse(false)`
+	// 只为拿一个交易日 —— 而那是 5400 只的全量快照，冷启动时几十秒到几分钟。
+	// 组合金额视图对**每只持仓**都要取一次价，于是"组合列表加载很久出不来"。
+	// 交易日只需要一次（便宜的日历读），缓存 1 分钟即可。
+	tradeDateMu sync.Mutex
+	tradeDate   int
+	tradeDateAt time.Time
 }
 
 // setBackfillCache 记下本次回填用的日线缓存，供紧随其后的回测复用。

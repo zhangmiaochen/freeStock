@@ -1,7 +1,9 @@
 package service
 
 import (
+	"context"
 	"fmt"
+	"time"
 
 	"freestock/internal/portfolio"
 )
@@ -20,7 +22,7 @@ type MoneyView struct {
 	InitialCapital float64 `json:"initialCapital"`
 	Cash           float64 `json:"cash"`
 	MarketValue    float64 `json:"marketValue"`
-	Equity         float64 `json:"equity"`  // 当前本金
+	Equity         float64 `json:"equity"`    // 当前本金
 	ReturnPct      float64 `json:"returnPct"` // 相对初始本金
 }
 
@@ -157,12 +159,50 @@ func (s *PortfolioService) SyncPortfolioMoney(portfolioID string) (*portfolio.Mo
 }
 
 // rawPriceOr 取最新不复权收盘价；取不到用兜底价。
+// latestTradeDate 返回最新交易日（带 1 分钟缓存）。
+//
+// 它替代了原来"为了一个日期去要全量快照"的做法：交易日历是**小数据集**，
+// 读一次几十毫秒；而全量股票快照是 5400 只、冷启动几十秒到几分钟，
+// 且要排队等 universeMu。
+func (s *PortfolioService) latestTradeDate() int {
+	if s.stock == nil {
+		return 0
+	}
+	s.tradeDateMu.Lock()
+	if s.tradeDate > 0 && time.Since(s.tradeDateAt) < time.Minute {
+		date := s.tradeDate
+		s.tradeDateMu.Unlock()
+		return date
+	}
+	s.tradeDateMu.Unlock()
+
+	provider, _ := s.stock.snapshot()
+	if provider == nil {
+		return 0
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	date, err := provider.LatestTradeDate(ctx)
+	if err != nil || date <= 0 {
+		return 0
+	}
+
+	s.tradeDateMu.Lock()
+	s.tradeDate, s.tradeDateAt = date, time.Now()
+	s.tradeDateMu.Unlock()
+	return date
+}
+
+// rawPriceOr 取某只股票的原始收盘价；取不到时用 fallback（成本价）。
+//
+// ⚠ 这里**不能**再走 GetStockUniverse：组合金额视图会对每只持仓调用它，
+// 而全量快照是重活（冷启动几十秒到几分钟，还要排队等锁）。
+// 只要一个交易日 + 一只股票的价格，按代码取即可。
 func (s *PortfolioService) rawPriceOr(code string, fallback float64) float64 {
-	if s.stock != nil {
-		if u, err := s.stock.GetStockUniverse(false); err == nil && u.TradeDate > 0 {
-			if px, ok := s.rawCloseFor(code, int(u.TradeDate)); ok && px > 0 {
-				return px
-			}
+	date := s.latestTradeDate()
+	if date > 0 {
+		if px, ok := s.rawCloseFor(code, date); ok && px > 0 {
+			return px
 		}
 	}
 	return fallback
