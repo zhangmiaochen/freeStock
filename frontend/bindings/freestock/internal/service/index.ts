@@ -88,6 +88,7 @@ export {
     StockSearchItem,
     StockUniverse,
     StockValuation,
+    StorageMigrationState,
     StrategyRefresh,
     StrengthSummary,
     TemperatureFactor,

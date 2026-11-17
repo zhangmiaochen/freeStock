@@ -5916,6 +5916,42 @@ export class StockValuation {
 }
 
 /**
+ * StorageMigrationState 是 UI 可见的迁移状态。状态文件在数据目录中，
+ * 与数据库一起备份/迁移，避免重启后重复执行大迁移。
+ */
+export class StorageMigrationState {
+    /**
+     * idle/running/succeeded/failed
+     */
+    "status": string;
+    "startedAt"?: string;
+    "completedAt"?: string;
+    "sourcePath"?: string;
+    "corePath"?: string;
+    "analyticsPath"?: string;
+    "coreQuick"?: string;
+    "analyticsQuick"?: string;
+    "error"?: string;
+
+    /** Creates a new StorageMigrationState instance. */
+    constructor($$source: Partial<StorageMigrationState> = {}) {
+        if (!("status" in $$source)) {
+            this["status"] = "";
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new StorageMigrationState instance from a string or object.
+     */
+    static createFrom($$source: any = {}): StorageMigrationState {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new StorageMigrationState($$parsedSource as Partial<StorageMigrationState>);
+    }
+}
+
+/**
  * StrategyRefresh 是单个策略的刷新结果。
  */
 export class StrategyRefresh {

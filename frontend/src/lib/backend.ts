@@ -598,6 +598,8 @@ export const api = {
   portfolio: {
     getOptions: () => PortfolioService.GetPortfolioOptions() as Promise<PortfolioOptions>,
     getDatabasePath: () => PortfolioService.GetDatabasePath() as Promise<string>,
+    getStorageMigrationState: () => PortfolioService.GetStorageMigrationState() as Promise<import("../../bindings/freestock/internal/service/models").StorageMigrationState>,
+    migrateStorage: () => PortfolioService.MigrateStorage() as Promise<import("../../bindings/freestock/internal/service/models").StorageMigrationState>,
     list: () => PortfolioService.ListPortfolios() as Promise<Portfolio[]>,
     create: (input: PortfolioInput) =>
       PortfolioService.CreatePortfolio(input) as Promise<Portfolio>,

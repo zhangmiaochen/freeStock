@@ -273,11 +273,20 @@ export function GetSignalSummary(): $CancellablePromise<$models.SignalSummary | 
 }
 
 /**
+ * GetStorageMigrationState 返回持久化迁移状态。
+ */
+export function GetStorageMigrationState(): $CancellablePromise<$models.StorageMigrationState> {
+    return $Call.ByID(989351508).then(($result: any) => {
+        return $$createType30($result);
+    });
+}
+
+/**
  * GetStrengthSummary 返回评分物化状态。
  */
 export function GetStrengthSummary(strategyID: string): $CancellablePromise<$models.StrengthSummary | null> {
     return $Call.ByID(1979789275, strategyID).then(($result: any) => {
-        return $$createType31($result);
+        return $$createType32($result);
     });
 }
 
@@ -294,7 +303,7 @@ export function GetStrengthSummary(strategyID: string): $CancellablePromise<$mod
  */
 export function LatestClose(codes: string[], strategyID: string): $CancellablePromise<{ [_ in string]?: portfolio$0.PricePoint }> {
     return $Call.ByID(898950825, codes, strategyID).then(($result: any) => {
-        return $$createType33($result);
+        return $$createType34($result);
     });
 }
 
@@ -303,7 +312,7 @@ export function LatestClose(codes: string[], strategyID: string): $CancellablePr
  */
 export function ListBacktests(portfolioID: string): $CancellablePromise<portfolio$0.BacktestRun[]> {
     return $Call.ByID(2191167028, portfolioID).then(($result: any) => {
-        return $$createType35($result);
+        return $$createType36($result);
     });
 }
 
@@ -312,7 +321,7 @@ export function ListBacktests(portfolioID: string): $CancellablePromise<portfoli
  */
 export function ListPortfolios(): $CancellablePromise<portfolio$0.Portfolio[]> {
     return $Call.ByID(4287571721).then(($result: any) => {
-        return $$createType36($result);
+        return $$createType37($result);
     });
 }
 
@@ -323,6 +332,18 @@ export function ListPortfolios(): $CancellablePromise<portfolio$0.Portfolio[]> {
  */
 export function MaintainDatabase(): $CancellablePromise<void> {
     return $Call.ByID(3313965140);
+}
+
+/**
+ * MigrateStorage 执行一次核心库+分析库迁移。
+ * 
+ * 这是显式 UI 操作，不在启动时调用；同一进程单飞；成功后状态持久化，
+ * 相同源/目标再次点击不会重复运行。目标存在时底层迁移工具会拒绝覆盖。
+ */
+export function MigrateStorage(): $CancellablePromise<$models.StorageMigrationState> {
+    return $Call.ByID(1127300630).then(($result: any) => {
+        return $$createType30($result);
+    });
 }
 
 /**
@@ -346,13 +367,13 @@ export function PreviewAutoPortfolio(req: $models.AutoPortfolioRequest): $Cancel
  */
 export function PreviewEmail(): $CancellablePromise<$models.EmailPreview | null> {
     return $Call.ByID(4004031860).then(($result: any) => {
-        return $$createType38($result);
+        return $$createType39($result);
     });
 }
 
 export function RefreshBackfill(strategyID: string, startDate: number, endDate: number, limit: number, force: boolean): $CancellablePromise<$models.BackfillResult | null> {
     return $Call.ByID(1067070197, strategyID, startDate, endDate, limit, force).then(($result: any) => {
-        return $$createType40($result);
+        return $$createType41($result);
     });
 }
 
@@ -368,7 +389,7 @@ export function RefreshBackfill(strategyID: string, startDate: number, endDate: 
  */
 export function RefreshBackfillAll(startDate: number, endDate: number, limit: number, force: boolean): $CancellablePromise<$models.BackfillAllResult | null> {
     return $Call.ByID(2095863476, startDate, endDate, limit, force).then(($result: any) => {
-        return $$createType42($result);
+        return $$createType43($result);
     });
 }
 
@@ -380,7 +401,7 @@ export function RefreshBackfillAll(startDate: number, endDate: number, limit: nu
  */
 export function RefreshSignals(codes: string[], startDate: number, endDate: number, opts: $models.SignalGenerateOptions): $CancellablePromise<$models.SignalGenerateResult | null> {
     return $Call.ByID(1023918032, codes, startDate, endDate, opts).then(($result: any) => {
-        return $$createType44($result);
+        return $$createType45($result);
     });
 }
 
@@ -393,7 +414,7 @@ export function RefreshSignals(codes: string[], startDate: number, endDate: numb
  */
 export function RefreshSignalsFor(codes: string[], startDate: number, endDate: number, limit: number): $CancellablePromise<$models.SignalGenerateResult | null> {
     return $Call.ByID(829008031, codes, startDate, endDate, limit).then(($result: any) => {
-        return $$createType44($result);
+        return $$createType45($result);
     });
 }
 
@@ -417,7 +438,7 @@ export function RefreshSignalsFor(codes: string[], startDate: number, endDate: n
  */
 export function RefreshStrength(strategyID: string, limit: number, force: boolean): $CancellablePromise<$models.RefreshResult | null> {
     return $Call.ByID(3438224358, strategyID, limit, force).then(($result: any) => {
-        return $$createType46($result);
+        return $$createType47($result);
     });
 }
 
@@ -429,7 +450,7 @@ export function RefreshStrength(strategyID: string, limit: number, force: boolea
  */
 export function RefreshStrengthAll(limit: number, force: boolean): $CancellablePromise<$models.RefreshAllResult | null> {
     return $Call.ByID(757294405, limit, force).then(($result: any) => {
-        return $$createType48($result);
+        return $$createType49($result);
     });
 }
 
@@ -454,7 +475,7 @@ export function SaveEmailPrefs($in: config$0.EmailPrefs): $CancellablePromise<$m
  */
 export function SendDailyEmailNow(): $CancellablePromise<$models.EmailSendResult | null> {
     return $Call.ByID(1382444147).then(($result: any) => {
-        return $$createType50($result);
+        return $$createType51($result);
     });
 }
 
@@ -466,7 +487,7 @@ export function SendDailyEmailNow(): $CancellablePromise<$models.EmailSendResult
  */
 export function SendTestEmail(to: string): $CancellablePromise<$models.EmailSendResult | null> {
     return $Call.ByID(1363171146, to).then(($result: any) => {
-        return $$createType50($result);
+        return $$createType51($result);
     });
 }
 
@@ -484,7 +505,7 @@ export function SetPortfolioCapital(portfolioID: string, capital: number): $Canc
  */
 export function SyncPortfolioMoney(portfolioID: string): $CancellablePromise<portfolio$0.Money | null> {
     return $Call.ByID(576543915, portfolioID).then(($result: any) => {
-        return $$createType52($result);
+        return $$createType53($result);
     });
 }
 
@@ -528,26 +549,27 @@ const $$createType26 = portfolio$0.ScoreSnapshot.createFrom;
 const $$createType27 = $Create.Array($$createType26);
 const $$createType28 = $models.SignalSummary.createFrom;
 const $$createType29 = $Create.Nullable($$createType28);
-const $$createType30 = $models.StrengthSummary.createFrom;
-const $$createType31 = $Create.Nullable($$createType30);
-const $$createType32 = portfolio$0.PricePoint.createFrom;
-const $$createType33 = $Create.Map($Create.Any, $$createType32);
-const $$createType34 = portfolio$0.BacktestRun.createFrom;
-const $$createType35 = $Create.Array($$createType34);
-const $$createType36 = $Create.Array($$createType14);
-const $$createType37 = $models.EmailPreview.createFrom;
-const $$createType38 = $Create.Nullable($$createType37);
-const $$createType39 = $models.BackfillResult.createFrom;
-const $$createType40 = $Create.Nullable($$createType39);
-const $$createType41 = $models.BackfillAllResult.createFrom;
-const $$createType42 = $Create.Nullable($$createType41);
-const $$createType43 = $models.SignalGenerateResult.createFrom;
-const $$createType44 = $Create.Nullable($$createType43);
-const $$createType45 = $models.RefreshResult.createFrom;
-const $$createType46 = $Create.Nullable($$createType45);
-const $$createType47 = $models.RefreshAllResult.createFrom;
-const $$createType48 = $Create.Nullable($$createType47);
-const $$createType49 = $models.EmailSendResult.createFrom;
-const $$createType50 = $Create.Nullable($$createType49);
-const $$createType51 = portfolio$0.Money.createFrom;
-const $$createType52 = $Create.Nullable($$createType51);
+const $$createType30 = $models.StorageMigrationState.createFrom;
+const $$createType31 = $models.StrengthSummary.createFrom;
+const $$createType32 = $Create.Nullable($$createType31);
+const $$createType33 = portfolio$0.PricePoint.createFrom;
+const $$createType34 = $Create.Map($Create.Any, $$createType33);
+const $$createType35 = portfolio$0.BacktestRun.createFrom;
+const $$createType36 = $Create.Array($$createType35);
+const $$createType37 = $Create.Array($$createType14);
+const $$createType38 = $models.EmailPreview.createFrom;
+const $$createType39 = $Create.Nullable($$createType38);
+const $$createType40 = $models.BackfillResult.createFrom;
+const $$createType41 = $Create.Nullable($$createType40);
+const $$createType42 = $models.BackfillAllResult.createFrom;
+const $$createType43 = $Create.Nullable($$createType42);
+const $$createType44 = $models.SignalGenerateResult.createFrom;
+const $$createType45 = $Create.Nullable($$createType44);
+const $$createType46 = $models.RefreshResult.createFrom;
+const $$createType47 = $Create.Nullable($$createType46);
+const $$createType48 = $models.RefreshAllResult.createFrom;
+const $$createType49 = $Create.Nullable($$createType48);
+const $$createType50 = $models.EmailSendResult.createFrom;
+const $$createType51 = $Create.Nullable($$createType50);
+const $$createType52 = portfolio$0.Money.createFrom;
+const $$createType53 = $Create.Nullable($$createType52);

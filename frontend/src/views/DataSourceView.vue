@@ -29,6 +29,22 @@ const status = ref<SourceStatus | null>(null);
 const busy = ref<"test" | "switch" | "cache" | "">("");
 const message = ref("");
 const configPath = ref("");
+const migration = ref<Awaited<ReturnType<typeof api.portfolio.getStorageMigrationState>> | null>(null);
+const migrationBusy = ref(false);
+const migrationError = ref("");
+
+async function loadMigration() {
+  try { migration.value = await api.portfolio.getStorageMigrationState(); } catch (err) { migrationError.value = errorMessage(err); }
+}
+
+async function migrateStorage() {
+  if (migration.value?.status === "succeeded" || migrationBusy.value) return;
+  migrationBusy.value = true;
+  migrationError.value = "";
+  try { migration.value = await api.portfolio.migrateStorage(); }
+  catch (err) { migrationError.value = errorMessage(err); await loadMigration(); }
+  finally { migrationBusy.value = false; }
+}
 
 const isOK = computed(() => status.value?.ok === true);
 const hasStatus = computed(() => status.value !== null);
@@ -58,9 +74,10 @@ async function loadSources() {
 onActivated(() => {
   busy.value = "";
   void loadSources();
+  void loadMigration();
 });
 
-onMounted(loadSources);
+onMounted(async () => { await loadSources(); await loadMigration(); });
 
 async function test(kind: string, url: string) {
   busy.value = "test";
@@ -275,6 +292,36 @@ function kindLabel(kind: string) {
 
       <!-- 财务数据来源：行情库没有财报，需要外部数据湖补 -->
       <DataLakeCard />
+
+      <section class="bg-card rounded-lg border p-4">
+        <div class="flex items-center gap-2">
+          <Database class="text-muted-foreground size-4" />
+          <h3 class="text-sm font-medium">数据存储迁移</h3>
+          <Badge v-if="migration?.status === 'succeeded'" variant="secondary">已完成</Badge>
+          <Badge v-else-if="migration?.status === 'running'" variant="secondary">迁移中</Badge>
+        </div>
+        <p class="text-muted-foreground mt-2 text-xs leading-relaxed">
+          将组合核心数据和评分/分析数据复制到独立数据库。迁移不会覆盖旧库，完成后可在 Docker 配置中启用新路径。
+        </p>
+        <div v-if="migration?.status === 'succeeded'" class="mt-2 space-y-1 text-xs">
+          <p class="text-up">迁移已完成，不会重复执行。</p>
+          <p class="text-muted-foreground break-all">核心库：{{ migration.corePath }}</p>
+          <p class="text-muted-foreground break-all">分析库：{{ migration.analyticsPath }}</p>
+          <p class="text-muted-foreground">完成时间：{{ migration.completedAt }}</p>
+        </div>
+        <p v-else-if="migration?.status === 'failed'" class="text-destructive mt-2 text-xs break-all">
+          上次迁移失败：{{ migration.error }}
+        </p>
+        <p v-if="migrationError" class="text-destructive mt-2 text-xs">{{ migrationError }}</p>
+        <div class="mt-3 flex items-center gap-2">
+          <Button size="sm" :disabled="migrationBusy || migration?.status === 'succeeded'" @click="migrateStorage">
+            <LoaderCircle v-if="migrationBusy" class="animate-spin" />
+            <Database v-else />
+            {{ migrationBusy ? '迁移中…' : migration?.status === 'failed' ? '重试迁移' : '开始迁移' }}
+          </Button>
+        </div>
+      </section>
+
       <DataUpdateCard />
 
       <!-- 设置文件位置：数据源与 K 线指标参数都存在这里 -->
