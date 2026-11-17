@@ -48,6 +48,13 @@ func dropAnalyticsIndexes(db *sql.DB) error {
 	return nil
 }
 
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 func ensureAnalyticsIndexes(db *sql.DB) error {
 	for _, ddl := range analyticsIndexDDL {
 		if _, err := db.Exec(ddl); err != nil {
@@ -63,13 +70,13 @@ func MigrateAnalyticsDatabase(sourcePath, targetPath string) (AnalyticsMigration
 	return migrateAnalyticsDatabase(sourcePath, targetPath, nil)
 }
 
-// MigrateAnalyticsDatabaseWithProgress 与上面相同，但每完成一张表调用 progress。
+// MigrateAnalyticsDatabaseWithProgress 与上面相同，但按批次调用 progress。
 // 回调只接收只读状态信息，不参与迁移事务；UI/日志可以安全更新。
-func MigrateAnalyticsDatabaseWithProgress(sourcePath, targetPath string, progress func(table string, index, total int)) (AnalyticsMigrationReport, error) {
+func MigrateAnalyticsDatabaseWithProgress(sourcePath, targetPath string, progress func(table string, index, total int, rowsDone, rowsTotal int64)) (AnalyticsMigrationReport, error) {
 	return migrateAnalyticsDatabase(sourcePath, targetPath, progress)
 }
 
-func migrateAnalyticsDatabase(sourcePath, targetPath string, progress func(table string, index, total int)) (report AnalyticsMigrationReport, err error) {
+func migrateAnalyticsDatabase(sourcePath, targetPath string, progress func(table string, index, total int, rowsDone, rowsTotal int64)) (report AnalyticsMigrationReport, err error) {
 	report = AnalyticsMigrationReport{SourcePath: sourcePath, TargetPath: targetPath, Tables: map[string]int{}}
 	if sourcePath == "" || targetPath == "" {
 		return report, fmt.Errorf("源库和目标库路径不能为空")
@@ -124,40 +131,42 @@ func migrateAnalyticsDatabase(sourcePath, targetPath string, progress func(table
 	// 每张表单独提交。INSERT...SELECT 由 SQLite 引擎 VM 流式执行，不会把整表
 	// 装入 Go 内存；逐表事务限制 journal 和锁的持续时间。失败由外层 cleanup
 	// 删除不完整目标，源库始终不变。
+	const batchSize = 50000
 	for index, table := range AnalyticsTables {
-		tx, err := raw.Begin()
-		if err != nil {
-			return report, err
-		}
 		var sourceCount int
-		if err := tx.QueryRow("SELECT COUNT(*) FROM legacy_analytics." + quoteIdent(table)).Scan(&sourceCount); err != nil {
-			_ = tx.Rollback()
+		if err := raw.QueryRow("SELECT COUNT(*) FROM legacy_analytics." + quoteIdent(table)).Scan(&sourceCount); err != nil {
 			return report, fmt.Errorf("统计旧分析表 %s 失败：%w", table, err)
 		}
-		if _, err := tx.Exec("DELETE FROM " + quoteIdent(table)); err != nil {
-			_ = tx.Rollback()
+		if _, err := raw.Exec("DELETE FROM " + quoteIdent(table)); err != nil {
 			return report, fmt.Errorf("清空目标分析表 %s 失败：%w", table, err)
 		}
-		if _, err := tx.Exec("INSERT INTO " + quoteIdent(table) + " SELECT * FROM legacy_analytics." + quoteIdent(table)); err != nil {
-			_ = tx.Rollback()
-			return report, fmt.Errorf("复制分析表 %s 失败：%w", table, err)
+		// LIMIT/OFFSET 分批提交：每批都由 SQLite 引擎流式执行，避免一个表
+		// 独占事务数小时。源库不变，所以 OFFSET 在迁移期间稳定。
+		for offset := 0; offset < sourceCount; offset += batchSize {
+			tx, err := raw.Begin()
+			if err != nil {
+				return report, err
+			}
+			_, err = tx.Exec("INSERT INTO "+quoteIdent(table)+" SELECT * FROM legacy_analytics."+quoteIdent(table)+" LIMIT ? OFFSET ?", batchSize, offset)
+			if err != nil {
+				_ = tx.Rollback()
+				return report, fmt.Errorf("复制分析表 %s 批次 offset=%d 失败：%w", table, offset, err)
+			}
+			if err := tx.Commit(); err != nil {
+				return report, fmt.Errorf("提交分析表 %s 批次失败：%w", table, err)
+			}
+			if progress != nil {
+				progress(table, index+1, len(AnalyticsTables), int64(min(offset+batchSize, sourceCount)), int64(sourceCount))
+			}
 		}
 		var targetCount int
-		if err := tx.QueryRow("SELECT COUNT(*) FROM " + quoteIdent(table)).Scan(&targetCount); err != nil {
-			_ = tx.Rollback()
+		if err := raw.QueryRow("SELECT COUNT(*) FROM " + quoteIdent(table)).Scan(&targetCount); err != nil {
 			return report, err
 		}
 		if sourceCount != targetCount {
-			_ = tx.Rollback()
 			return report, fmt.Errorf("分析表 %s 行数不一致：源=%d 目标=%d", table, sourceCount, targetCount)
 		}
-		if err := tx.Commit(); err != nil {
-			return report, fmt.Errorf("提交分析表 %s 失败：%w", table, err)
-		}
 		report.Tables[table] = targetCount
-		if progress != nil {
-			progress(table, index+1, len(AnalyticsTables))
-		}
 	}
 	if err := raw.QueryRow("PRAGMA quick_check").Scan(&report.QuickCheck); err != nil {
 		return report, err

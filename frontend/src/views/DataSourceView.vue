@@ -313,7 +313,7 @@ function kindLabel(kind: string) {
           上次迁移失败：{{ migration.error }}
         </p>
         <p v-if="migration?.status === 'running'" class="text-muted-foreground mt-2 text-xs">
-          正在处理：{{ migration.currentTable || '准备目标库' }}（{{ migration.tablesDone || 0 }}/{{ migration.tablesTotal || 10 }} 张表）
+          正在处理：{{ migration.currentTable || '准备目标库' }}（{{ migration.tablesDone || 0 }}/{{ migration.tablesTotal || 10 }} 张表，{{ migration.rowsDone || 0 }}/{{ migration.rowsTotal || 0 }} 行）
         </p>
         <p v-if="migrationError" class="text-destructive mt-2 text-xs">{{ migrationError }}</p>
         <div class="mt-3 flex items-center gap-2">
