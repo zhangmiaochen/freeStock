@@ -312,6 +312,9 @@ function kindLabel(kind: string) {
         <p v-else-if="migration?.status === 'failed'" class="text-destructive mt-2 text-xs break-all">
           上次迁移失败：{{ migration.error }}
         </p>
+        <p v-if="migration?.status === 'running'" class="text-muted-foreground mt-2 text-xs">
+          正在处理：{{ migration.currentTable || '准备目标库' }}（{{ migration.tablesDone || 0 }}/{{ migration.tablesTotal || 10 }} 张表）
+        </p>
         <p v-if="migrationError" class="text-destructive mt-2 text-xs">{{ migrationError }}</p>
         <div class="mt-3 flex items-center gap-2">
           <Button size="sm" :disabled="migrationBusy || migration?.status === 'succeeded'" @click="migrateStorage">

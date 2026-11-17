@@ -23,6 +23,9 @@ type StorageMigrationState struct {
 	CoreQuick      string `json:"coreQuick,omitempty"`
 	AnalyticsQuick string `json:"analyticsQuick,omitempty"`
 	Error          string `json:"error,omitempty"`
+	CurrentTable   string `json:"currentTable,omitempty"`
+	TablesDone     int    `json:"tablesDone,omitempty"`
+	TablesTotal    int    `json:"tablesTotal,omitempty"`
 }
 
 var storageMigrationMu sync.Mutex
@@ -93,7 +96,12 @@ func (s *PortfolioService) MigrateStorage() (StorageMigrationState, error) {
 		state.CoreQuick = coreReport.QuickCheck
 	}
 	if err == nil {
-		analyticsReport, analyticsErr := portfolio.MigrateAnalyticsDatabase(sourcePath, analyticsTarget)
+		analyticsReport, analyticsErr := portfolio.MigrateAnalyticsDatabaseWithProgress(sourcePath, analyticsTarget, func(table string, done, total int) {
+			state.CurrentTable = table
+			state.TablesDone = done
+			state.TablesTotal = total
+			_ = s.writeMigrationState(state)
+		})
 		if analyticsErr != nil {
 			err = analyticsErr
 		} else {

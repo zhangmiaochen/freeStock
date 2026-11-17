@@ -5928,6 +5928,9 @@ export class StorageMigrationState {
     "coreQuick"?: string;
     "analyticsQuick"?: string;
     "error"?: string;
+    "currentTable"?: string;
+    "tablesDone"?: number;
+    "tablesTotal"?: number;
 
     /** Creates a new StorageMigrationState instance. */
     constructor($$source: Partial<StorageMigrationState> = {}) {
