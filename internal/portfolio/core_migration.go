@@ -69,7 +69,7 @@ func MigrateCoreDatabase(sourcePath, targetPath string) (report CoreMigrationRep
 		}
 	}()
 
-	target, err := Open(targetPath)
+	target, err := OpenCore(targetPath)
 	if err != nil {
 		return report, err
 	}

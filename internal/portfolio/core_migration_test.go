@@ -68,7 +68,7 @@ func TestMigrateCoreDatabaseCopiesCoreDataAndLeavesSourceUnchanged(t *testing.T)
 		}
 	}
 
-	target, err := Open(targetPath)
+	target, err := OpenCore(targetPath)
 	if err != nil {
 		t.Fatalf("打开目标库失败: %v", err)
 	}
@@ -80,6 +80,17 @@ func TestMigrateCoreDatabaseCopiesCoreDataAndLeavesSourceUnchanged(t *testing.T)
 	for table, want := range wantCounts {
 		if got := targetCounts[table]; got != want {
 			t.Errorf("目标库 %s 行数 = %d, 期望 %d", table, got, want)
+		}
+	}
+	// 核心库不能创建分析/回测表；否则拆分只是换了文件名，
+	// 后续仍可能误把大表写回热库。
+	for _, table := range []string{"stock_strength", "signal_history", "market_state", "portfolio_backtest_run"} {
+		var count int
+		err := target.DB().QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?", table).Scan(&count)
+		if err != nil {
+			t.Errorf("检查核心库分析表 %s 失败: %v", table, err)
+		} else if count != 0 {
+			t.Errorf("核心库不应包含分析表 %s", table)
 		}
 	}
 	var targetCheck string

@@ -558,8 +558,23 @@ func DefaultPath(configPath string) string {
 	return filepath.Join(filepath.Dir(configPath), "portfolio.db")
 }
 
-// Open 打开（必要时创建）组合库并建表。
+// Open 打开（必要时创建）兼容组合库并建完整旧 schema。
+//
+// 兼容入口：现有应用仍使用它，确保 Windows/NAS 旧行为不变。
 func Open(path string) (*Store, error) {
+	return open(path, false)
+}
+
+// OpenCore 打开只包含组合核心表的热库。
+//
+// 目标库不创建评分、信号、快照和回测表；这些表属于后续 AnalyticsStore /
+// BacktestStore。迁移工具使用此入口，避免“核心库”里仍然留下 4.9GB 结构的
+// 空表和错误的 schema 边界。
+func OpenCore(path string) (*Store, error) {
+	return open(path, true)
+}
+
+func open(path string, coreOnly bool) (*Store, error) {
 	if path == "" {
 		return nil, fmt.Errorf("组合库路径不能为空")
 	}
@@ -614,7 +629,7 @@ func Open(path string) (*Store, error) {
 	}
 
 	store := &Store{db: db, path: path}
-	if err := store.migrate(); err != nil {
+	if err := store.migrateMode(coreOnly); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -821,29 +836,33 @@ CREATE INDEX IF NOT EXISTS idx_txn_code           ON portfolio_position_txn(port
 `
 
 func (s *Store) migrate() error {
+	return s.migrateMode(false)
+}
+
+func (s *Store) migrateMode(coreOnly bool) error {
 	if _, err := s.db.Exec("PRAGMA foreign_keys = ON"); err != nil {
 		return fmt.Errorf("开启外键约束失败：%w", err)
 	}
 	if _, err := s.db.Exec(schema); err != nil {
 		return fmt.Errorf("建表失败：%w", err)
 	}
-	// 评分物化表（见 strength.go）
-	if err := s.migrateStrength(); err != nil {
-		return err
-	}
-	// 回测三张表（见 backtest.go）
-	if _, err := s.db.Exec(backtestSchema); err != nil {
-		return fmt.Errorf("建回测表失败：%w", err)
-	}
-	// 四张留档表（见 snapshot.go）
-	if _, err := s.db.Exec(snapshotSchema); err != nil {
-		return fmt.Errorf("建留档表失败：%w", err)
-	}
-	// 资金账户（见 money.go）
+	// 资金账户属于核心库，组合与资金必须保持同库事务一致性。
 	if _, err := s.db.Exec(moneySchema); err != nil {
 		return fmt.Errorf("建资金表失败：%w", err)
 	}
-	// 量价信号表（见 signal.go）
+	if coreOnly {
+		return nil
+	}
+	// 以下表属于旧兼容库；新的核心库由 OpenCore 创建，不再包含它们。
+	if err := s.migrateStrength(); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(backtestSchema); err != nil {
+		return fmt.Errorf("建回测表失败：%w", err)
+	}
+	if _, err := s.db.Exec(snapshotSchema); err != nil {
+		return fmt.Errorf("建留档表失败：%w", err)
+	}
 	if err := s.migrateSignal(); err != nil {
 		return err
 	}
