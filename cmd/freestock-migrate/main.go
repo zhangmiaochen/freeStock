@@ -19,6 +19,7 @@ import (
 func main() {
 	source := flag.String("source", "", "旧组合库路径")
 	target := flag.String("target", "", "新核心库路径（必须不存在）")
+	analytics := flag.String("analytics", "", "新分析库路径（必须不存在；设置后迁移分析表）")
 	flag.Parse()
 	if *source == "" || *target == "" {
 		flag.Usage()
@@ -32,4 +33,13 @@ func main() {
 	}
 	encoded, _ := json.MarshalIndent(report, "", "  ")
 	fmt.Println(string(encoded))
+	if *analytics != "" {
+		analyticsReport, err := portfolio.MigrateAnalyticsDatabase(*source, *analytics)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "分析库迁移失败（核心库已完成，可删除目标后重试）：%v\n", err)
+			os.Exit(1)
+		}
+		encoded, _ = json.MarshalIndent(analyticsReport, "", "  ")
+		fmt.Println(string(encoded))
+	}
 }
