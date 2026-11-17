@@ -101,6 +101,30 @@ func TestMigrateCoreDatabaseCopiesCoreDataAndLeavesSourceUnchanged(t *testing.T)
 	}
 	target.Close()
 
+	analyticsPath := filepath.Join(dir, "target", "analytics.db")
+	analyticsReport, err := MigrateAnalyticsDatabase(sourcePath, analyticsPath)
+	if err != nil {
+		t.Fatalf("分析库迁移失败: %v", err)
+	}
+	if analyticsReport.QuickCheck != "ok" {
+		t.Fatalf("分析库 quick_check = %q, 期望 ok", analyticsReport.QuickCheck)
+	}
+	analytics, err := Open(analyticsPath)
+	if err != nil {
+		t.Fatalf("打开分析库失败: %v", err)
+	}
+	analyticsCounts, err := AnalyticsTableCounts(analytics.DB())
+	if err != nil {
+		analytics.Close()
+		t.Fatalf("统计分析库失败: %v", err)
+	}
+	for _, table := range AnalyticsTables {
+		if got := analyticsCounts[table]; got != 0 {
+			t.Errorf("空源分析表 %s 行数 = %d, 期望 0", table, got)
+		}
+	}
+	analytics.Close()
+
 	unchanged, err := Open(sourcePath)
 	if err != nil {
 		t.Fatalf("重新打开源库失败: %v", err)
