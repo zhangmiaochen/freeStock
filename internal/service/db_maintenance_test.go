@@ -7,16 +7,16 @@ func TestDBMaintenancePrefsFromEnv(t *testing.T) {
 	t.Setenv("FREESTOCK_DB_COMPACT", "")
 	t.Setenv("FREESTOCK_SCORE_RETENTION_DAYS", "")
 	def := dbMaintenancePrefsFromEnv()
-	if !def.Compact {
-		t.Error("默认应开启压缩（VACUUM 是无损的）")
+	if def.Compact {
+		t.Error("默认不应开启压缩：VACUUM 持库级独占锁，会挡住所有读写")
 	}
 	if def.RetentionDays != 0 {
 		t.Errorf("默认不应清理评分（删除是破坏性的），实际 %d", def.RetentionDays)
 	}
 
-	t.Setenv("FREESTOCK_DB_COMPACT", "false")
-	if dbMaintenancePrefsFromEnv().Compact {
-		t.Error("FREESTOCK_DB_COMPACT=false 应关闭压缩")
+	t.Setenv("FREESTOCK_DB_COMPACT", "true")
+	if !dbMaintenancePrefsFromEnv().Compact {
+		t.Error("FREESTOCK_DB_COMPACT=true 应开启压缩")
 	}
 
 	t.Setenv("FREESTOCK_SCORE_RETENTION_DAYS", "1095")

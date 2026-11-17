@@ -6432,6 +6432,65 @@ export class ValuationReport {
     }
 }
 
+/**
+ * dbSizeStats 是一次体检的结果（都按字节）。
+ */
+export class dbSizeStats {
+    /**
+     * 主库 + WAL + SHM
+     */
+    "Total": number;
+
+    /**
+     * 主库
+     */
+    "Main": number;
+
+    /**
+     * -wal
+     */
+    "WAL": number;
+
+    /**
+     * freelist_count × page_size（空洞）
+     */
+    "Free": number;
+    "Pages": number;
+    "PageSize": number;
+
+    /** Creates a new dbSizeStats instance. */
+    constructor($$source: Partial<dbSizeStats> = {}) {
+        if (!("Total" in $$source)) {
+            this["Total"] = 0;
+        }
+        if (!("Main" in $$source)) {
+            this["Main"] = 0;
+        }
+        if (!("WAL" in $$source)) {
+            this["WAL"] = 0;
+        }
+        if (!("Free" in $$source)) {
+            this["Free"] = 0;
+        }
+        if (!("Pages" in $$source)) {
+            this["Pages"] = 0;
+        }
+        if (!("PageSize" in $$source)) {
+            this["PageSize"] = 0;
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new dbSizeStats instance from a string or object.
+     */
+    static createFrom($$source: any = {}): dbSizeStats {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new dbSizeStats($$parsedSource as Partial<dbSizeStats>);
+    }
+}
+
 // Private type creation functions
 const $$createType0 = portfolio$0.ApplyResult.createFrom;
 const $$createType1 = AppliedChange.createFrom;

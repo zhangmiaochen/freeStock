@@ -38,7 +38,7 @@ type dbMaintenancePrefs struct {
 //	FREESTOCK_DB_COMPACT=1            启动时压缩（默认开；库小的时候会自动跳过）
 //	FREESTOCK_SCORE_RETENTION_DAYS=N  评分保留天数，0/空 = 不清理
 func dbMaintenancePrefsFromEnv() dbMaintenancePrefs {
-	prefs := dbMaintenancePrefs{Compact: true}
+	prefs := dbMaintenancePrefs{Compact: false}
 	if raw := strings.TrimSpace(os.Getenv("FREESTOCK_DB_COMPACT")); raw != "" {
 		if v, err := strconv.ParseBool(raw); err == nil {
 			prefs.Compact = v
