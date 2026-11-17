@@ -102,6 +102,16 @@ func ResolveCNE(configured string) (string, error) {
 	return "", fmt.Errorf("目录 %s 里没有 cne（找过：%s）", p, strings.Join(tried, "、"))
 }
 
+// defaultCNECandidates 返回未配置时的约定路径，单独导出给同包回归测试。
+func defaultCNECandidates() []string {
+	return []string{
+		`D:\softInstal\python3.11.3\Scripts\cne.exe`,
+		"/vol2/1001/docker/cne-venv/bin/cne", // fnOS compose 示例：宿主机 venv 映射到此容器路径
+		"/data/cne-venv/bin/cne",             // 容器：装在数据卷上的 venv
+		"/opt/cne-venv/bin/cne",              // 容器：构建镜像时装进去的 venv
+	}
+}
+
 // findCNEOnPath 在没配置（或配置为空）时的发现顺序。
 func findCNEOnPath() (string, error) {
 	if p, err := exec.LookPath("cne"); err == nil {
@@ -113,11 +123,7 @@ func findCNEOnPath() (string, error) {
 	// 容器/NAS 上对应的是镜像约定好的 venv 位置（见 Dockerfile 的 PATH）——
 	// 这几个兜底只是"少填一个设置项"的便利，找不到也不影响：
 	// 用户仍可在界面里显式指定目录或可执行文件。
-	for _, cand := range []string{
-		`D:\softInstal\python3.11.3\Scripts\cne.exe`,
-		"/data/cne-venv/bin/cne", // 容器：装在数据卷上的 venv
-		"/opt/cne-venv/bin/cne",  // 容器：构建镜像时装进去的 venv
-	} {
+	for _, cand := range defaultCNECandidates() {
 		if _, err := os.Stat(cand); err == nil {
 			return checkGood(cand)
 		}

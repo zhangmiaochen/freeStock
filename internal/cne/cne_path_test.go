@@ -128,3 +128,12 @@ func TestResolveCNEBareNameFallsBackToPATH(t *testing.T) {
 		t.Fatal("PATH 上不存在的裸命令名应当报错")
 	}
 }
+func TestFindCNECandidatesIncludeFnOSMount(t *testing.T) {
+	want := "/vol2/1001/docker/cne-venv/bin/cne"
+	for _, candidate := range defaultCNECandidates() {
+		if candidate == want {
+			return
+		}
+	}
+	t.Fatalf("默认候选路径未包含 compose 中的 fnOS mount 目标 %q", want)
+}
