@@ -74,40 +74,41 @@ func MigrateAnalyticsDatabase(sourcePath, targetPath string) (report AnalyticsMi
 	}
 	defer raw.Exec("DETACH DATABASE legacy_analytics")
 
-	tx, err := raw.Begin()
-	if err != nil {
-		return report, err
-	}
-	rollback := true
-	defer func() {
-		if rollback {
-			_ = tx.Rollback()
-		}
-	}()
+	// 每张表单独提交。INSERT...SELECT 由 SQLite 引擎 VM 流式执行，不会把整表
+	// 装入 Go 内存；逐表事务限制 journal 和锁的持续时间。失败由外层 cleanup
+	// 删除不完整目标，源库始终不变。
 	for _, table := range AnalyticsTables {
+		tx, err := raw.Begin()
+		if err != nil {
+			return report, err
+		}
 		var sourceCount int
 		if err := tx.QueryRow("SELECT COUNT(*) FROM legacy_analytics." + quoteIdent(table)).Scan(&sourceCount); err != nil {
+			_ = tx.Rollback()
 			return report, fmt.Errorf("统计旧分析表 %s 失败：%w", table, err)
 		}
 		if _, err := tx.Exec("DELETE FROM " + quoteIdent(table)); err != nil {
+			_ = tx.Rollback()
 			return report, fmt.Errorf("清空目标分析表 %s 失败：%w", table, err)
 		}
 		if _, err := tx.Exec("INSERT INTO " + quoteIdent(table) + " SELECT * FROM legacy_analytics." + quoteIdent(table)); err != nil {
+			_ = tx.Rollback()
 			return report, fmt.Errorf("复制分析表 %s 失败：%w", table, err)
 		}
 		var targetCount int
 		if err := tx.QueryRow("SELECT COUNT(*) FROM " + quoteIdent(table)).Scan(&targetCount); err != nil {
+			_ = tx.Rollback()
 			return report, err
 		}
 		if sourceCount != targetCount {
+			_ = tx.Rollback()
 			return report, fmt.Errorf("分析表 %s 行数不一致：源=%d 目标=%d", table, sourceCount, targetCount)
+		}
+		if err := tx.Commit(); err != nil {
+			return report, fmt.Errorf("提交分析表 %s 失败：%w", table, err)
 		}
 		report.Tables[table] = targetCount
 	}
-	if err := tx.Commit(); err != nil {
-		return report, err
-	}
-	rollback = false
 	if err := raw.QueryRow("PRAGMA quick_check").Scan(&report.QuickCheck); err != nil {
 		return report, err
 	}
