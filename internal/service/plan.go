@@ -397,6 +397,7 @@ type PlanResult struct {
 //
 // 需要该策略的评分已经物化过（先调 RefreshStrength）。
 func (s *PortfolioService) BuildPlan(portfolioID string) (*PlanResult, error) {
+	// 组合配置/持仓从核心库读取；评分和市场状态通过分析库边界读取。
 	store, err := s.db()
 	if err != nil {
 		return nil, err
@@ -413,11 +414,15 @@ func (s *PortfolioService) BuildPlan(portfolioID string) (*PlanResult, error) {
 	}
 
 	strategyID := item.StrategyID
+	analytics, err := s.analyticsDB()
+	if err != nil {
+		return nil, err
+	}
 	// ⚠ **全表**最新评分日，不是该策略自己的 —— 原实现
 	// `get_rotation_payload`（portfolio_service.py:839）与 `apply_rotation`（:862）
 	// 都是先 `_get_latest_strength_trade_date()`（`MAX(trade_date)` 不带 strategy_id），
 	// 再按策略去取那一帧（`_latest_strength_frame(latest_trade_date, strategy_id)`）。
-	strengthDate, err := store.LatestStrengthDateAny()
+	strengthDate, err := analytics.LatestStrengthDateAny()
 	if err != nil {
 		return nil, err
 	}
@@ -427,7 +432,7 @@ func (s *PortfolioService) BuildPlan(portfolioID string) (*PlanResult, error) {
 			item.Name, item.StrategyLabel)
 	}
 
-	stateRow, err := store.LoadMarketState(strengthDate)
+	stateRow, err := analytics.LoadMarketState(strengthDate)
 	if err != nil {
 		return nil, err
 	}
@@ -453,7 +458,7 @@ func (s *PortfolioService) BuildPlan(portfolioID string) (*PlanResult, error) {
 	for _, position := range positions {
 		holdingCodes = append(holdingCodes, position.Code)
 	}
-	strengthByCode, err := store.LoadStrengthForCodes(strengthDate, strategyID, holdingCodes)
+	strengthByCode, err := analytics.LoadStrengthForCodes(strengthDate, strategyID, holdingCodes)
 	if err != nil {
 		return nil, err
 	}
@@ -533,7 +538,7 @@ func (s *PortfolioService) BuildPlan(portfolioID string) (*PlanResult, error) {
 	// ---- 候选池 ----
 	// 第二个返回值是**截断后**的池（喂给调仓计划），第三个是**截断前**的完整池
 	//（留档与报数用）—— 两者都是原实现里的东西，见 `buildCandidatePoolFrom` 尾部注释。
-	candidates, universeScores, fullPool, err := s.buildCandidatePool(store, item, cfg, marketState, strengthDate, holdingCodes)
+	candidates, universeScores, fullPool, err := s.buildCandidatePool(analytics, store, item, cfg, marketState, strengthDate, holdingCodes)
 	if err != nil {
 		return nil, err
 	}
@@ -644,6 +649,7 @@ func (s *PortfolioService) BuildPlan(portfolioID string) (*PlanResult, error) {
 //
 // buildCandidatePool 从库里读当日评分再建候选池（实盘建议用）。
 func (s *PortfolioService) buildCandidatePool(
+	analytics *portfolio.Store,
 	store *portfolio.Store,
 	item portfolio.Portfolio,
 	cfg score.StrategyConfig,
@@ -651,7 +657,7 @@ func (s *PortfolioService) buildCandidatePool(
 	strengthDate int64,
 	holdingCodes []string,
 ) ([]score.Row, []float64, []score.Row, error) {
-	all, err := store.LoadStrength(strengthDate, item.StrategyID, 0)
+	all, err := analytics.LoadStrength(strengthDate, item.StrategyID, 0)
 	if err != nil {
 		return nil, nil, nil, err
 	}
