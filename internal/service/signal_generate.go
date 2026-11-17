@@ -77,7 +77,7 @@ func (s *PortfolioService) RefreshSignals(
 	if s.stock == nil {
 		return nil, fmt.Errorf("缺少股票服务依赖")
 	}
-	store, err := s.db()
+	store, err := s.analyticsDB()
 	if err != nil {
 		return nil, err
 	}

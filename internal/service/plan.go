@@ -630,8 +630,10 @@ func (s *PortfolioService) BuildPlan(portfolioID string) (*PlanResult, error) {
 	}
 	// 落档失败**不影响建议本身** —— 记日志即可，
 	// 不要因为存档问题让用户看不到建议。
-	if err := s.savePlanSnapshots(store, item, result); err != nil {
-		slog.Warn("写入调仓建议留档失败", "portfolio", item.ID, "err", err)
+	if snapshotStore, err := s.analyticsDB(); err == nil {
+		if err := s.savePlanSnapshots(snapshotStore, item, result); err != nil {
+			slog.Warn("写入调仓建议留档失败", "portfolio", item.ID, "err", err)
+		}
 	}
 	// 所有策略都按实际本金折算目标股数/金额（失败不影响建议本身）
 	_ = s.ApplyMoneyToPlan(item.ID, result)
@@ -766,7 +768,11 @@ func (s *PortfolioService) buildCandidatePoolFrom(
 	for _, row := range scopedRows {
 		scopedDates = append(scopedDates, row.TradeDate)
 	}
-	scopedRows = s.attachSignalsToRows(stored, scopedRows, scopedDates)
+	signalStore, err := s.analyticsDB()
+	if err != nil {
+		return nil, nil, nil
+	}
+	scopedRows = s.attachSignalsToRows(signalStore, scopedRows, scopedDates)
 
 	// 广度闸门用的是**贴完信号之后**的帧（见函数注释）
 	universeScores := make([]float64, 0, len(scopedRows))

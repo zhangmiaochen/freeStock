@@ -139,7 +139,7 @@ func scoreSummaryOf(strategyID string, row score.Row) string {
 
 // GetScoreSnapshots 读某组合的评分留档（供界面看历史建议）。
 func (s *PortfolioService) GetScoreSnapshots(portfolioID string, limit int) ([]portfolio.ScoreSnapshot, error) {
-	store, err := s.db()
+	store, err := s.analyticsDB()
 	if err != nil {
 		return nil, err
 	}
