@@ -152,6 +152,21 @@ func (s *PortfolioService) MaintainDatabase() {
 	if err != nil {
 		return
 	}
+	// ⚠ **启动必须确保评分索引存在。**
+	//
+	// 批量回填会先 DROP idx_strength_lookup 再在结束时重建（省下 680 万次
+	// B 树维护）。但如果那次回填**中途失败/被重启打断**，索引就永远缺着 ——
+	// 之后任何查 stock_strength 的语句都退化成全表扫描，用户库 4.9GB、
+	// 7.9MB/s 读速下就是十分钟卡顿（实测栈里 pread 卡 12 分钟）。
+	// 这里是幂等的 CREATE INDEX IF NOT EXISTS，代价小于一次查询。
+	beganIdx := time.Now()
+	if err := store.EnsureStrengthLookupIndex(); err != nil {
+		slog.Warn("确保评分查询索引失败（查询可能变慢）", "err", err)
+	} else {
+		slog.Info("评分查询索引已确认存在",
+			"elapsed", time.Since(beganIdx).Round(time.Millisecond).String())
+	}
+
 	path := s.dbPath()
 	stats := measureDB(store.DB(), path)
 	slog.Info("数据库体检", "path", path, "stats", stats.String())
