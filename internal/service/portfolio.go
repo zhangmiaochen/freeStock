@@ -157,14 +157,20 @@ func (s *PortfolioService) db() (*portfolio.Store, error) {
 
 // dbPath 返回组合库路径：与 config.json 同目录。
 //
-// FREESTOCK_PORTFOLIO_DB_PATH 非空时覆盖默认路径，方便迁移后的灰度切换。
-// 未设置时保持原有路径和 Windows 行为不变。
+// FREESTOCK_PORTFOLIO_CORE_DB_PATH 非空时切换到迁移后的热库。
+// FREESTOCK_PORTFOLIO_DB_PATH 是兼容旧的通用覆盖变量。
+// 两者都未设置时保持原有路径和 Windows 行为不变。
 // 推导不出配置目录时返回空串，由 Open 报错。
 // **不能退化成相对路径** —— 那会落到进程的当前工作目录，
 // 与其它实例悄悄共用一个库（这正是加 dbPathOverride 的原因）。
 func (s *PortfolioService) dbPath() string {
 	if s.dbPathOverride != "" {
 		return s.dbPathOverride
+	}
+	// 灰度切换开关：只有显式配置才使用迁移后的核心库。
+	// 省略时保持旧 portfolio.db，确保 Windows/NAS 现有部署不变。
+	if path := strings.TrimSpace(os.Getenv("FREESTOCK_PORTFOLIO_CORE_DB_PATH")); path != "" {
+		return path
 	}
 	if path := strings.TrimSpace(os.Getenv("FREESTOCK_PORTFOLIO_DB_PATH")); path != "" {
 		return path
