@@ -50,6 +50,8 @@ func MigrateAnalyticsDatabase(sourcePath, targetPath string) (report AnalyticsMi
 	defer func() {
 		if cleanup {
 			_ = os.Remove(targetPath)
+			_ = os.Remove(targetPath + "-wal")
+			_ = os.Remove(targetPath + "-shm")
 		}
 	}()
 
@@ -59,6 +61,13 @@ func MigrateAnalyticsDatabase(sourcePath, targetPath string) (report AnalyticsMi
 	}
 	defer target.Close()
 	raw := target.DB()
+	// 分析库不包含核心 portfolio 表；回测表里的 portfolio_id 是跨库逻辑引用，
+	// 不能继续使用旧库里的 SQLite 外键约束，否则复制 portfolio_backtest_run
+	// 会因核心库不在分析库而失败（787）。核心库与分析库之间的引用由应用层维护。
+	if _, err := raw.Exec("PRAGMA foreign_keys = OFF"); err != nil {
+		return report, fmt.Errorf("关闭分析库迁移期间外键检查失败：%w", err)
+	}
+	defer raw.Exec("PRAGMA foreign_keys = ON")
 	quoted := "'" + strings.ReplaceAll(filepath.ToSlash(sourcePath), "'", "''") + "'"
 	if _, err := raw.Exec("ATTACH DATABASE " + quoted + " AS legacy_analytics"); err != nil {
 		return report, fmt.Errorf("附加旧库失败：%w", err)
@@ -105,6 +114,8 @@ func MigrateAnalyticsDatabase(sourcePath, targetPath string) (report AnalyticsMi
 	if report.QuickCheck != "ok" {
 		return report, fmt.Errorf("分析库 quick_check 失败：%s", report.QuickCheck)
 	}
+	// 迁移后核心库外键无法跨文件验证；检查分析库内部结构并记录跨库引用
+	// 由应用层维护，避免误把 787 当成数据损坏。
 	cleanup = false
 	return report, nil
 }
