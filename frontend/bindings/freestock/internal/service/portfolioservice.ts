@@ -336,9 +336,6 @@ export function MaintainDatabase(): $CancellablePromise<void> {
 
 /**
  * MigrateStorage 执行一次核心库+分析库迁移。
- * 
- * 这是显式 UI 操作，不在启动时调用；同一进程单飞；成功后状态持久化，
- * 相同源/目标再次点击不会重复运行。目标存在时底层迁移工具会拒绝覆盖。
  */
 export function MigrateStorage(): $CancellablePromise<$models.StorageMigrationState> {
     return $Call.ByID(1127300630).then(($result: any) => {
