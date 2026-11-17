@@ -366,9 +366,9 @@ var strategyAliases = map[string]string{
 	"quality_growth_pullback": StrategyQualityGrowth,
 	"quality_growth":          StrategyQualityGrowth,
 	"qgrowth":                 StrategyQualityGrowth,
-	"质量成长":                   StrategyQualityGrowth,
-	"趋势回调":                   StrategyQualityGrowth,
-	"质量成长趋势回调":               StrategyQualityGrowth,
+	"质量成长":                    StrategyQualityGrowth,
+	"趋势回调":                    StrategyQualityGrowth,
+	"质量成长趋势回调":                StrategyQualityGrowth,
 
 	"oversold":         StrategyOversold,
 	"rebound":          StrategyOversold,
@@ -689,6 +689,26 @@ func (s *Store) ensureAutoVacuum() error {
 		return err
 	}
 	if total < 8192 { // < 32MB，新库没有空洞，不值得为它跑 VACUUM
+		return nil
+	}
+
+	// ⚠ **大库绝不能在开库时切换 auto_vacuum。**
+	//
+	// 切换模式必须跟随一次 VACUUM（SQLite 规定），而 VACUUM 会把整个库
+	// 重写一遍。这个函数在 `s.mu` 锁里、在**每次打开数据库**的路径上，
+	// 于是：用户库 4.9GB、读速 7.9MB/s → VACUUM 要几分钟 → 期间所有
+	// 数据库调用（例如组合列表 ListPortfolios）全部阻塞，前端表现为
+	// "组合列表加载不出来"。用户日志里那句
+	//   "组合库切换到 INCREMENTAL 自动回收（一次性） ... totalPages=1264115"
+	// 就是它 —— 而且因为一直被打断，每次启动都会重试一次。
+	//
+	// 大库的空间回收交给启动后的后台维护（wal_checkpoint + VACUUM），
+	// 那里不持锁、不挡任何请求。
+	const autoVacuumMaxPages = 262144 // 1 GiB（页 4KB）
+	if total > autoVacuumMaxPages {
+		slog.Info("组合库较大，跳过开库时的自动回收切换（避免开库即 VACUUM）",
+			"totalPages", total, "limit", autoVacuumMaxPages,
+			"hint", "空间回收由启动后的后台维护完成")
 		return nil
 	}
 
