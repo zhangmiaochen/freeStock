@@ -40,7 +40,12 @@ var CoreTables = []string{
 // 注意：当前 Store.Open 会建立完整兼容 schema，目标文件因此包含空的分析表；
 // 这一步的目标是先隔离并验证核心数据，下一阶段会把 schema migration 拆成
 // core/analytics 两套，届时空分析表不会再创建。
-func MigrateCoreDatabase(sourcePath, targetPath string) (report CoreMigrationReport, err error) {
+func MigrateCoreDatabase(sourcePath, targetPath string) (CoreMigrationReport, error) {
+	return MigrateCoreDatabaseWithProgress(sourcePath, targetPath, nil)
+}
+
+// MigrateCoreDatabaseWithProgress 报告当前核心表复制阶段。
+func MigrateCoreDatabaseWithProgress(sourcePath, targetPath string, progress func(table string, index, total int)) (report CoreMigrationReport, err error) {
 	report = CoreMigrationReport{SourcePath: sourcePath, TargetPath: targetPath, Tables: map[string]int{}}
 	if sourcePath == "" || targetPath == "" {
 		return report, fmt.Errorf("源库和目标库路径不能为空")
@@ -95,7 +100,7 @@ func MigrateCoreDatabase(sourcePath, targetPath string) (report CoreMigrationRep
 		}
 	}()
 
-	for _, table := range CoreTables {
+	for index, table := range CoreTables {
 		if _, err := tx.Exec("DELETE FROM " + quoteIdent(table)); err != nil {
 			return report, fmt.Errorf("清空目标表 %s 失败：%w", table, err)
 		}
@@ -107,6 +112,9 @@ func MigrateCoreDatabase(sourcePath, targetPath string) (report CoreMigrationRep
 			return report, err
 		}
 		report.Tables[table] = count
+		if progress != nil {
+			progress(table, index+1, len(CoreTables))
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return report, fmt.Errorf("提交核心库迁移失败：%w", err)
@@ -130,6 +138,42 @@ func quoteIdent(value string) string {
 }
 
 // CoreTableCounts 返回核心表行数，用于迁移前后对比和诊断。
+// ValidateCoreDatabasePair checks source/target core table counts and both quick_check values.
+// It opens existing DBs and performs read-only queries; it never runs schema migration.
+func ValidateCoreDatabasePair(sourcePath, targetPath string) (map[string]int, string, error) {
+	source, err := sql.Open("sqlite", sourcePath)
+	if err != nil {
+		return nil, "", err
+	}
+	defer source.Close()
+	target, err := sql.Open("sqlite", targetPath)
+	if err != nil {
+		return nil, "", err
+	}
+	defer target.Close()
+	srcCounts, err := CoreTableCounts(source)
+	if err != nil {
+		return nil, "", err
+	}
+	dstCounts, err := CoreTableCounts(target)
+	if err != nil {
+		return nil, "", err
+	}
+	for _, table := range CoreTables {
+		if srcCounts[table] != dstCounts[table] {
+			return nil, "", fmt.Errorf("核心表 %s 行数不匹配：源=%d 目标=%d", table, srcCounts[table], dstCounts[table])
+		}
+	}
+	var check string
+	if err := target.QueryRow("PRAGMA quick_check").Scan(&check); err != nil {
+		return nil, "", err
+	}
+	if check != "ok" {
+		return nil, check, fmt.Errorf("核心目标 quick_check: %s", check)
+	}
+	return dstCounts, check, nil
+}
+
 func CoreTableCounts(db *sql.DB) (map[string]int, error) {
 	out := make(map[string]int, len(CoreTables))
 	for _, table := range CoreTables {

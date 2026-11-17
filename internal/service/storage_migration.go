@@ -23,6 +23,7 @@ type StorageMigrationState struct {
 	CoreQuick      string `json:"coreQuick,omitempty"`
 	AnalyticsQuick string `json:"analyticsQuick,omitempty"`
 	Error          string `json:"error,omitempty"`
+	Phase          string `json:"phase,omitempty"`
 	CurrentTable   string `json:"currentTable,omitempty"`
 	TablesDone     int    `json:"tablesDone,omitempty"`
 	TablesTotal    int    `json:"tablesTotal,omitempty"`
@@ -86,16 +87,47 @@ func (s *PortfolioService) MigrateStorage() (StorageMigrationState, error) {
 	coreTarget := filepath.Join(dir, "portfolio-core.db")
 	analyticsTarget := filepath.Join(dir, "analytics.db")
 	state = StorageMigrationState{
-		Status: "running", StartedAt: time.Now().Format(time.RFC3339),
+		Status: "running", Phase: "core", StartedAt: time.Now().Format(time.RFC3339),
 		SourcePath: sourcePath, CorePath: coreTarget, AnalyticsPath: analyticsTarget,
 	}
 	if err := s.writeMigrationState(state); err != nil {
 		return state, err
 	}
 
-	coreReport, err := portfolio.MigrateCoreDatabase(sourcePath, coreTarget)
+	var err error
+	coreProgressPath := ""
+	if _, statErr := os.Stat(coreTarget); statErr == nil {
+		// 可复用的核心目标必须是合法库，并且核心表计数匹配；否则拒绝覆盖。
+		_, quick, validateErr := portfolio.ValidateCoreDatabasePair(sourcePath, coreTarget)
+		if validateErr != nil {
+			err = fmt.Errorf("已有核心目标校验失败：%w；请先备份后移走该目标", validateErr)
+		} else {
+			coreProgressPath = coreTarget
+			state.CoreQuick = quick
+		}
+	} else if !os.IsNotExist(statErr) {
+		err = statErr
+	}
+	var coreReport portfolio.CoreMigrationReport
+	if err == nil && coreProgressPath == "" {
+		coreReport, err = portfolio.MigrateCoreDatabaseWithProgress(sourcePath, coreTarget, func(table string, done, total int) {
+			state.Phase = "core"
+			state.CurrentTable = table
+			state.TablesDone = done
+			state.TablesTotal = total
+			_ = s.writeMigrationState(state)
+		})
+	}
 	if err == nil {
 		state.CoreQuick = coreReport.QuickCheck
+		if state.CoreQuick == "" {
+			state.CoreQuick = "ok"
+		}
+		state.Phase = "analytics"
+		state.CurrentTable = ""
+		state.TablesDone, state.TablesTotal = 0, len(portfolio.AnalyticsTables)
+		state.RowsDone, state.RowsTotal = 0, 0
+		_ = s.writeMigrationState(state)
 	}
 	if err == nil {
 		analyticsReport, analyticsErr := portfolio.MigrateAnalyticsDatabaseWithProgress(sourcePath, analyticsTarget, func(table string, done, total int, rowsDone, rowsTotal int64) {

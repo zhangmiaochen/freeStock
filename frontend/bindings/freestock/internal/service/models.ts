@@ -5928,6 +5928,7 @@ export class StorageMigrationState {
     "coreQuick"?: string;
     "analyticsQuick"?: string;
     "error"?: string;
+    "phase"?: string;
     "currentTable"?: string;
     "tablesDone"?: number;
     "tablesTotal"?: number;
