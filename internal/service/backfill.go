@@ -100,7 +100,9 @@ const strengthIndexDropMinDays = 40
 func (s *PortfolioService) RefreshBackfill(
 	strategyID string, startDate, endDate, limit int, force bool,
 ) (*BackfillResult, error) {
-	store, err := s.db()
+	// 评分属于分析数据：配置独立分析库后，回填只写 analytics.db，
+	// 不再把几十年评分写进组合热库。未配置时继续走旧库兼容路径。
+	store, err := s.analyticsDB()
 	if err != nil {
 		return nil, err
 	}

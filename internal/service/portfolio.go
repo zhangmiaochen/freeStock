@@ -28,6 +28,9 @@ type PortfolioService struct {
 
 	mu    sync.Mutex
 	store *portfolio.Store
+	// analyticsStore 是可选的独立分析库；未配置时保持旧单库兼容路径。
+	analyticsStore   *portfolio.AnalyticsStore
+	analyticsOpenErr error
 	// opened 记录打开失败过，避免每次调用都重试失败的文件操作
 	openErr error
 	// fixEntryOnce 保证"复权成本价修正"只跑一次
@@ -117,6 +120,10 @@ func (s *PortfolioService) Close() {
 		_ = s.store.Close()
 		s.store = nil
 	}
+	if s.analyticsStore != nil {
+		_ = s.analyticsStore.Close()
+		s.analyticsStore = nil
+	}
 }
 
 // db 惰性打开组合库。
@@ -183,6 +190,30 @@ func (s *PortfolioService) dbPath() string {
 		return ""
 	}
 	return portfolio.DefaultPath(configPath)
+}
+
+// analyticsDB 返回可选独立分析库；未配置时返回核心/旧库，保持旧调用链兼容。
+func (s *PortfolioService) analyticsDB() (*portfolio.Store, error) {
+	path := strings.TrimSpace(os.Getenv("FREESTOCK_ANALYTICS_DB_PATH"))
+	if path == "" {
+		return s.db()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.analyticsStore != nil {
+		return s.analyticsStore.Store, nil
+	}
+	if s.analyticsOpenErr != nil {
+		return nil, s.analyticsOpenErr
+	}
+	store, err := portfolio.OpenAnalytics(path)
+	if err != nil {
+		s.analyticsOpenErr = fmt.Errorf("打开分析库失败（%s）：%w", path, err)
+		return nil, s.analyticsOpenErr
+	}
+	s.analyticsStore = store
+	slog.Info("分析库就绪", "path", path)
+	return store.Store, nil
 }
 
 // GetDatabasePath 返回组合库文件路径（界面显示用）。
