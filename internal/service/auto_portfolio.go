@@ -197,7 +197,11 @@ func (s *PortfolioService) CreateAutoPortfolio(req AutoPortfolioRequest) (*AutoP
 
 // buildAutoCompose 组装预演/创建共用的中间结果。
 func (s *PortfolioService) buildAutoCompose(req AutoPortfolioRequest) (*autoComposeContext, error) {
-	store, err := s.db()
+	_, err := s.db()
+	if err != nil {
+		return nil, err
+	}
+	analytics, err := s.analyticsDB()
 	if err != nil {
 		return nil, err
 	}
@@ -208,7 +212,7 @@ func (s *PortfolioService) buildAutoCompose(req AutoPortfolioRequest) (*autoComp
 	//   latest_trade_date = self._get_latest_strength_trade_date()   # MAX(trade_date) 不带策略
 	//   raw_scores = self._latest_strength_frame(latest_trade_date, strategy_id)
 	//   if raw_scores.empty: raise "...策略没有最新评分，请先刷新组合评分"
-	strengthDate, err := store.LatestStrengthDateAny()
+	strengthDate, err := analytics.LatestStrengthDateAny()
 	if err != nil || strengthDate <= 0 {
 		return nil, fmt.Errorf("暂无最新评分数据，请先执行组合刷新")
 	}
@@ -236,7 +240,7 @@ func (s *PortfolioService) buildAutoCompose(req AutoPortfolioRequest) (*autoComp
 		return nil, err
 	}
 
-	all, err := store.LoadStrength(strengthDate, strategyID, 0)
+	all, err := analytics.LoadStrength(strengthDate, strategyID, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -257,14 +261,14 @@ func (s *PortfolioService) buildAutoCompose(req AutoPortfolioRequest) (*autoComp
 		return nil, fmt.Errorf("当前范围内没有可用于自动组合的评分股票")
 	}
 
-	marketState, _ := store.LoadMarketState(strengthDate)
+	marketState, _ := analytics.LoadMarketState(strengthDate)
 	state := marketState.State
 	if state == "" {
 		state = score.StateRange
 	}
 	// 低吸的广度就绪数必须在**建候选池之前**算好并写进 cfg ——
 	// 候选池的低吸质量过滤（dd20 档位）与随后的建仓额度都依赖它。
-	breadthReady, err := store.LowBuyBreadthReadyCount(strengthDate, strategyID)
+	breadthReady, err := analytics.LowBuyBreadthReadyCount(strengthDate, strategyID)
 	if err != nil {
 		return nil, err
 	}
@@ -281,7 +285,7 @@ func (s *PortfolioService) buildAutoCompose(req AutoPortfolioRequest) (*autoComp
 	}
 	// 第三个返回值是**截断前**的完整池（原版 `candidate_count = len(candidate_pool)`，
 	// 用的是完整池而不是 `candidate_ranked`）。
-	candidates, universeScores, fullPool := s.buildCandidatePoolFrom(store, rowsIn, item, cfg, nil)
+	candidates, universeScores, fullPool := s.buildCandidatePoolFrom(analytics, rowsIn, item, cfg, nil)
 	plan := score.BuildRotationPlan(score.RotationInput{
 		Holdings: nil, Candidates: candidates, Config: cfg,
 		MarketState: state, MaxStockLimit: item.MaxStockCount,
