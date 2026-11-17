@@ -56,7 +56,9 @@ type RefreshResult struct {
 //
 // force 为 true 时按全量重算（数据修订后需要覆盖时用）。
 func (s *PortfolioService) RefreshStrength(strategyID string, limit int, force bool) (*RefreshResult, error) {
-	store, err := s.db()
+	// 评分属于分析数据：配置独立分析库后，刷新写入 analytics.db；
+	// 未配置时保持旧单库行为。
+	store, err := s.analyticsDB()
 	if err != nil {
 		return nil, err
 	}

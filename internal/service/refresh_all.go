@@ -98,6 +98,7 @@ type RefreshAllResult struct {
 // ⚠ 前端「指定区间」按钮此前只刷当前组合的策略 —— 其它组合的评分会悄悄过期，
 // 区间数据更容易被忽略（用户以为整段历史都算好了）。
 func (s *PortfolioService) RefreshBackfillAll(startDate, endDate, limit int, force bool) (*BackfillAllResult, error) {
+	// 活跃策略列表属于核心组合配置；实际评分回填由 RefreshBackfill 写分析库。
 	store, err := s.db()
 	if err != nil {
 		return nil, err
@@ -185,6 +186,7 @@ type BackfillAllResult struct {
 // 单个策略失败**不影响其它策略** —— 错误记在该策略的 `Error` 上，
 // 整体不返回错误。理由：一个策略的数据问题不该让用户连别的策略都刷不了。
 func (s *PortfolioService) RefreshStrengthAll(limit int, force bool) (*RefreshAllResult, error) {
+	// 活跃策略列表来自核心库；每个策略的评分写入由 RefreshStrength 路由到分析库。
 	store, err := s.db()
 	if err != nil {
 		return nil, err
