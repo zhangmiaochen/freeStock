@@ -122,5 +122,5 @@ func findCNEOnPath() (string, error) {
 			return checkGood(cand)
 		}
 	}
-	return "", fmt.Errorf("找不到 cne：请在设置里填 cne 的目录（或可执行文件），或把它放进 PATH")
+	return "", fmt.Errorf("找不到 cne：当前运行环境是容器/NAS；宿主机安装路径对容器不可见。请把 cne venv 挂载到容器（例如 /vol2/.../cne-venv:/vol2/.../cne-venv:ro）并在设置中填写容器内 cne 路径，或在镜像内安装 cne；当前 PATH=%s", os.Getenv("PATH"))
 }

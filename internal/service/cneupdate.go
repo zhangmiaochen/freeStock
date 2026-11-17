@@ -572,6 +572,12 @@ func (s *CneUpdateService) validate(prefs config.UpdatePrefs) []string {
 	if prefs.CNEPath != "" {
 		if _, err := cne.ResolveCNE(prefs.CNEPath); err != nil {
 			out = append(out, err.Error())
+		} else {
+			slog.Info("cne 路径可用", "path", prefs.CNEPath)
+		}
+	} else {
+		if _, err := cne.ResolveCNE(""); err != nil {
+			out = append(out, err.Error())
 		}
 	}
 	return out
