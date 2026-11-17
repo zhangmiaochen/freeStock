@@ -1545,7 +1545,7 @@ type StrengthSummary struct {
 
 // GetStrengthSummary 返回评分物化状态。
 func (s *PortfolioService) GetStrengthSummary(strategyID string) (*StrengthSummary, error) {
-	store, err := s.db()
+	store, err := s.analyticsDB()
 	if err != nil {
 		return nil, err
 	}
