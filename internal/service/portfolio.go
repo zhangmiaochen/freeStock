@@ -179,6 +179,10 @@ func (s *PortfolioService) dbPath() string {
 	if path := strings.TrimSpace(os.Getenv("FREESTOCK_PORTFOLIO_CORE_DB_PATH")); path != "" {
 		return path
 	}
+	// 迁移成功后优先读取持久化状态，无需用户配置环境变量。
+	if state := s.migrationState(); state.Status == "succeeded" && state.CorePath != "" {
+		return state.CorePath
+	}
 	if path := strings.TrimSpace(os.Getenv("FREESTOCK_PORTFOLIO_DB_PATH")); path != "" {
 		return path
 	}
@@ -195,6 +199,11 @@ func (s *PortfolioService) dbPath() string {
 // analyticsDB 返回可选独立分析库；未配置时返回核心/旧库，保持旧调用链兼容。
 func (s *PortfolioService) analyticsDB() (*portfolio.Store, error) {
 	path := strings.TrimSpace(os.Getenv("FREESTOCK_ANALYTICS_DB_PATH"))
+	if path == "" {
+		if state := s.migrationState(); state.Status == "succeeded" {
+			path = state.AnalyticsPath
+		}
+	}
 	if path == "" {
 		return s.db()
 	}

@@ -12,10 +12,9 @@ import (
 	"freestock/internal/portfolio"
 )
 
-// StorageMigrationState 是 UI 可见的迁移状态。状态文件在数据目录中，
-// 与数据库一起备份/迁移，避免重启后重复执行大迁移。
+// StorageMigrationState 是 UI 可见的迁移状态。
 type StorageMigrationState struct {
-	Status         string `json:"status"` // idle/running/succeeded/failed
+	Status         string `json:"status"`
 	StartedAt      string `json:"startedAt,omitempty"`
 	CompletedAt    string `json:"completedAt,omitempty"`
 	SourcePath     string `json:"sourcePath,omitempty"`
@@ -28,41 +27,57 @@ type StorageMigrationState struct {
 
 var storageMigrationMu sync.Mutex
 
-// GetStorageMigrationState 返回持久化迁移状态。
-func (s *PortfolioService) GetStorageMigrationState() StorageMigrationState {
-	path := s.migrationStatePath()
-	state := StorageMigrationState{Status: "idle"}
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return state
+// migrationState 读取状态文件；路径推导只使用旧库/配置路径，避免循环依赖。
+func (s *PortfolioService) migrationState() StorageMigrationState {
+	path := s.legacyDBPath()
+	if path == "" {
+		return StorageMigrationState{Status: "idle"}
 	}
-	if json.Unmarshal(raw, &state) != nil || state.Status == "" {
+	var state StorageMigrationState
+	raw, err := os.ReadFile(filepath.Join(filepath.Dir(path), "migration-state.json"))
+	if err != nil || json.Unmarshal(raw, &state) != nil || state.Status == "" {
 		return StorageMigrationState{Status: "idle"}
 	}
 	return state
 }
 
+// legacyDBPath 返回迁移前的固定旧库路径，不读取迁移后的 core 路径。
+func (s *PortfolioService) legacyDBPath() string {
+	if s.dbPathOverride != "" {
+		return s.dbPathOverride
+	}
+	if path := strings.TrimSpace(os.Getenv("FREESTOCK_PORTFOLIO_DB_PATH")); path != "" {
+		return path
+	}
+	configPath := ""
+	if s.stock != nil && s.stock.cfg != nil {
+		configPath = s.stock.cfg.Path()
+	}
+	if configPath == "" {
+		return ""
+	}
+	return portfolio.DefaultPath(configPath)
+}
+
+// GetStorageMigrationState 返回持久化迁移状态。
+func (s *PortfolioService) GetStorageMigrationState() StorageMigrationState {
+	return s.migrationState()
+}
+
 // MigrateStorage 执行一次核心库+分析库迁移。
-//
-// 这是显式 UI 操作，不在启动时调用；同一进程单飞；成功后状态持久化，
-// 相同源/目标再次点击不会重复运行。目标存在时底层迁移工具会拒绝覆盖。
 func (s *PortfolioService) MigrateStorage() (StorageMigrationState, error) {
 	storageMigrationMu.Lock()
 	defer storageMigrationMu.Unlock()
 
-	state := s.GetStorageMigrationState()
+	state := s.migrationState()
 	if state.Status == "succeeded" {
 		return state, nil
 	}
-	corePath := s.dbPath()
-	if corePath == "" {
-		return state, fmt.Errorf("无法确定组合库路径")
+	sourcePath := s.legacyDBPath()
+	if sourcePath == "" {
+		return state, fmt.Errorf("无法确定旧组合库路径")
 	}
-	dir := filepath.Dir(corePath)
-	sourcePath := corePath
-	if strings.HasSuffix(strings.ToLower(filepath.Base(corePath)), "-core.db") {
-		sourcePath = filepath.Join(dir, "portfolio.db")
-	}
+	dir := filepath.Dir(sourcePath)
 	coreTarget := filepath.Join(dir, "portfolio-core.db")
 	analyticsTarget := filepath.Join(dir, "analytics.db")
 	state = StorageMigrationState{
@@ -100,11 +115,11 @@ func (s *PortfolioService) MigrateStorage() (StorageMigrationState, error) {
 }
 
 func (s *PortfolioService) migrationStatePath() string {
-	core := s.dbPath()
-	if core == "" {
+	path := s.legacyDBPath()
+	if path == "" {
 		return "migration-state.json"
 	}
-	return filepath.Join(filepath.Dir(core), "migration-state.json")
+	return filepath.Join(filepath.Dir(path), "migration-state.json")
 }
 
 func (s *PortfolioService) writeMigrationState(state StorageMigrationState) error {
