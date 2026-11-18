@@ -362,7 +362,7 @@ func (s *PortfolioService) LatestClose(codes []string, strategyID string) (map[s
 	//（`get_rotation_payload`/`apply_rotation`/`_merge_position_scores` 都用
 	// `_get_latest_strength_trade_date()`，即 `MAX(trade_date)` 不带 strategy_id）。
 	// 该策略在那一日没有评分时下面会取不到，落到第 2 步的日线收盘价兜底。
-	if store, err := s.db(); err == nil {
+	if store, err := s.analyticsDB(); err == nil {
 		if date, err := store.LatestStrengthDateAny(); err == nil && date > 0 {
 			rows, err := store.LoadStrengthForCodes(date, strategyID, codes)
 			if err == nil {
