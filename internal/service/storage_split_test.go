@@ -422,6 +422,86 @@ func TestMigratedFeatureReadPaths(t *testing.T) {
 	svc.MaintainDatabase()
 }
 
+// 老版本已经"迁移成功"，但那时没有回测库（回测表还在旧库）。升级后再次点击
+// 迁移必须只补 backtest.db，不能重搬核心/分析库，也不能什么都不做
+// （否则 backtestDB 回落旧库 → 新建组合的回测又撞 787）。
+func TestMigrateStorageUpgradesSucceededStateWithBacktestDB(t *testing.T) {
+	dir := t.TempDir()
+	legacy := filepath.Join(dir, "portfolio.db")
+	core := filepath.Join(dir, "portfolio-core.db")
+	analytics := filepath.Join(dir, "analytics.db")
+	backtestPath := filepath.Join(dir, "backtest.db")
+	buildLegacyFixture(t, legacy, 200)
+
+	t.Setenv("FREESTOCK_PORTFOLIO_DB_PATH", legacy)
+	t.Setenv("FREESTOCK_PORTFOLIO_CORE_DB_PATH", "")
+	t.Setenv("FREESTOCK_ANALYTICS_DB_PATH", "")
+	t.Setenv("FREESTOCK_BACKTEST_DB_PATH", "")
+
+	svc := &PortfolioService{}
+	defer svc.Close()
+	if _, err := svc.MigrateStorage(); err != nil {
+		t.Fatalf("首次迁移失败：%v", err)
+	}
+	coreBefore, err := os.Stat(core)
+	if err != nil {
+		t.Fatal(err)
+	}
+	analyticsBefore, err := os.Stat(analytics)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 模拟"老版本状态"：成功状态里没有 backtestPath，回测库也不存在。
+	if err := os.Remove(backtestPath); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	writeMigrationFixture(t, dir, StorageMigrationState{
+		Status: "succeeded", SourcePath: legacy, CorePath: core,
+		AnalyticsPath: analytics, CoreQuick: "ok", AnalyticsQuick: "ok",
+		CompletedAt: time.Now().Format(time.RFC3339),
+	})
+
+	state, err := svc.MigrateStorage()
+	if err != nil {
+		t.Fatalf("升级迁移失败：%v", err)
+	}
+	if state.Status != "succeeded" || state.BacktestQuick != "ok" {
+		t.Fatalf("升级后应成功且回测库校验通过：%+v", state)
+	}
+	if got := state.BacktestPath; got != backtestPath {
+		t.Fatalf("状态里的回测库路径=%q，应为 %q", got, backtestPath)
+	}
+	// 核心库/分析库不能被动到（同一个文件）。
+	coreAfter, err := os.Stat(core)
+	if err != nil {
+		t.Fatal(err)
+	}
+	analyticsAfter, err := os.Stat(analytics)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(coreBefore, coreAfter) {
+		t.Fatal("升级补齐时核心库被重建了")
+	}
+	if !os.SameFile(analyticsBefore, analyticsAfter) {
+		t.Fatal("升级补齐时分析库被重搬了")
+	}
+	// 回测记录确实搬进新库。
+	raw, err := sql.Open("sqlite", backtestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	var runs int
+	if err := raw.QueryRow(`SELECT COUNT(*) FROM portfolio_backtest_run`).Scan(&runs); err != nil {
+		t.Fatal(err)
+	}
+	if runs != 1 {
+		t.Fatalf("回测库运行记录=%d，应为 1", runs)
+	}
+}
+
 // 未迁移的旧部署必须完全保持原行为：回测库回退到旧单库，读写照旧。
 func TestBacktestDBFallsBackToLegacyBeforeMigration(t *testing.T) {
 	dir := t.TempDir()

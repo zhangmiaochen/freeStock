@@ -88,8 +88,22 @@ func (s *PortfolioService) MigrateStorage() (StorageMigrationState, error) {
 	defer storageMigrationMu.Unlock()
 
 	state := s.migrationState()
+	// 老版本可能已经"整体成功"，但那时没有回测库（回测表还在旧库）。
+	// 这种状态不能直接返回：backtest.db 不存在 → backtestDB 回落旧库 →
+	// 迁移后新建的组合一跑回测就撞 787。这里把它当作"只差回测库"继续补齐。
+	upgradeBacktestOnly := false
 	if state.Status == "succeeded" {
-		return state, nil
+		if state.BacktestPath != "" {
+			if _, statErr := os.Stat(state.BacktestPath); statErr == nil {
+				return state, nil
+			}
+		}
+		if state.CoreQuick == "ok" && state.AnalyticsQuick == "ok" {
+			upgradeBacktestOnly = true
+			slog.Info("存储迁移：已完成核心/分析库，仅补齐回测库")
+		} else {
+			return state, nil
+		}
 	}
 	prior := state // 上一次落盘的状态（判断能否直接接手分析库）
 	sourcePath := s.legacyDBPath()
@@ -107,6 +121,12 @@ func (s *PortfolioService) MigrateStorage() (StorageMigrationState, error) {
 		SourcePath: sourcePath, CorePath: coreTarget,
 		AnalyticsPath: analyticsTarget, BacktestPath: backtestTarget,
 	}
+	if upgradeBacktestOnly {
+		// 核心/分析库上一步已经是成功的，保留它们的校验结果，只补回测库。
+		state.CoreQuick = prior.CoreQuick
+		state.AnalyticsQuick = prior.AnalyticsQuick
+		state.Phase = "backtest"
+	}
 	if err := s.writeMigrationState(state); err != nil {
 		return state, err
 	}
@@ -114,19 +134,21 @@ func (s *PortfolioService) MigrateStorage() (StorageMigrationState, error) {
 	var err error
 	// 上次可能已经把分析表复制完、只差收尾。先尝试"接手校验"，成功就跳过复制，
 	// 不把几小时的复制成果归档重做。回测段仍要照常执行。
-	analyticsFinalized := false
-	if finalized, finErr := s.finalizeExistingAnalytics(sourcePath, analyticsTarget, prior, &state); finalized {
-		if finErr != nil {
-			slog.Warn("存储迁移：已有分析库收尾失败，将重新复制", "err", finErr)
-		} else {
-			analyticsFinalized = true
-			state.AnalyticsQuick = "ok"
-			if prior.CoreQuick == "ok" {
-				state.CoreQuick = "ok"
-			} else if _, quick, vErr := portfolio.ValidateCoreDatabase(coreTarget); vErr == nil {
-				state.CoreQuick = quick
+	analyticsFinalized := upgradeBacktestOnly // 升级补齐时分析库已经成功，不再碰它
+	if !upgradeBacktestOnly {
+		if finalized, finErr := s.finalizeExistingAnalytics(sourcePath, analyticsTarget, prior, &state); finalized {
+			if finErr != nil {
+				slog.Warn("存储迁移：已有分析库收尾失败，将重新复制", "err", finErr)
+			} else {
+				analyticsFinalized = true
+				state.AnalyticsQuick = "ok"
+				if prior.CoreQuick == "ok" {
+					state.CoreQuick = "ok"
+				} else if _, quick, vErr := portfolio.ValidateCoreDatabase(coreTarget); vErr == nil {
+					state.CoreQuick = quick
+				}
+				slog.Info("存储迁移：分析库直接接手完成（未重新复制）", "path", analyticsTarget)
 			}
-			slog.Info("存储迁移：分析库直接接手完成（未重新复制）", "path", analyticsTarget)
 		}
 	}
 
