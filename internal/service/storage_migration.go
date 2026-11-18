@@ -468,6 +468,19 @@ func (s *PortfolioService) ResumeInterruptedMigration() {
 	slog.Info("存储迁移续跑完成", "status", s.migrationState().Status)
 }
 
+// readStateFile 读取状态文件；不存在或解析失败返回 ok=false。
+func readStateFile(path string) (StorageMigrationState, bool) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return StorageMigrationState{}, false
+	}
+	var state StorageMigrationState
+	if json.Unmarshal(raw, &state) != nil || state.Status == "" {
+		return StorageMigrationState{}, false
+	}
+	return state, true
+}
+
 // CheckStorageConsistency 启动时核对"核心库确实是组合数据的来源"。
 //
 // 迁移显示成功、但核心库里 0 个组合、旧库里有 —— 组合页面就会是空白。
@@ -523,6 +536,19 @@ func (s *PortfolioService) writeMigrationState(state StorageMigrationState) erro
 	path := s.migrationStatePath()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
+	}
+	// **拒绝过期写入**：如果文件里已经是"更新的成功状态"，而本次写入来自一个
+	// 更早开始、还没退出的迁移进程（StartedAt 早于 CompletedAt），说明是僵尸
+	// 进程在回写旧状态 —— 写入会把界面打回"迁移中"，甚至让 backtestDB 回退。
+	if existing, ok := readStateFile(path); ok &&
+		existing.Status == "succeeded" && state.Status == "running" {
+		started, sErr := time.Parse(time.RFC3339, state.StartedAt)
+		completed, cErr := time.Parse(time.RFC3339, existing.CompletedAt)
+		if sErr == nil && cErr == nil && started.Before(completed) {
+			slog.Warn("忽略过期迁移状态写入（已有更新的成功状态）",
+				"staleStartedAt", state.StartedAt, "completedAt", existing.CompletedAt)
+			return nil
+		}
 	}
 	// 每次落盘都刷新心跳：判断"running 是否已成孤儿"就靠它。
 	state.UpdatedAt = time.Now().Format(time.RFC3339)

@@ -430,6 +430,49 @@ func TestMigratedFeatureReadPaths(t *testing.T) {
 	svc.MaintainDatabase()
 }
 
+// 僵尸迁移进程（StartedAt 早于已有成功状态的 CompletedAt）不得回写旧状态，
+// 否则界面会被打回"迁移中"，backtestDB 也会跟着回退到旧库。
+func TestStaleMigrationWriteIsIgnored(t *testing.T) {
+	dir := t.TempDir()
+	legacy := filepath.Join(dir, "portfolio.db")
+	t.Setenv("FREESTOCK_PORTFOLIO_DB_PATH", legacy)
+	t.Setenv("FREESTOCK_PORTFOLIO_CORE_DB_PATH", "")
+	t.Setenv("FREESTOCK_ANALYTICS_DB_PATH", "")
+
+	completedAt := time.Now().Format(time.RFC3339)
+	writeMigrationFixture(t, dir, StorageMigrationState{
+		Status: "succeeded", SourcePath: legacy, CompletedAt: completedAt,
+		UpdatedAt: completedAt, CoreQuick: "ok", AnalyticsQuick: "ok",
+	})
+	svc := &PortfolioService{}
+	defer svc.Close()
+
+	// 更早开始的一次迁移仍在跑，试图写回 running。
+	stale := StorageMigrationState{
+		Status: "running", SourcePath: legacy,
+		StartedAt: time.Now().Add(-2 * time.Hour).Format(time.RFC3339),
+		Phase:     "analytics",
+	}
+	if err := svc.writeMigrationState(stale); err != nil {
+		t.Fatal(err)
+	}
+	if got := svc.migrationState(); got.Status != "succeeded" {
+		t.Fatalf("过期写入不应覆盖成功状态，得到 %q", got.Status)
+	}
+
+	// 新一次迁移（StartedAt 晚于 CompletedAt）必须能正常写入。
+	fresh := StorageMigrationState{
+		Status: "running", SourcePath: legacy,
+		StartedAt: time.Now().Add(time.Minute).Format(time.RFC3339),
+	}
+	if err := svc.writeMigrationState(fresh); err != nil {
+		t.Fatal(err)
+	}
+	if got := svc.migrationState(); got.Status != "running" {
+		t.Fatalf("新一轮迁移应能写入，得到 %q", got.Status)
+	}
+}
+
 // 状态文件停在 running、但进程已经不在了：必须报 interrupted，
 // 否则界面会一直显示“迁移中”、按钮永久禁用（用户只能手删状态文件）。
 func TestStorageMigrationStateMarksInterrupted(t *testing.T) {
