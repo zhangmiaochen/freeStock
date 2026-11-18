@@ -3,6 +3,7 @@ package portfolio
 import (
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -125,12 +126,9 @@ func FinalizeAnalyticsDatabase(sourcePath, targetPath string, progress func(tabl
 		if progress != nil {
 			progress("检查 "+table, i, len(AnalyticsTables))
 		}
-		var check string
-		if err := raw.QueryRow("PRAGMA quick_check(" + quoteIdent(table) + ")").Scan(&check); err != nil {
-			return report, fmt.Errorf("检查分析表 %s 失败：%w", table, err)
-		}
-		if check != "ok" {
-			return report, fmt.Errorf("分析表 %s quick_check 失败：%s", table, check)
+		// 同上：大表用行数+rowid 边界校验，避免整表全扫。
+		if _, err := verifyMigratedTable(raw, "legacy_analytics", table, report.Tables[table], 0); err != nil {
+			return report, err
 		}
 	}
 	report.QuickCheck = "ok"
@@ -230,18 +228,20 @@ func migrateAnalyticsDatabase(sourcePath, targetPath string, progress func(table
 	if err := ensureAnalyticsIndexes(raw); err != nil {
 		return report, fmt.Errorf("重建分析索引失败：%w", err)
 	}
-	// 整库 quick_check 在 NAS 上可能很久没有输出；按表检查并及时更新状态，
-	// 让界面能说明当前正检查哪个大表，而不是显示一个无进度的黑盒阶段。
+	// 逐表校验。大表不再整表 quick_check（4.9GB 全扫在 NAS 上要几十分钟且
+	// 没有任何进度），改用行数 + rowid 边界校验；阈值见 verifyMigratedTable。
 	for index, table := range AnalyticsTables {
 		if progress != nil {
 			progress("检查 "+table, index, len(AnalyticsTables), 0, -1)
 		}
-		var tableCheck string
-		if err := raw.QueryRow("PRAGMA quick_check(" + quoteIdent(table) + ")").Scan(&tableCheck); err != nil {
-			return report, fmt.Errorf("检查分析表 %s 失败：%w", table, err)
+		mode, err := verifyMigratedTable(raw, "legacy_analytics", table, report.Tables[table], 0)
+		if err != nil {
+			return report, err
 		}
-		if tableCheck != "ok" {
-			return report, fmt.Errorf("分析表 %s quick_check 失败：%s", table, tableCheck)
+		if mode == "sampled" {
+			slog.Info("大表跳过整表 quick_check，已做行数+rowid 边界校验",
+				"table", table, "rows", report.Tables[table],
+				"hint", "需要全量校验可设 FREESTOCK_MIGRATION_FULL_VERIFY=1")
 		}
 		if progress != nil {
 			progress("检查 "+table, index+1, len(AnalyticsTables), 0, -1)
