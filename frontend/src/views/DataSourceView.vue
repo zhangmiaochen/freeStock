@@ -327,7 +327,7 @@ function kindLabel(kind: string) {
           上次迁移失败：{{ migration.error }}
         </p>
         <p v-if="migration?.status === 'running'" class="text-muted-foreground mt-2 text-xs">
-          阶段：{{ migration.phase === 'core' ? '核心库' : migration.phase === 'analytics' ? '分析库' : '准备' }}；正在处理：{{ migration.currentTable || '校验/准备目标库' }}（{{ migration.tablesDone || 0 }}/{{ migration.tablesTotal || 10 }} 张表，{{ migration.rowsDone || 0 }}/{{ migration.rowsTotal || 0 }} 行）
+          阶段：{{ migration.phase === 'core' ? '核心库' : migration.phase === 'core-verify' ? '核心库校验' : migration.phase === 'analytics' ? '分析库' : '准备' }}；正在处理：{{ migration.currentTable || '校验/准备目标库' }}（{{ migration.tablesDone || 0 }}/{{ migration.tablesTotal || 10 }} 张表，{{ migration.rowsDone || 0 }}{{ (migration.rowsTotal ?? 0) > 0 ? `/${migration.rowsTotal}` : ' 行已处理（总数边读边统计）' }}）
         </p>
         <p v-if="migrationError" class="text-destructive mt-2 text-xs">{{ migrationError }}</p>
         <div class="mt-3 flex items-center gap-2">

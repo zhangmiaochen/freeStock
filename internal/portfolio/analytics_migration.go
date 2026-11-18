@@ -128,49 +128,77 @@ func migrateAnalyticsDatabase(sourcePath, targetPath string, progress func(table
 		return report, err
 	}
 
-	// 每张表单独提交。INSERT...SELECT 由 SQLite 引擎 VM 流式执行，不会把整表
-	// 装入 Go 内存；逐表事务限制 journal 和锁的持续时间。失败由外层 cleanup
-	// 删除不完整目标，源库始终不变。
-	const batchSize = 50000
+	// 每张表按 rowid 分批。**不在复制前执行 COUNT(*)**：对数百万行的
+	// stock_strength，COUNT 本身会完整扫描整个 4.9GB 表，正是 NAS 上
+	// UI 长时间停留在上一张表的原因。每批先取最多 batchSize 个 rowid，
+	// 再用 rowid 范围执行 INSERT...SELECT；Go 内存只保存这批整数。
+	const batchSize = 10000
 	for index, table := range AnalyticsTables {
-		// 先通知“正在进入下一张表”，避免上一张表完成后 UI 长时间显示旧表。
 		if progress != nil {
-			progress(table, index, len(AnalyticsTables), 0, -1)
-		}
-		var sourceCount int
-		if err := raw.QueryRow("SELECT COUNT(*) FROM legacy_analytics." + quoteIdent(table)).Scan(&sourceCount); err != nil {
-			return report, fmt.Errorf("统计旧分析表 %s 失败：%w", table, err)
+			progress(table, index, len(AnalyticsTables), 0, -1) // 总行数未知，不做全表预扫
 		}
 		if _, err := raw.Exec("DELETE FROM " + quoteIdent(table)); err != nil {
-			return report, fmt.Errorf("清空目标分析表 %s 失败：%w", table, err)
+			return report, fmt.Errorf("清空目标表 %s 失败：%w", table, err)
 		}
-		// LIMIT/OFFSET 分批提交：每批都由 SQLite 引擎流式执行，避免一个表
-		// 独占事务数小时。源库不变，所以 OFFSET 在迁移期间稳定。
-		for offset := 0; offset < sourceCount; offset += batchSize {
+		lastRowID := int64(0)
+		var copied int64
+		for {
+			rows, err := raw.Query("SELECT rowid FROM legacy_analytics."+quoteIdent(table)+" WHERE rowid > ? ORDER BY rowid LIMIT ?", lastRowID, batchSize)
+			if err != nil {
+				return report, fmt.Errorf("读取分析表 %s rowid 失败：%w", table, err)
+			}
+			ids := make([]int64, 0, batchSize)
+			for rows.Next() {
+				var id int64
+				if err := rows.Scan(&id); err != nil {
+					rows.Close()
+					return report, err
+				}
+				ids = append(ids, id)
+			}
+			if err := rows.Err(); err != nil {
+				rows.Close()
+				return report, err
+			}
+			rows.Close()
+			if len(ids) == 0 {
+				break
+			}
+			lo, hi := lastRowID+1, ids[len(ids)-1]
 			tx, err := raw.Begin()
 			if err != nil {
 				return report, err
 			}
-			_, err = tx.Exec("INSERT INTO "+quoteIdent(table)+" SELECT * FROM legacy_analytics."+quoteIdent(table)+" LIMIT ? OFFSET ?", batchSize, offset)
+			res, err := tx.Exec("INSERT INTO "+quoteIdent(table)+" SELECT * FROM legacy_analytics."+quoteIdent(table)+" WHERE rowid >= ? AND rowid <= ? ORDER BY rowid", lo, hi)
 			if err != nil {
 				_ = tx.Rollback()
-				return report, fmt.Errorf("复制分析表 %s 批次 offset=%d 失败：%w", table, offset, err)
+				return report, fmt.Errorf("复制分析表 %s rowid=%d..%d 失败：%w", table, lo, hi, err)
+			}
+			inserted, err := res.RowsAffected()
+			if err != nil {
+				_ = tx.Rollback()
+				return report, err
+			}
+			if inserted != int64(len(ids)) {
+				_ = tx.Rollback()
+				return report, fmt.Errorf("分析表 %s 批次行数不一致：扫描=%d 写入=%d", table, len(ids), inserted)
 			}
 			if err := tx.Commit(); err != nil {
 				return report, fmt.Errorf("提交分析表 %s 批次失败：%w", table, err)
 			}
+			copied += inserted
+			lastRowID = hi
 			if progress != nil {
-				progress(table, index+1, len(AnalyticsTables), int64(min(offset+batchSize, sourceCount)), int64(sourceCount))
+				progress(table, index, len(AnalyticsTables), copied, -1)
 			}
 		}
-		var targetCount int
-		if err := raw.QueryRow("SELECT COUNT(*) FROM " + quoteIdent(table)).Scan(&targetCount); err != nil {
-			return report, err
+		report.Tables[table] = int(copied)
+		if progress != nil {
+			progress(table, index+1, len(AnalyticsTables), copied, copied)
 		}
-		if sourceCount != targetCount {
-			return report, fmt.Errorf("分析表 %s 行数不一致：源=%d 目标=%d", table, sourceCount, targetCount)
-		}
-		report.Tables[table] = targetCount
+	}
+	if progress != nil {
+		progress("完整性检查", len(AnalyticsTables), len(AnalyticsTables), 0, -1)
 	}
 	if err := raw.QueryRow("PRAGMA quick_check").Scan(&report.QuickCheck); err != nil {
 		return report, err
