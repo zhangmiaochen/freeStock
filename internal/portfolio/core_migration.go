@@ -118,8 +118,11 @@ func MigrateCoreDatabaseWithProgress(sourcePath, targetPath string, progress fun
 		}
 	}
 
+	// ⚠ 必须是 `main.quick_check`：不带 schema 前缀的 quick_check 会检查
+	// **当前连接上的所有数据库**，而这里刚 ATTACH 了 4.9GB 的旧库 ——
+	// 在 NAS 上就是几十分钟的整库全扫，表现为"核心库校验卡住、analytics.db 不生成"。
 	var check string
-	if err := raw.QueryRow("PRAGMA quick_check").Scan(&check); err != nil {
+	if err := raw.QueryRow("PRAGMA main.quick_check").Scan(&check); err != nil {
 		return report, err
 	}
 	report.QuickCheck = check

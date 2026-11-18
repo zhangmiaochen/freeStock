@@ -39,8 +39,10 @@ func verifyMigratedTable(raw *sql.DB, srcAlias, table string, wantCount int, lim
 		limit = defaultFullQuickCheckRowLimit
 	}
 	if wantCount <= limit || fullVerifyEnabled() {
+		// `main.` 前缀不能省：不带 schema 的 quick_check 会把 ATTACH 进来的
+		// 旧库一起扫（见 core_migration.go 里同类注释）。
 		var check string
-		if err := raw.QueryRow("PRAGMA quick_check(" + quoteIdent(table) + ")").Scan(&check); err != nil {
+		if err := raw.QueryRow("PRAGMA main.quick_check(" + quoteIdent(table) + ")").Scan(&check); err != nil {
 			return "", fmt.Errorf("检查 %s 失败：%w", table, err)
 		}
 		if check != "ok" {

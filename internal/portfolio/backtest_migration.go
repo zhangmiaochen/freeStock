@@ -112,7 +112,7 @@ func migrateBacktestDatabase(sourcePath, targetPath string, progress func(table 
 			progress("检查 "+table, index, len(BacktestTables), 0)
 		}
 		var check string
-		if err := raw.QueryRow("PRAGMA quick_check(" + quoteIdent(table) + ")").Scan(&check); err != nil {
+		if err := raw.QueryRow("PRAGMA main.quick_check(" + quoteIdent(table) + ")").Scan(&check); err != nil {
 			return report, fmt.Errorf("检查回测表 %s 失败：%w", table, err)
 		}
 		if check != "ok" {
