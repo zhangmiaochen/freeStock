@@ -157,6 +157,9 @@ func (s *PortfolioService) MigrateStorage() (StorageMigrationState, error) {
 			if rowsTotal >= 0 {
 				state.RowsTotal = rowsTotal
 			}
+			if table == "索引重建" || table == "完整性检查" {
+				state.Phase = "analytics-finalize"
+			}
 			_ = s.writeMigrationState(state)
 		})
 		if analyticsErr != nil {

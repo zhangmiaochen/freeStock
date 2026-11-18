@@ -198,6 +198,12 @@ func migrateAnalyticsDatabase(sourcePath, targetPath string, progress func(table
 		}
 	}
 	if progress != nil {
+		progress("索引重建", len(AnalyticsTables), len(AnalyticsTables), 0, -1)
+	}
+	if err := ensureAnalyticsIndexes(raw); err != nil {
+		return report, fmt.Errorf("重建分析索引失败：%w", err)
+	}
+	if progress != nil {
 		progress("完整性检查", len(AnalyticsTables), len(AnalyticsTables), 0, -1)
 	}
 	if err := raw.QueryRow("PRAGMA quick_check").Scan(&report.QuickCheck); err != nil {
@@ -205,9 +211,6 @@ func migrateAnalyticsDatabase(sourcePath, targetPath string, progress func(table
 	}
 	if report.QuickCheck != "ok" {
 		return report, fmt.Errorf("分析库 quick_check 失败：%s", report.QuickCheck)
-	}
-	if err := ensureAnalyticsIndexes(raw); err != nil {
-		return report, fmt.Errorf("重建分析索引失败：%w", err)
 	}
 	// 迁移后核心库外键无法跨文件验证；检查分析库内部结构并记录跨库引用
 	// 由应用层维护，避免误把 787 当成数据损坏。
