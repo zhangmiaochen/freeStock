@@ -2,12 +2,43 @@ package portfolio
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 )
+
+// ErrAnalyticsIncomplete 表示"分析库缺行"——只有这种情况才应该归档重做。
+//
+// 其它错误（打不开、被占用、磁盘满、校验被 I/O 中断）**不能**当成数据不一致：
+// 把几 GB 已复制好的文件归档重来，代价是几小时白跑。
+var ErrAnalyticsIncomplete = errors.New("分析库复制未完成")
+
+// IsCorruptDatabaseError 判断错误是不是"这个文件根本不是可用的 SQLite 库"
+// （被截断、被别的程序写坏、不是数据库文件）。
+//
+// 这类目标留着没有意义，归档重做才是对的；与"暂时打不开/被占用"必须区分开，
+// 后者归档会白白丢掉几小时的复制成果。
+func IsCorruptDatabaseError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"not a database", // SQLITE_NOTADB (26)
+		"malformed",      // SQLITE_CORRUPT (11)
+		"database disk image is malformed",
+		"file is encrypted", // SQLITE_NOTADB 的另一条路径
+		"file is not a database",
+	} {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	return false
+}
 
 // AnalyticsTables 是从旧组合库迁移到分析库的派生/历史表集合。
 //
@@ -110,7 +141,8 @@ func FinalizeAnalyticsDatabase(sourcePath, targetPath string, progress func(tabl
 			return report, fmt.Errorf("统计目标分析表 %s 失败：%w", table, err)
 		}
 		if sourceCount != targetCount {
-			return report, fmt.Errorf("分析表 %s 行数不一致（源=%d 目标=%d），上次复制未完成", table, sourceCount, targetCount)
+			return report, fmt.Errorf("%w：分析表 %s 行数不一致（源=%d 目标=%d），上次复制未完成",
+				ErrAnalyticsIncomplete, table, sourceCount, targetCount)
 		}
 		report.Tables[table] = targetCount
 	}

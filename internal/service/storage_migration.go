@@ -3,6 +3,7 @@ package service
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -168,9 +169,8 @@ func (s *PortfolioService) MigrateStorage() (StorageMigrationState, error) {
 	analyticsFinalized := upgradeBacktestOnly // 升级补齐时分析库已经成功，不再碰它
 	if !upgradeBacktestOnly {
 		if finalized, finErr := s.finalizeExistingAnalytics(sourcePath, analyticsTarget, prior, &state); finalized {
-			if finErr != nil {
-				slog.Warn("存储迁移：已有分析库收尾失败，将重新复制", "err", finErr)
-			} else {
+			switch {
+			case finErr == nil:
 				analyticsFinalized = true
 				state.AnalyticsQuick = "ok"
 				if prior.CoreQuick == "ok" {
@@ -179,6 +179,20 @@ func (s *PortfolioService) MigrateStorage() (StorageMigrationState, error) {
 					state.CoreQuick = quick
 				}
 				slog.Info("存储迁移：分析库直接接手完成（未重新复制）", "path", analyticsTarget)
+			case errors.Is(finErr, portfolio.ErrAnalyticsIncomplete):
+				// 缺行 = 上次复制确实没写完，归档重做是正确的。
+				slog.Warn("存储迁移：分析库缺行，将归档后重新复制", "err", finErr)
+			case portfolio.IsCorruptDatabaseError(finErr):
+				// 文件根本不是可用库（被截断/写坏）→ 没有保留价值，归档重做。
+				slog.Warn("存储迁移：分析库文件已损坏，将归档后重新复制", "err", finErr)
+			default:
+				// 其它错误（占用/IO/校验失败）不要动已复制好的文件：
+				// 归档重做等于再花几小时，先让用户看到真实错误。
+				slog.Error("存储迁移：分析库校验失败（文件已保留，未重新复制）", "err", finErr)
+				state.Status = "failed"
+				state.Error = fmt.Sprintf("分析库校验失败（已保留 %s，可稍后重试）：%v", analyticsTarget, finErr)
+				_ = s.writeMigrationState(state)
+				return state, finErr
 			}
 		}
 	}
