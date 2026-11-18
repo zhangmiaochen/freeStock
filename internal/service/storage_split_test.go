@@ -422,6 +422,33 @@ func TestMigratedFeatureReadPaths(t *testing.T) {
 	svc.MaintainDatabase()
 }
 
+// 未迁移的旧部署必须完全保持原行为：回测库回退到旧单库，读写照旧。
+func TestBacktestDBFallsBackToLegacyBeforeMigration(t *testing.T) {
+	dir := t.TempDir()
+	legacy := filepath.Join(dir, "portfolio.db")
+	item := buildLegacyFixture(t, legacy, 20)
+
+	t.Setenv("FREESTOCK_PORTFOLIO_DB_PATH", legacy)
+	t.Setenv("FREESTOCK_PORTFOLIO_CORE_DB_PATH", "")
+	t.Setenv("FREESTOCK_ANALYTICS_DB_PATH", "")
+	t.Setenv("FREESTOCK_BACKTEST_DB_PATH", "")
+
+	svc := &PortfolioService{}
+	defer svc.Close()
+	store, err := svc.backtestDB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := store.Path(); got != legacy {
+		t.Fatalf("未迁移时应回退旧库 %q，得到 %q", legacy, got)
+	}
+	// 旧库里的回测记录照常可读。
+	runs, err := svc.ListBacktests(item.ID)
+	if err != nil || len(runs) != 1 {
+		t.Fatalf("旧库回测列表异常：%v len=%d", err, len(runs))
+	}
+}
+
 // 迁移后为**新建组合**写回测必须成功。旧实现把回测表留在旧库，而旧库里没有
 // 迁移后新建的 portfolio 行 → 外键 787（已复现）。回测库去掉 portfolio 外键后
 // 这层引用由应用层维护，写入不再依赖旧库有没有那行。
