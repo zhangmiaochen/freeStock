@@ -104,10 +104,20 @@ func MigrateCoreDatabaseWithProgress(sourcePath, targetPath string, progress fun
 			_ = tx.Rollback()
 			return report, fmt.Errorf("复制核心表 %s 失败：%w", table, err)
 		}
-		var count int
+		// 源/目标行数必须一致：只要少一行，组合页面就会"少组合"甚至空白，
+		// 而迁移却显示成功 —— 这种静默失败必须在迁移时拦下来。
+		var sourceCount, count int
+		if err := tx.QueryRow("SELECT COUNT(*) FROM legacy_core." + quoteIdent(table)).Scan(&sourceCount); err != nil {
+			_ = tx.Rollback()
+			return report, fmt.Errorf("统计旧库核心表 %s 失败：%w", table, err)
+		}
 		if err := tx.QueryRow("SELECT COUNT(*) FROM " + quoteIdent(table)).Scan(&count); err != nil {
 			_ = tx.Rollback()
 			return report, err
+		}
+		if sourceCount != count {
+			_ = tx.Rollback()
+			return report, fmt.Errorf("核心表 %s 行数不一致：源=%d 目标=%d", table, sourceCount, count)
 		}
 		if err := tx.Commit(); err != nil {
 			return report, fmt.Errorf("提交核心表 %s 失败：%w", table, err)

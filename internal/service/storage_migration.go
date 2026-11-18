@@ -468,6 +468,49 @@ func (s *PortfolioService) ResumeInterruptedMigration() {
 	slog.Info("存储迁移续跑完成", "status", s.migrationState().Status)
 }
 
+// CheckStorageConsistency 启动时核对"核心库确实是组合数据的来源"。
+//
+// 迁移显示成功、但核心库里 0 个组合、旧库里有 —— 组合页面就会是空白。
+// 这正是用户反复遇到的"迁移完成后列表为空"。这里不自动回退（否则用户真的
+// 删光了组合，重启后又会"复活"），但会把事实写进 ERROR 日志并给出下一步。
+func (s *PortfolioService) CheckStorageConsistency() {
+	state := s.migrationState()
+	if state.CoreQuick != "ok" || state.CorePath == "" {
+		return
+	}
+	core, err := s.db()
+	if err != nil {
+		return
+	}
+	var coreCount int
+	if err := core.DB().QueryRow(`SELECT COUNT(*) FROM portfolio`).Scan(&coreCount); err != nil {
+		slog.Error("核心库读取组合数失败", "err", err, "path", core.Path())
+		return
+	}
+	if coreCount > 0 {
+		return
+	}
+	legacyPath := s.legacyDBPath()
+	if legacyPath == "" || filepath.Clean(legacyPath) == filepath.Clean(core.Path()) {
+		return
+	}
+	if _, statErr := os.Stat(legacyPath); statErr != nil {
+		return
+	}
+	legacy, err := s.legacyDB()
+	if err != nil {
+		return
+	}
+	var legacyCount int
+	if err := legacy.DB().QueryRow(`SELECT COUNT(*) FROM portfolio`).Scan(&legacyCount); err != nil || legacyCount == 0 {
+		return
+	}
+	slog.Error("核心库没有任何组合，但旧库里有 —— 组合页面会是空白",
+		"core", core.Path(), "coreCount", coreCount,
+		"legacy", legacyPath, "legacyCount", legacyCount,
+		"hint", "在设置页重新执行迁移（会校验并补上核心库）；只想回退旧库则删除 migration-state.json")
+}
+
 func (s *PortfolioService) migrationStatePath() string {
 	path := s.legacyDBPath()
 	if path == "" {

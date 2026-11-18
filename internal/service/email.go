@@ -208,6 +208,8 @@ func (s *PortfolioService) ServiceStartup(context.Context, application.ServiceOp
 	goSafe("orphanCleanup", s.RetryPendingCleanup)
 	// 更新容器/重启进程时迁移可能被打断：后台接着跑，不用用户再点一次。
 	goSafe("resumeMigration", s.ResumeInterruptedMigration)
+	// 迁移"成功"但核心库没有组合时，必须留下可诊断的 ERROR，避免页面空白却查不出原因。
+	goSafe("storageConsistency", s.CheckStorageConsistency)
 
 	prefs := s.emailPrefs()
 	if prefs.Enabled {
