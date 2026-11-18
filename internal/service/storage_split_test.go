@@ -581,6 +581,60 @@ func TestRetryPendingCleanupClearsLeftovers(t *testing.T) {
 	}
 }
 
+// 收尾阶段会把状态里的 tablesDone 覆盖成"检查到第几张表"。若在收尾时被打断，
+// 下次读到的可能是 0/7 —— 旧实现据此判断"没复制过"，会归档重做几小时的复制。
+// 现在判据是**数据本身**：行数对得上就直接收尾。
+func TestMigrateStorageFinalizesEvenWhenStateSaysZeroTables(t *testing.T) {
+	dir := t.TempDir()
+	legacy := filepath.Join(dir, "portfolio.db")
+	core := filepath.Join(dir, "portfolio-core.db")
+	analytics := filepath.Join(dir, "analytics.db")
+	const strengthRows = 500
+	buildLegacyFixture(t, legacy, strengthRows)
+
+	if _, err := portfolio.MigrateCoreDatabase(legacy, core); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := portfolio.MigrateAnalyticsDatabase(legacy, analytics); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(analytics)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 现场：状态被打断在收尾第一步（tablesDone=0），文件其实已复制完。
+	writeMigrationFixture(t, dir, StorageMigrationState{
+		Status: "running", Phase: "analytics-finalize", SourcePath: legacy,
+		CorePath: core, AnalyticsPath: analytics, CurrentTable: "检查 stock_strength",
+		TablesDone: 0, TablesTotal: len(portfolio.AnalyticsTables),
+		CoreQuick: "ok", UpdatedAt: time.Now().Add(-10 * time.Minute).Format(time.RFC3339),
+	})
+	t.Setenv("FREESTOCK_PORTFOLIO_DB_PATH", legacy)
+	t.Setenv("FREESTOCK_PORTFOLIO_CORE_DB_PATH", "")
+	t.Setenv("FREESTOCK_ANALYTICS_DB_PATH", "")
+	t.Setenv("FREESTOCK_BACKTEST_DB_PATH", "")
+
+	svc := &PortfolioService{}
+	defer svc.Close()
+	state, err := svc.MigrateStorage()
+	if err != nil {
+		t.Fatalf("应直接收尾而不是重搬：%v", err)
+	}
+	if state.Status != "succeeded" || state.BacktestQuick != "ok" {
+		t.Fatalf("应收尾成功并生成回测库：%+v", state)
+	}
+	after, err := os.Stat(analytics)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(before, after) {
+		t.Fatal("分析库被重建了 —— 判据仍然依赖了错误的状态字段")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "backtest.db")); err != nil {
+		t.Fatalf("回测库未生成：%v", err)
+	}
+}
+
 // 老版本已经"迁移成功"，但那时没有回测库（回测表还在旧库）。升级后再次点击
 // 迁移必须只补 backtest.db，不能重搬核心/分析库，也不能什么都不做
 // （否则 backtestDB 回落旧库 → 新建组合的回测又撞 787）。

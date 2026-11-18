@@ -309,19 +309,18 @@ func (s *PortfolioService) MigrateStorage() (StorageMigrationState, error) {
 
 // finalizeExistingAnalytics 判断能否直接接手一个已有的分析库。
 //
-// 只在"上一次迁移已经把全部表复制完"（状态里 tablesDone ≥ 总表数）时才尝试，
-// 避免把半成品当成品。返回 finalized=true 表示目标存在且可收尾：
-//   - err == nil：收尾成功，可以标记迁移完成；
-//   - err != nil：收尾失败（行数不一致/校验失败），调用方应归档后重做。
+// **不再用状态里的 tablesDone 当判据**：收尾阶段会用自己的"检查到第几张表"
+// 覆盖 tablesDone，若在收尾时被打断，下次读到的可能是 0/7 —— 按旧判据就会
+// 误判成"没复制过"并把几小时的成果归档重做。
+//
+// 现在的判据只有一条：目标文件存在就尝试收尾；收尾内部会**逐表比对源/目标
+// 行数**，对不上就返回错误，调用方再归档重做。判据从"状态自述"变成"数据本身"。
 func (s *PortfolioService) finalizeExistingAnalytics(sourcePath, analyticsTarget string, prior StorageMigrationState, state *StorageMigrationState) (bool, error) {
-	if prior.TablesDone < len(portfolio.AnalyticsTables) {
-		return false, nil
-	}
 	if _, statErr := os.Stat(analyticsTarget); statErr != nil {
 		return false, nil
 	}
-	slog.Info("存储迁移：发现上次已复制完的分析库，改为只做校验收尾", "path", analyticsTarget,
-		"tablesDone", prior.TablesDone)
+	slog.Info("存储迁移：发现已有分析库，先按行数判断能否直接收尾", "path", analyticsTarget,
+		"stateTablesDone", prior.TablesDone)
 	state.Phase = "analytics-finalize"
 	_, err := portfolio.FinalizeAnalyticsDatabase(sourcePath, analyticsTarget, func(table string, done, total int) {
 		state.CurrentTable = table
