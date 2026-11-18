@@ -30,8 +30,18 @@ func fullVerifyEnabled() bool {
 
 // verifyMigratedTable 校验一张已复制完的表。
 //
-//   - 行数不超过 limit（或强制全量）→ `PRAGMA quick_check(table)`；
-//   - 行数很大 → 边界校验：行数、最小/最大 rowid、首尾行可读。
+//   - 行数不超过 limit（或强制全量）→ `PRAGMA main.quick_check(table)`；
+//   - 行数很大 → 计数与首尾行校验（见下）。
+//
+// ⚠ **不能比较源/目标的 rowid 边界**：复制用的是
+// `INSERT INTO 目标 SELECT * FROM 源 WHERE rowid BETWEEN ...`，
+// 目标表是空表，SQLite 会**重新分配 rowid（从 1 连续递增）**，与源库的 rowid
+// 完全无关（源库因为历史删除/重写，rowid 可能从一千万开始）。
+// 之前按 rowid 相等校验，导致复制明明成功却报"边界不一致"。
+//
+// 真正能证明完整的是：目标行数 == 已复制行数；再读首尾两行确认页可读
+// （文件被截断/损坏时这里会报错）。批内"写入行数=扫描行数"已在复制时断言过，
+// 缺行只可能是整批丢失 —— 那必然表现为计数不一致。
 //
 // 返回 "full"/"sampled" 便于日志说明到底做了哪种检查。
 func verifyMigratedTable(raw *sql.DB, srcAlias, table string, wantCount int, limit int) (string, error) {
@@ -51,7 +61,7 @@ func verifyMigratedTable(raw *sql.DB, srcAlias, table string, wantCount int, lim
 		return "full", nil
 	}
 
-	// 边界校验：目标行数必须等于已复制行数。
+	// 目标行数必须等于已复制行数（缺行/多行都能发现）。
 	targetCount, err := countTable(raw, quoteIdent(table))
 	if err != nil {
 		return "", fmt.Errorf("统计目标表 %s 失败：%w", table, err)
@@ -59,21 +69,16 @@ func verifyMigratedTable(raw *sql.DB, srcAlias, table string, wantCount int, lim
 	if targetCount != wantCount {
 		return "", fmt.Errorf("%s 行数不一致：目标=%d 已复制=%d", table, targetCount, wantCount)
 	}
-	quotedSrc := srcAlias + "." + quoteIdent(table)
-	var srcMin, srcMax, dstMin, dstMax sql.NullInt64
-	if err := raw.QueryRow("SELECT MIN(rowid), MAX(rowid) FROM "+quotedSrc).Scan(&srcMin, &srcMax); err != nil {
-		return "", fmt.Errorf("读取源表 %s 的 rowid 边界失败：%w", table, err)
-	}
-	if err := raw.QueryRow("SELECT MIN(rowid), MAX(rowid) FROM "+quoteIdent(table)).Scan(&dstMin, &dstMax); err != nil {
-		return "", fmt.Errorf("读取目标表 %s 的 rowid 边界失败：%w", table, err)
-	}
-	if srcMin.Int64 != dstMin.Int64 || srcMax.Int64 != dstMax.Int64 {
-		return "", fmt.Errorf("%s rowid 边界不一致：源=[%d,%d] 目标=[%d,%d]",
-			table, srcMin.Int64, srcMax.Int64, dstMin.Int64, dstMax.Int64)
+	if targetCount == 0 {
+		return "sampled", nil
 	}
 	// 首尾各读一行：确认页真的可读（截断的文件在这里就会报错）。
-	if _, err := raw.Exec("SELECT COUNT(*) FROM "+quoteIdent(table)+" WHERE rowid IN (?, ?)", srcMin.Int64, srcMax.Int64); err != nil {
+	var edge int
+	if err := raw.QueryRow("SELECT COUNT(*) FROM "+quoteIdent(table)+" WHERE rowid IN (1, ?)", targetCount).Scan(&edge); err != nil {
 		return "", fmt.Errorf("读取目标表 %s 首尾行失败：%w", table, err)
+	}
+	if edge == 0 {
+		return "", fmt.Errorf("%s 首尾行缺失（目标行数=%d，但按 rowid 读不到内容）", table, targetCount)
 	}
 	return "sampled", nil
 }
