@@ -89,37 +89,34 @@ func MigrateCoreDatabaseWithProgress(sourcePath, targetPath string, progress fun
 	}
 	defer raw.Exec("DETACH DATABASE legacy_core") // best effort
 
-	tx, err := raw.Begin()
-	if err != nil {
-		return report, err
-	}
-	rollback := true
-	defer func() {
-		if rollback {
-			_ = tx.Rollback()
-		}
-	}()
-
+	// 每张核心表独立提交。进度只在 Commit 成功后更新，避免 UI 显示 5/5
+	// 但最后一张仍卡在一个大事务提交中的假完成状态。
 	for index, table := range CoreTables {
+		tx, err := raw.Begin()
+		if err != nil {
+			return report, err
+		}
 		if _, err := tx.Exec("DELETE FROM " + quoteIdent(table)); err != nil {
+			_ = tx.Rollback()
 			return report, fmt.Errorf("清空目标表 %s 失败：%w", table, err)
 		}
 		if _, err := tx.Exec("INSERT INTO " + quoteIdent(table) + " SELECT * FROM legacy_core." + quoteIdent(table)); err != nil {
+			_ = tx.Rollback()
 			return report, fmt.Errorf("复制核心表 %s 失败：%w", table, err)
 		}
 		var count int
 		if err := tx.QueryRow("SELECT COUNT(*) FROM " + quoteIdent(table)).Scan(&count); err != nil {
+			_ = tx.Rollback()
 			return report, err
+		}
+		if err := tx.Commit(); err != nil {
+			return report, fmt.Errorf("提交核心表 %s 失败：%w", table, err)
 		}
 		report.Tables[table] = count
 		if progress != nil {
 			progress(table, index+1, len(CoreTables))
 		}
 	}
-	if err := tx.Commit(); err != nil {
-		return report, fmt.Errorf("提交核心库迁移失败：%w", err)
-	}
-	rollback = false
 
 	var check string
 	if err := raw.QueryRow("PRAGMA quick_check").Scan(&check); err != nil {
