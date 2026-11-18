@@ -302,11 +302,13 @@ func coreTargetLooksEmpty(sourcePath, coreTarget string) bool {
 		return false
 	}
 	defer source.Close()
+	_, _ = source.Exec("PRAGMA busy_timeout = 15000")
 	target, err := sql.Open("sqlite", coreTarget)
 	if err != nil {
 		return false
 	}
 	defer target.Close()
+	_, _ = target.Exec("PRAGMA busy_timeout = 15000")
 	var sourceCount, targetCount int
 	if err := source.QueryRow(`SELECT COUNT(*) FROM portfolio`).Scan(&sourceCount); err != nil {
 		return false

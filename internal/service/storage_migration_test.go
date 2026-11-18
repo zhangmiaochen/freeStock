@@ -20,12 +20,23 @@ func writeMigrationFixture(t *testing.T, dir string, state StorageMigrationState
 	}
 }
 
+// touchFile 建一个空文件：现在的路径选择会 stat 目标文件，
+// 缺失时回退旧库（避免静默新建空库），所以用例必须把文件建出来。
+func touchFile(t *testing.T, path string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte{}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestMigrationStateAutomaticallyActivatesNewStores(t *testing.T) {
 	dir := t.TempDir()
 	legacy := filepath.Join(dir, "portfolio.db")
 	core := filepath.Join(dir, "portfolio-core.db")
 	analytics := filepath.Join(dir, "analytics.db")
 	writeMigrationFixture(t, dir, StorageMigrationState{Status: "succeeded", CoreQuick: "ok", CorePath: core, AnalyticsPath: analytics})
+	touchFile(t, core)
+	touchFile(t, analytics)
 
 	t.Setenv("FREESTOCK_PORTFOLIO_DB_PATH", legacy)
 	t.Setenv("FREESTOCK_PORTFOLIO_CORE_DB_PATH", "")
@@ -50,6 +61,8 @@ func TestCoreActivatesBeforeAnalyticsMigrationFinishes(t *testing.T) {
 	core := filepath.Join(dir, "portfolio-core.db")
 	analytics := filepath.Join(dir, "analytics.db")
 	writeMigrationFixture(t, dir, StorageMigrationState{Status: "running", Phase: "analytics", CoreQuick: "ok", SourcePath: legacy, CorePath: core, AnalyticsPath: analytics})
+	touchFile(t, core)
+	touchFile(t, legacy)
 	t.Setenv("FREESTOCK_PORTFOLIO_DB_PATH", legacy)
 	t.Setenv("FREESTOCK_PORTFOLIO_CORE_DB_PATH", "")
 	t.Setenv("FREESTOCK_ANALYTICS_DB_PATH", "")

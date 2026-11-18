@@ -261,3 +261,17 @@ func (s *Store) DeleteBacktestRun(runID string) error {
 	}
 	return nil
 }
+
+// DeleteBacktestRunsByPortfolio 删除某个组合的全部回测记录。
+//
+// 拆分存储之后，组合在核心库、回测结果在旧库，`ON DELETE CASCADE` 不会跨文件
+// 生效 —— 不显式清理就会留下指向已删除组合的孤儿回测（回测页仍会列出来）。
+// 返回删除的本次数；净值/成交由旧库内部的 run_id 外键级联。
+func (s *Store) DeleteBacktestRunsByPortfolio(portfolioID string) (int, error) {
+	result, err := s.db.Exec(`DELETE FROM portfolio_backtest_run WHERE portfolio_id=?`, portfolioID)
+	if err != nil {
+		return 0, fmt.Errorf(`按组合删除回测失败：%w`, err)
+	}
+	n, _ := result.RowsAffected()
+	return int(n), nil
+}

@@ -2,6 +2,7 @@ package service
 
 import (
 	"database/sql"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -240,5 +241,141 @@ func TestSplitStoresKeepBacktestResultsReadable(t *testing.T) {
 	}
 	if n != 0 {
 		t.Fatal("核心库里出现了 portfolio_backtest_run —— core-only schema 边界被破坏")
+	}
+
+	// ⑤ 删除组合必须连带清掉跨库的引用数据，否则会留下孤儿：
+	//    旧库的回测（FK 不跨文件，不会级联）与分析库的四张快照。
+	rawLegacyWrite, err := sql.Open("sqlite", legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rawLegacyWrite.Exec(`INSERT INTO portfolio_backtest_run(run_id, portfolio_id, strategy_id, start_date, end_date, created_at, updated_at) VALUES ('run_orphan_check', ?, 'trend_growth', '20260101', '20260131', 't', 't')`, created.ID); err != nil {
+		_ = rawLegacyWrite.Close()
+		t.Fatalf("写入待清理回测失败：%v", err)
+	}
+	_ = rawLegacyWrite.Close()
+	if _, err := analyticsStore.DB().Exec(`INSERT INTO portfolio_score_snapshot(portfolio_id, trade_date, created_at, updated_at) VALUES (?, '20261009', 't', 't')`, created.ID); err != nil {
+		t.Fatalf("写入快照失败：%v", err)
+	}
+
+	if err := svc.DeletePortfolio(created.ID); err != nil {
+		t.Fatalf("删除组合失败：%v", err)
+	}
+
+	rawCheck, err := sql.Open("sqlite", legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rawCheck.Close()
+	var leftover int
+	if err := rawCheck.QueryRow(`SELECT COUNT(*) FROM portfolio_backtest_run WHERE run_id='run_orphan_check'`).Scan(&leftover); err != nil {
+		t.Fatal(err)
+	}
+	if leftover != 0 {
+		t.Fatal("删除组合后旧库回测成了孤儿 —— 回测页仍会列出已删除组合的记录")
+	}
+	// 别的组合的回测不能被动到。
+	if err := rawCheck.QueryRow(`SELECT COUNT(*) FROM portfolio_backtest_run WHERE run_id=?`, runID).Scan(&leftover); err != nil {
+		t.Fatal(err)
+	}
+	if leftover != 1 {
+		t.Fatalf("误删了其他组合的回测记录（剩余 %d）", leftover)
+	}
+	if err := analyticsStore.DB().QueryRow(`SELECT COUNT(*) FROM portfolio_score_snapshot WHERE portfolio_id=?`, created.ID).Scan(&leftover); err != nil {
+		t.Fatal(err)
+	}
+	if leftover != 0 {
+		t.Fatal("删除组合后分析库快照成了孤儿")
+	}
+}
+
+// 迁移后 BuildPlan 的低吸广度必须查分析库。查核心库会直接
+// "no such table: stock_strength"，整个建议页报错。
+func TestBuildPlanAfterMigrationReadsBreadthFromAnalytics(t *testing.T) {
+	dir := t.TempDir()
+	legacy := filepath.Join(dir, "portfolio.db")
+	const strengthRows = 300
+	item := buildLegacyFixture(t, legacy, strengthRows)
+
+	t.Setenv("FREESTOCK_PORTDB_PATH", "")
+	t.Setenv("FREESTOCK_PORTFOLIO_DB_PATH", legacy)
+	t.Setenv("FREESTOCK_PORTFOLIO_CORE_DB_PATH", "")
+	t.Setenv("FREESTOCK_ANALYTICS_DB_PATH", "")
+
+	svc := &PortfolioService{}
+	defer svc.Close()
+	if _, err := svc.MigrateStorage(); err != nil {
+		t.Fatalf("迁移失败：%v", err)
+	}
+	plan, err := svc.BuildPlan(item.ID)
+	if err != nil {
+		t.Fatalf("迁移后生成建议失败（广度可能查了核心库）：%v", err)
+	}
+	if plan == nil || plan.StrengthDate != 20261009 {
+		t.Fatalf("建议结果异常：%+v", plan)
+	}
+}
+
+// 迁移后信号概览必须读分析库（signal_history 在分析库）。
+func TestSignalSummaryAfterMigrationReadsAnalytics(t *testing.T) {
+	dir := t.TempDir()
+	legacy := filepath.Join(dir, "portfolio.db")
+	buildLegacyFixture(t, legacy, 50)
+
+	t.Setenv("FREESTOCK_PORTFOLIO_DB_PATH", legacy)
+	t.Setenv("FREESTOCK_PORTFOLIO_CORE_DB_PATH", "")
+	t.Setenv("FREESTOCK_ANALYTICS_DB_PATH", "")
+
+	svc := &PortfolioService{}
+	defer svc.Close()
+	if _, err := svc.MigrateStorage(); err != nil {
+		t.Fatalf("迁移失败：%v", err)
+	}
+	summary, err := svc.GetSignalSummary()
+	if err != nil {
+		t.Fatalf("迁移后信号概览失败（可能查了核心库）：%v", err)
+	}
+	if !summary.Generated || summary.Total != 1 {
+		t.Fatalf("信号概览应从分析库读到 1 条，得到 %+v", summary)
+	}
+}
+
+// 迁移状态说成功、但文件被人删了时，必须回退旧库并报警，
+// 不能静默新建一个空库（那正是"组合列表为空"的成因）。
+func TestMissingMigratedFilesFallBackToLegacy(t *testing.T) {
+	dir := t.TempDir()
+	legacy := filepath.Join(dir, "portfolio.db")
+	core := filepath.Join(dir, "portfolio-core.db")
+	analytics := filepath.Join(dir, "analytics.db")
+	buildLegacyFixture(t, legacy, 20)
+
+	t.Setenv("FREESTOCK_PORTFOLIO_DB_PATH", legacy)
+	t.Setenv("FREESTOCK_PORTFOLIO_CORE_DB_PATH", "")
+	t.Setenv("FREESTOCK_ANALYTICS_DB_PATH", "")
+
+	svc := &PortfolioService{}
+	defer svc.Close()
+	if _, err := svc.MigrateStorage(); err != nil {
+		t.Fatalf("迁移失败：%v", err)
+	}
+	if got := svc.dbPath(); got != core {
+		t.Fatalf("迁移成功后应使用核心库，得到 %q", got)
+	}
+	// 删掉两个迁移产出的文件（模拟误删/磁盘回滚）。
+	if err := os.Remove(core); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if err := os.Remove(analytics); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if got := svc.dbPath(); got != legacy {
+		t.Fatalf("核心库缺失应回退旧库，得到 %q", got)
+	}
+	store, err := svc.analyticsDB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := store.Path(); got != legacy {
+		t.Fatalf("分析库缺失应回退旧库，得到 %q", got)
 	}
 }

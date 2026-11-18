@@ -197,8 +197,14 @@ func (s *PortfolioService) dbPath() string {
 	}
 	// 核心库单独校验通过后即可启用，不必等待数 GB 分析库迁移/quick_check。
 	// 这样组合热数据先从旧大库隔离；分析库仍由 analyticsDB 在整体迁移成功后启用。
+	//
+	// ⚠ 文件不存在时必须回退旧库：直接返回一个不存在的路径会让 OpenCore
+	// **新建一个空核心库**，用户看到的就是"组合全没了"——静默错误。
 	if state := s.migrationState(); state.CoreQuick == "ok" && state.CorePath != "" {
-		return state.CorePath
+		if _, err := os.Stat(state.CorePath); err == nil {
+			return state.CorePath
+		}
+		slog.Warn("核心库文件不存在，回退旧库（组合数据仍在旧库）", "core", state.CorePath)
 	}
 	if path := strings.TrimSpace(os.Getenv("FREESTOCK_PORTFOLIO_DB_PATH")); path != "" {
 		return path
@@ -219,10 +225,20 @@ func (s *PortfolioService) dbPath() string {
 // 否则运行期会以为分析表不存在（其实只是没打开对 schema）。
 func (s *PortfolioService) coreIsDedicated(path string) bool {
 	state := s.migrationState()
-	if state.CoreQuick != "ok" || state.CorePath == "" || path == "" {
+	if path == "" {
 		return false
 	}
-	return filepath.Clean(state.CorePath) == filepath.Clean(path)
+	// 迁移成功后由状态文件决定；未成功但用户显式指定了 CORE 路径时也按核心库处理，
+	// 否则会把完整 schema 写进只该有核心表的文件（静默空表）。
+	if state.CoreQuick == "ok" && state.CorePath != "" &&
+		filepath.Clean(state.CorePath) == filepath.Clean(path) {
+		return true
+	}
+	if env := strings.TrimSpace(os.Getenv("FREESTOCK_PORTFOLIO_CORE_DB_PATH")); env != "" &&
+		s.dbPathOverride == "" && filepath.Clean(env) == filepath.Clean(path) {
+		return true
+	}
+	return false
 }
 
 // legacyDB 打开旧完整库，供尚未迁移的回测/分析调用兼容读取。
@@ -262,18 +278,42 @@ func (s *PortfolioService) analyticsConfigured() bool {
 // analyticsDB 返回可选独立分析库；未配置时返回核心/旧库，保持旧调用链兼容。
 func (s *PortfolioService) analyticsDB() (*portfolio.Store, error) {
 	path := strings.TrimSpace(os.Getenv("FREESTOCK_ANALYTICS_DB_PATH"))
+	// fromState 表示路径是**迁移状态推出来的**（而不是用户显式配置的）。
+	// 两者对"文件不存在"的处理不同：显式配置 → 按用户意图创建；
+	// 状态推导 → 回退旧库，绝不静默新建空分析库。
+	fromState := false
 	if path == "" {
 		state := s.migrationState()
-		if state.Status == "succeeded" {
+		switch {
+		case state.Status == "succeeded" && state.AnalyticsPath != "":
 			path = state.AnalyticsPath
-		} else if state.CoreQuick == "ok" && state.SourcePath != "" {
+			fromState = true
+		case state.CoreQuick == "ok" && state.SourcePath != "":
 			// 核心库已切换但分析迁移未完成：分析查询明确回退旧单库，不能
 			// 跟随 dbPath() 误开只有核心表的 portfolio-core.db。
 			path = state.SourcePath
+		case s.coreIsDedicated(s.dbPath()):
+			// 手工把 CORE 环境变量指向迁移出的核心库、但迁移状态不在/未成功：
+			// 分析表只可能还在旧库里。不这样兜底，所有评分/信号查询会打开
+			// core-only 库而得到**空结果**（静默错误，比报错更难发现）。
+			path = s.legacyDBPath()
+			slog.Warn("核心库已单独指定但分析库未配置，分析查询回退旧库",
+				"core", s.dbPath(), "legacy", path)
 		}
 	}
 	if path == "" {
 		return s.db()
+	}
+	if fromState {
+		if _, statErr := os.Stat(path); statErr != nil {
+			legacy := s.legacyDBPath()
+			if legacy != "" && filepath.Clean(legacy) != filepath.Clean(path) {
+				if _, legacyErr := os.Stat(legacy); legacyErr == nil {
+					slog.Warn("分析库文件不存在，回退旧库读取评分/信号", "analytics", path, "legacy", legacy)
+					path = legacy
+				}
+			}
+		}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -500,6 +540,27 @@ func (s *PortfolioService) DeletePortfolio(id string) error {
 	}
 	if err := store.Delete(id); err != nil {
 		return err
+	}
+	// 拆分存储后外键级联不跨文件：旧库里的回测结果、分析库里的四张快照
+	// 仍带着这个 portfolio_id。不清理就是孤儿数据（回测页仍会列出已删组合的回测）。
+	// 清理是 best-effort：删组合本身已经成功，不能因为清理失败而回滚。
+	if legacy, legacyErr := s.legacyDB(); legacyErr == nil {
+		if n, cleanupErr := legacy.DeleteBacktestRunsByPortfolio(id); cleanupErr != nil {
+			slog.Warn("删除组合后清理旧库回测失败（回测页可能出现孤儿记录）", "id", id, "err", cleanupErr)
+		} else if n > 0 {
+			slog.Info("已清理该组合的旧库回测记录", "id", id, "runs", n)
+		}
+	} else {
+		slog.Warn("删除组合后无法打开旧库清理回测", "id", id, "err", legacyErr)
+	}
+	if analytics, analyticsErr := s.analyticsDB(); analyticsErr == nil {
+		if n, cleanupErr := analytics.DeleteSnapshotsByPortfolio(id); cleanupErr != nil {
+			slog.Warn("删除组合后清理分析库快照失败（会留下孤儿快照）", "id", id, "err", cleanupErr)
+		} else if n > 0 {
+			slog.Info("已清理该组合的分析库快照", "id", id, "rows", n)
+		}
+	} else {
+		slog.Warn("删除组合后无法打开分析库清理快照", "id", id, "err", analyticsErr)
 	}
 	slog.Info("组合已删除", "id", id)
 	return nil

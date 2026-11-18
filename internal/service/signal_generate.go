@@ -228,7 +228,8 @@ type SignalSummary struct {
 
 // GetSignalSummary 返回信号表概览。
 func (s *PortfolioService) GetSignalSummary() (*SignalSummary, error) {
-	store, err := s.db()
+	// signal_history 在分析库；core-only 核心库没有这张表。
+	store, err := s.analyticsDB()
 	if err != nil {
 		return nil, err
 	}

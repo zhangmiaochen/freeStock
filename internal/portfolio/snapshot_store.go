@@ -192,6 +192,28 @@ func (s *Store) ReplaceHoldCompares(portfolioID, tradeDate string, rows []HoldCo
 	return nil
 }
 
+// DeleteSnapshotsByPortfolio 删除某组合在四张留档表里的记录。
+//
+// 组合在核心库、快照在分析库，SQLite 的外键级联不跨文件：删除组合后
+// 不显式清理就会留下指向已删除组合的孤儿快照。返回各表删除行数之和。
+func (s *Store) DeleteSnapshotsByPortfolio(portfolioID string) (int64, error) {
+	tables := []string{
+		"portfolio_score_snapshot", "portfolio_candidate_snapshot",
+		"rotation_signal", "hold_compare",
+	}
+	var total int64
+	for _, table := range tables {
+		res, err := s.db.Exec(`DELETE FROM `+table+` WHERE portfolio_id=?`, portfolioID)
+		if err != nil {
+			return total, fmt.Errorf("清理 %s 失败：%w", table, err)
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			total += n
+		}
+	}
+	return total, nil
+}
+
 // LoadScoreSnapshots 读某组合的评分快照（日期降序）。
 func (s *Store) LoadScoreSnapshots(portfolioID string, limit int) ([]ScoreSnapshot, error) {
 	query := `

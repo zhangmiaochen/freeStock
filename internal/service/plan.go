@@ -529,7 +529,9 @@ func (s *PortfolioService) BuildPlan(portfolioID string) (*PlanResult, error) {
 	// portfolio_rotation_logic.py:2044），所以候选池过滤时行里已经有正确值。
 	// 此前 Go 把它写在 `buildCandidatePool` **之后** —— 候选池那一遍
 	// 是按"广度 0"的宽档 dd20 过滤的，与原实现不是同一个集合。
-	breadthReady, err := store.LowBuyBreadthReadyCount(strengthDate, strategyID)
+	// ⚠ 必须查**分析库**：stock_strength 在分析库里，core-only 核心库没有这张表，
+	// 用 core store 查会直接报 no such table: stock_strength → 整个建议失败。
+	breadthReady, err := analytics.LowBuyBreadthReadyCount(strengthDate, strategyID)
 	if err != nil {
 		return nil, err
 	}

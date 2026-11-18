@@ -600,6 +600,17 @@ func open(path string, coreOnly bool) (*Store, error) {
 		return nil, fmt.Errorf("连接组合库失败（%s）：%w", path, err)
 	}
 
+	// **等锁而不是立刻失败**。
+	//
+	// 迁移/回填/信号生成会用**各自独立的连接**同时访问同一个库：
+	// 迁移在目标库上逐批提交，页面侧的写入就是同一文件的另一个连接。
+	// SQLite 默认 busy_timeout=0 → 撞锁立刻返回 SQLITE_BUSY，
+	// 用户看到的是"迁移中保存组合失败""回填中途报错"。
+	// 15s 足够让短事务自然错开，又不会让真正的死锁无限挂住。
+	if _, err := db.Exec("PRAGMA busy_timeout = 15000"); err != nil {
+		slog.Warn("设置 busy_timeout 失败", "err", err)
+	}
+
 	// **限制 journal 大小**。
 	//
 	// SQLite 默认用 rollback journal，大小与"本次事务改动过的页数"相当。
