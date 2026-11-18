@@ -80,7 +80,7 @@ func FinalizeAnalyticsDatabase(sourcePath, targetPath string, progress func(tabl
 	if _, err := os.Stat(targetPath); err != nil {
 		return report, fmt.Errorf("分析库不存在，无法收尾：%w", err)
 	}
-	target, err := Open(targetPath)
+	target, err := openAnalyticsOnly(targetPath)
 	if err != nil {
 		return report, err
 	}
@@ -179,15 +179,15 @@ func migrateAnalyticsDatabase(sourcePath, targetPath string, progress func(table
 		}
 	}()
 
-	target, err := Open(targetPath)
+	target, err := openAnalyticsOnly(targetPath)
 	if err != nil {
 		return report, err
 	}
 	defer target.Close()
 	raw := target.DB()
-	// 分析库不包含核心 portfolio 表；回测表里的 portfolio_id 是跨库逻辑引用，
-	// 不能继续使用旧库里的 SQLite 外键约束，否则复制 portfolio_backtest_run
-	// 会因核心库不在分析库而失败（787）。核心库与分析库之间的引用由应用层维护。
+	// 分析库只有分析表，本不该有外键；这里仍关闭外键检查是为了兼容
+	// 早期用完整 schema 建出来的旧分析库（里面可能残留指向空 portfolio 表的
+	// 回测表）。跨库引用由应用层维护。
 	if _, err := raw.Exec("PRAGMA foreign_keys = OFF"); err != nil {
 		return report, fmt.Errorf("关闭分析库迁移期间外键检查失败：%w", err)
 	}

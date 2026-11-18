@@ -558,23 +558,42 @@ func DefaultPath(configPath string) string {
 	return filepath.Join(filepath.Dir(configPath), "portfolio.db")
 }
 
+// schemaMode 决定一个库文件里建哪些表。
+//
+// 三个库文件各有明确的所有权，schema 也要跟着分开 —— 否则"打开错库"不会报错，
+// 而是返回空结果（例如把 portfolio 表建进分析库，误查组合时得到 0 行）。
+type schemaMode int
+
+const (
+	// schemaFull 旧单库：核心 + 分析 + 回测，全部表。
+	schemaFull schemaMode = iota
+	// schemaCoreOnly 迁移后的核心热库：只有组合/持仓/流水/资金/股数。
+	schemaCoreOnly
+	// schemaAnalyticsOnly 分析库：只有评分/市场状态/信号/四张留档表。
+	schemaAnalyticsOnly
+)
+
 // Open 打开（必要时创建）兼容组合库并建完整旧 schema。
 //
 // 兼容入口：现有应用仍使用它，确保 Windows/NAS 旧行为不变。
 func Open(path string) (*Store, error) {
-	return open(path, false)
+	return open(path, schemaFull)
 }
 
 // OpenCore 打开只包含组合核心表的热库。
 //
-// 目标库不创建评分、信号、快照和回测表；这些表属于后续 AnalyticsStore /
-// BacktestStore。迁移工具使用此入口，避免“核心库”里仍然留下 4.9GB 结构的
-// 空表和错误的 schema 边界。
+// 目标库不创建评分、信号、快照和回测表；这些表属于 AnalyticsStore。
+// 迁移工具使用此入口，避免"核心库"里留下空表和错误的 schema 边界。
 func OpenCore(path string) (*Store, error) {
-	return open(path, true)
+	return open(path, schemaCoreOnly)
 }
 
-func open(path string, coreOnly bool) (*Store, error) {
+// openAnalyticsOnly 打开只包含分析表的库（信号/评分/留档）。
+func openAnalyticsOnly(path string) (*Store, error) {
+	return open(path, schemaAnalyticsOnly)
+}
+
+func open(path string, mode schemaMode) (*Store, error) {
 	if path == "" {
 		return nil, fmt.Errorf("组合库路径不能为空")
 	}
@@ -640,7 +659,7 @@ func open(path string, coreOnly bool) (*Store, error) {
 	}
 
 	store := &Store{db: db, path: path}
-	if err := store.migrateMode(coreOnly); err != nil {
+	if err := store.migrateMode(mode); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -847,29 +866,36 @@ CREATE INDEX IF NOT EXISTS idx_txn_code           ON portfolio_position_txn(port
 `
 
 func (s *Store) migrate() error {
-	return s.migrateMode(false)
+	return s.migrateMode(schemaFull)
 }
 
-func (s *Store) migrateMode(coreOnly bool) error {
+func (s *Store) migrateMode(mode schemaMode) error {
 	if _, err := s.db.Exec("PRAGMA foreign_keys = ON"); err != nil {
 		return fmt.Errorf("开启外键约束失败：%w", err)
 	}
-	if _, err := s.db.Exec(schema); err != nil {
-		return fmt.Errorf("建表失败：%w", err)
+	// 核心表只属于旧单库和核心库；分析库不建它们（否则误查组合会得到空结果）。
+	if mode != schemaAnalyticsOnly {
+		if _, err := s.db.Exec(schema); err != nil {
+			return fmt.Errorf("建表失败：%w", err)
+		}
+		// 资金账户属于核心库，组合与资金必须保持同库事务一致性。
+		if _, err := s.db.Exec(moneySchema); err != nil {
+			return fmt.Errorf("建资金表失败：%w", err)
+		}
 	}
-	// 资金账户属于核心库，组合与资金必须保持同库事务一致性。
-	if _, err := s.db.Exec(moneySchema); err != nil {
-		return fmt.Errorf("建资金表失败：%w", err)
-	}
-	if coreOnly {
+	if mode == schemaCoreOnly {
 		return nil
 	}
-	// 以下表属于旧兼容库；新的核心库由 OpenCore 创建，不再包含它们。
+	// 以下表属于旧兼容库 / 分析库。
 	if err := s.migrateStrength(); err != nil {
 		return err
 	}
-	if _, err := s.db.Exec(backtestSchema); err != nil {
-		return fmt.Errorf("建回测表失败：%w", err)
+	// 回测三张表暂时只放在旧单库（尚未拆出独立 BacktestStore）：
+	// 它们带 portfolio_id 外键，放进分析库必然与核心表错位。
+	if mode == schemaFull {
+		if _, err := s.db.Exec(backtestSchema); err != nil {
+			return fmt.Errorf("建回测表失败：%w", err)
+		}
 	}
 	if _, err := s.db.Exec(snapshotSchema); err != nil {
 		return fmt.Errorf("建留档表失败：%w", err)

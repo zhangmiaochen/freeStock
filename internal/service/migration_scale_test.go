@@ -134,12 +134,13 @@ func TestMigrateStorageEndToEndWithLargeAnalytics(t *testing.T) {
 	if signals != 1 {
 		t.Fatalf("信号行数=%d，应为 1", signals)
 	}
-	var runs int
-	if err := raw.QueryRow(`SELECT COUNT(*) FROM portfolio_backtest_run`).Scan(&runs); err != nil {
+	// 回测表属于旧库，分析库连表都不该有 —— 有表但空着才是"错位"，
+	// 因为误查会得到 0 行而不是报错。
+	if err := raw.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='portfolio_backtest_run'`).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
-	if runs != 0 {
-		t.Fatalf("回测表不应复制进分析库（未迁移阶段仍由旧库负责），实际 %d 行", runs)
+	if n != 0 {
+		t.Fatal("分析库里出现了回测表 —— schema 边界被破坏（误查会静默返回空结果）")
 	}
 	if err := raw.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_strength_lookup'`).Scan(&n); err != nil {
 		t.Fatal(err)
@@ -364,17 +365,12 @@ func TestMigrateStorageFinalizesAlreadyCopiedAnalytics(t *testing.T) {
 	if _, err := portfolio.MigrateAnalyticsDatabase(legacy, analytics); err != nil {
 		t.Fatalf("预置分析库失败：%v", err)
 	}
-	// 打一个哨兵：回测表**不在**分析迁移的复制清单里，所以只做收尾时它必然还在；
-	// 一旦走"归档 + 重新复制"，新 analytics.db 里不会有这条记录。
-	rawSentinel, err := sql.Open("sqlite", analytics)
+	// 记下文件身份：走"归档 + 重新复制"会换成一个新文件（inode 变），
+	// 只做收尾则仍是同一个文件（只被打开/改索引）。
+	beforeInfo, err := os.Stat(analytics)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := rawSentinel.Exec(`INSERT INTO portfolio_backtest_run(run_id, portfolio_id, strategy_id, start_date, end_date, created_at, updated_at) VALUES ('run_sentinel', 'pf_x', 'trend_growth', '20260101', '20260131', 't', 't')`); err != nil {
-		_ = rawSentinel.Close()
-		t.Fatalf("写入哨兵失败：%v", err)
-	}
-	_ = rawSentinel.Close()
 
 	writeMigrationFixture(t, dir, StorageMigrationState{
 		Status: "running", Phase: "analytics", SourcePath: legacy, CorePath: core,
@@ -406,23 +402,12 @@ func TestMigrateStorageFinalizesAlreadyCopiedAnalytics(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = after
 	if state.Archived != "" {
 		t.Fatalf("不应归档已复制完的分析库：%s", state.Archived)
 	}
-	// 哨兵还在 → 没有重新复制（复制会先 DELETE 全表）。
-	rawCheck, err := sql.Open("sqlite", analytics)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var sentinel int
-	if err := rawCheck.QueryRow(`SELECT COUNT(*) FROM portfolio_backtest_run WHERE run_id='run_sentinel'`).Scan(&sentinel); err != nil {
-		_ = rawCheck.Close()
-		t.Fatal(err)
-	}
-	_ = rawCheck.Close()
-	if sentinel != 1 {
-		t.Fatal("分析库被重新复制了（哨兵行丢失）—— 收尾应只做校验")
+	// 同一个文件（SameFile）说明没有走"归档 + 重新复制"。
+	if !os.SameFile(beforeInfo, after) {
+		t.Fatal("分析库文件被替换了 —— 说明又完整复制了一遍，收尾应只做校验")
 	}
 	// 核心库数据仍在，分析库行数正确。
 	raw, err := sql.Open("sqlite", analytics)

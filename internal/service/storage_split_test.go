@@ -289,6 +289,216 @@ func TestSplitStoresKeepBacktestResultsReadable(t *testing.T) {
 	}
 }
 
+// 迁移后的写入路径同样要在正确的库上：组合/持仓/资金进核心库，
+// 并能在详情/资金视图里读回来；删除后不残留。
+func TestMigratedFeatureWritePaths(t *testing.T) {
+	dir := t.TempDir()
+	legacy := filepath.Join(dir, "portfolio.db")
+	buildLegacyFixture(t, legacy, 100)
+
+	t.Setenv("FREESTOCK_PORTFOLIO_DB_PATH", legacy)
+	t.Setenv("FREESTOCK_PORTFOLIO_CORE_DB_PATH", "")
+	t.Setenv("FREESTOCK_ANALYTICS_DB_PATH", "")
+
+	svc := &PortfolioService{}
+	defer svc.Close()
+	if _, err := svc.MigrateStorage(); err != nil {
+		t.Fatalf("迁移失败：%v", err)
+	}
+
+	created, err := svc.CreatePortfolio(portfolio.PortfolioInput{
+		Name: "写入验证", Type: portfolio.TypeManual, StrategyID: portfolio.StrategyTrendGrowth,
+	})
+	if err != nil {
+		t.Fatalf("新建组合失败：%v", err)
+	}
+	layers := 2
+	pos, err := svc.AddPosition(created.ID, portfolio.PositionInput{
+		Code: "600000", Name: "浦发银行", EntryPrice: 10.5, EntryDate: "20261009", Layers: &layers,
+	})
+	if err != nil {
+		t.Fatalf("新增持仓失败：%v", err)
+	}
+	if pos.Code != "600000" || pos.EntryPrice != 10.5 {
+		t.Fatalf("持仓写入异常：%+v", pos)
+	}
+	detail, err := svc.GetPortfolioDetail(created.ID)
+	if err != nil {
+		t.Fatalf("读详情失败：%v", err)
+	}
+	if len(detail.Positions) != 1 {
+		t.Fatalf("详情持仓数=%d，应为 1", len(detail.Positions))
+	}
+	// 资金账户属于核心库，必须在同一事务边界内可见。
+	if _, err := svc.SetPortfolioCapital(created.ID, 100000); err != nil {
+		t.Fatalf("设置本金失败：%v", err)
+	}
+	if _, err := svc.GetPortfolioMoney(created.ID); err != nil {
+		t.Fatalf("读取资金失败：%v", err)
+	}
+	if _, err := svc.UpdatePortfolio(created.ID, portfolio.PortfolioInput{
+		Name: "写入验证-改名", Type: portfolio.TypeManual, StrategyID: portfolio.StrategyTrendGrowth,
+	}); err != nil {
+		t.Fatalf("更新组合失败：%v", err)
+	}
+	updated, err := svc.GetPortfolioDetail(created.ID)
+	if err != nil || updated.Portfolio.Name != "写入验证-改名" {
+		t.Fatalf("改名未生效：%v %+v", err, updated)
+	}
+	// 删除后核心库不应再有这个组合（跨库级联已在另一条用例覆盖）。
+	if err := svc.DeletePortfolio(created.ID); err != nil {
+		t.Fatalf("删除组合失败：%v", err)
+	}
+	if _, err := svc.GetPortfolioDetail(created.ID); err == nil {
+		t.Fatal("删除后仍能读到组合")
+	}
+}
+
+// 迁移后各功能读的主路径都要能跑通，且数据来自正确的库。
+// 这是"切换后所有功能正常可用、数据准确"的冒烟证据。
+func TestMigratedFeatureReadPaths(t *testing.T) {
+	dir := t.TempDir()
+	legacy := filepath.Join(dir, "portfolio.db")
+	const strengthRows = 300
+	item := buildLegacyFixture(t, legacy, strengthRows)
+
+	t.Setenv("FREESTOCK_PORTFOLIO_DB_PATH", legacy)
+	t.Setenv("FREESTOCK_PORTFOLIO_CORE_DB_PATH", "")
+	t.Setenv("FREESTOCK_ANALYTICS_DB_PATH", "")
+
+	svc := &PortfolioService{}
+	defer svc.Close()
+	if _, err := svc.MigrateStorage(); err != nil {
+		t.Fatalf("迁移失败：%v", err)
+	}
+
+	// 组合类：列表/详情/总览
+	list, err := svc.ListPortfolios()
+	if err != nil || len(list) != 1 {
+		t.Fatalf("组合列表异常：%v len=%d", err, len(list))
+	}
+	if _, err := svc.GetPortfolioDetail(item.ID); err != nil {
+		t.Fatalf("组合详情失败：%v", err)
+	}
+	ov, err := svc.GetPortfolioOverview()
+	if err != nil || ov.PortfolioCount != 1 {
+		t.Fatalf("组合总览异常：%v %+v", err, ov)
+	}
+
+	// 评分类：摘要与建议都应由分析库支撑
+	summary, err := svc.GetStrengthSummary(item.StrategyID)
+	if err != nil {
+		t.Fatalf("评分摘要失败：%v", err)
+	}
+	if summary.LatestDate != 20261009 {
+		t.Fatalf("评分摘要最新日=%d，应为 20261009（说明读到了空库）", summary.LatestDate)
+	}
+	plan, err := svc.BuildPlan(item.ID)
+	if err != nil {
+		t.Fatalf("生成建议失败：%v", err)
+	}
+	if plan.StrengthDate != 20261009 {
+		t.Fatalf("建议使用的评分日=%d，应为 20261009", plan.StrengthDate)
+	}
+
+	// 快照与信号
+	if _, err := svc.GetScoreSnapshots(item.ID, 10); err != nil {
+		t.Fatalf("读取评分快照失败：%v", err)
+	}
+	sig, err := svc.GetSignalSummary()
+	if err != nil || sig.Total != 1 {
+		t.Fatalf("信号概览异常：%v %+v", err, sig)
+	}
+
+	// 回测页
+	if _, err := svc.ListBacktests(""); err != nil {
+		t.Fatalf("回测列表失败：%v", err)
+	}
+
+	// 启动维护：迁移后不能因为 schema 不对而报错（只允许日志告警）
+	svc.MaintainDatabase()
+}
+
+// 迁移后三个库的表所有权必须**互不重叠**。这是"切换数据库不会错位"的结构性
+// 保证：任何一处把查询发到错库，都会得到 no such table，而不是静默 0 行。
+func TestMigratedDatabasesOwnDisjointTables(t *testing.T) {
+	dir := t.TempDir()
+	legacy := filepath.Join(dir, "portfolio.db")
+	core := filepath.Join(dir, "portfolio-core.db")
+	analytics := filepath.Join(dir, "analytics.db")
+	buildLegacyFixture(t, legacy, 100)
+
+	t.Setenv("FREESTOCK_PORTFOLIO_DB_PATH", legacy)
+	t.Setenv("FREESTOCK_PORTFOLIO_CORE_DB_PATH", "")
+	t.Setenv("FREESTOCK_ANALYTICS_DB_PATH", "")
+	svc := &PortfolioService{}
+	defer svc.Close()
+	if _, err := svc.MigrateStorage(); err != nil {
+		t.Fatalf("迁移失败：%v", err)
+	}
+
+	coreTables := listUserTables(t, core)
+	wantCore := map[string]bool{
+		"portfolio": true, "portfolio_position": true, "portfolio_position_txn": true,
+		"position_shares": true, "portfolio_money": true,
+	}
+	analyticsTables := listUserTables(t, analytics)
+	wantAnalytics := map[string]bool{}
+	for _, table := range portfolio.AnalyticsTables {
+		wantAnalytics[table] = true
+	}
+
+	if got, want := len(coreTables), len(wantCore); got != want {
+		t.Fatalf("核心库表数=%d，应为 %d：%v", got, want, coreTables)
+	}
+	for name := range coreTables {
+		if !wantCore[name] {
+			t.Errorf("核心库多出表 %q —— 说明有分析/回测 schema 混进来了", name)
+		}
+	}
+	if got, want := len(analyticsTables), len(wantAnalytics); got != want {
+		t.Fatalf("分析库表数=%d，应为 %d：%v", got, want, analyticsTables)
+	}
+	for name := range analyticsTables {
+		if !wantAnalytics[name] {
+			t.Errorf("分析库多出表 %q —— 误查该表会返回空结果而不是报错", name)
+		}
+	}
+	// 两个库不能有任何同名表。
+	for name := range coreTables {
+		if analyticsTables[name] {
+			t.Errorf("表 %q 同时存在于核心库和分析库 —— 所有权重叠，切换时会错位", name)
+		}
+	}
+}
+
+// listUserTables 返回库里的用户表集合（不含 sqlite_ 内部表）。
+func listUserTables(t *testing.T, path string) map[string]bool {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	rows, err := db.Query(`SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatal(err)
+		}
+		out[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
 // 迁移后 BuildPlan 的低吸广度必须查分析库。查核心库会直接
 // "no such table: stock_strength"，整个建议页报错。
 func TestBuildPlanAfterMigrationReadsBreadthFromAnalytics(t *testing.T) {

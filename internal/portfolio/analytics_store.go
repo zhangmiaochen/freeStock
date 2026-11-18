@@ -16,13 +16,15 @@ type AnalyticsStore struct {
 	*Store
 }
 
-// OpenAnalytics 打开独立分析库。默认使用完整兼容 schema，保证旧表数据可以
-// 直接复制并校验；后续 AnalyticsStore schema 会收窄到 AnalyticsTables。
+// OpenAnalytics 打开独立分析库（只建分析表 schema）。
+//
+// ⚠ 不建核心表：分析库若也含 portfolio 等空表，"打开错库"就不会报错，
+// 而是静默返回空结果。分析库只拥有评分/市场状态/信号/四张留档表。
 func OpenAnalytics(path string) (*AnalyticsStore, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, fmt.Errorf("分析库路径不能为空")
 	}
-	store, err := Open(path)
+	store, err := openAnalyticsOnly(path)
 	if err != nil {
 		return nil, err
 	}
