@@ -180,7 +180,15 @@ export function DeleteBacktests(runIDs: string[]): $CancellablePromise<number> {
 }
 
 /**
- * DeletePortfolio 删除组合（持仓与流水级联清理）。
+ * DeletePortfolio 删除组合。
+ * 
+ * 持仓/流水/资金靠核心库内部的外键级联清掉；回测结果与四张快照在**另外两个
+ * 文件**里，SQLite 外键不跨文件。所以这里用"墓碑 + 重试"保证最终一致：
+ *  1. 核心库事务里删组合并写 `portfolio_deleted` 墓碑；
+ *  2. 清理回测库与分析库；
+ *  3. 两处都清干净才删墓碑，否则留给启动时的 RetryPendingCleanup 继续。
+ * 
+ * 这样即使清理中途进程被杀、或文件被占用，也不会永久留下孤儿记录。
  */
 export function DeletePortfolio(id: string): $CancellablePromise<void> {
     return $Call.ByID(1815086777, id);
@@ -274,6 +282,10 @@ export function GetSignalSummary(): $CancellablePromise<$models.SignalSummary | 
 
 /**
  * GetStorageMigrationState 返回持久化迁移状态。
+ * 
+ * 如果文件里停在 running、但本进程并没有迁移在跑、且状态已超过
+ * staleMigrationAfter 没更新，就返回 `interrupted`：让界面能把按钮放回
+ * “继续迁移”，而不是永久禁用。
  */
 export function GetStorageMigrationState(): $CancellablePromise<$models.StorageMigrationState> {
     return $Call.ByID(989351508).then(($result: any) => {
@@ -336,6 +348,10 @@ export function MaintainDatabase(): $CancellablePromise<void> {
 
 /**
  * MigrateStorage 执行一次核心库+分析库迁移。
+ * 
+ * 迁移跑在后端进程里，**与页面生命周期无关**：切换页面/刷新页面不会中止它；
+ * 页面回来只需重新读状态文件即可继续显示进度。若已有迁移在跑，
+ * 这里不排队（排队会让第二个请求一直挂到几小时后），直接返回当前状态。
  */
 export function MigrateStorage(): $CancellablePromise<$models.StorageMigrationState> {
     return $Call.ByID(1127300630).then(($result: any) => {
@@ -449,6 +465,29 @@ export function RefreshStrengthAll(limit: number, force: boolean): $CancellableP
     return $Call.ByID(757294405, limit, force).then(($result: any) => {
         return $$createType49($result);
     });
+}
+
+/**
+ * ResumeInterruptedMigration 在启动时接着跑上次被中断的迁移。
+ * 
+ * 典型场景：更新容器/重启进程时迁移正在跑，状态文件停在 running。
+ * 这里在后台续跑，恢复逻辑（复用核心库、接手已完成的分析库、归档半成品、
+ * 补回测库）都会自动生效，用户不需要重新点。
+ * 
+ * 只处理 running：failed 需要用户自己决定重试（可能要先处理磁盘/权限问题）。
+ */
+export function ResumeInterruptedMigration(): $CancellablePromise<void> {
+    return $Call.ByID(228025785);
+}
+
+/**
+ * RetryPendingCleanup 重试所有"已删除但跨库清理未完成"的组合。
+ * 
+ * 启动时在后台跑一次：把上次崩溃/失败留下的孤儿数据清干净。
+ * 墓碑数量通常为 0，代价可以忽略。
+ */
+export function RetryPendingCleanup(): $CancellablePromise<void> {
+    return $Call.ByID(583401275);
 }
 
 /**
