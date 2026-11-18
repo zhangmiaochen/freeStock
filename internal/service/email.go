@@ -201,6 +201,9 @@ func (s *emailScheduler) begin() (func(), bool) {
 // 不该多一个每 30 秒醒一次的协程。用户后来打开了开关，
 // 由 SaveEmailPrefs 负责按需启动（见 ensureEmailScheduler）。
 func (s *PortfolioService) ServiceStartup(context.Context, application.ServiceOptions) error {
+	// 先把运行的是哪个构建打出来：排查"更新了镜像但行为没变"时，
+	// 这一行能立刻确认容器里到底是不是新代码。
+	logBuildInfo()
 	// 启动时做一次数据库维护（体检、必要时压缩、可选的评分清理）。
 	// 后台执行：它可能跑几十秒（4.9GB 库的 VACUUM），绝不能挡启动。
 	goSafe("dbMaintain", s.MaintainDatabase)
