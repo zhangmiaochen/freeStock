@@ -66,6 +66,77 @@ func ensureAnalyticsIndexes(db *sql.DB) error {
 	return nil
 }
 
+// FinalizeAnalyticsDatabase 接手一个"数据已复制完、只差收尾"的分析库：
+// 逐表核对源/目标行数 → 重建索引 → 逐表 quick_check。
+//
+// 为什么要它：旧版本可能已经把几 GB 复制完，却卡在整库 quick_check 上。
+// 直接把目标归档重做等于再花几小时；这里只做只读校验，通过就继续。
+// 任一行数不一致（说明复制被中断）或校验失败都返回错误，由调用方决定重做。
+func FinalizeAnalyticsDatabase(sourcePath, targetPath string, progress func(table string, index, total int)) (report AnalyticsMigrationReport, err error) {
+	report = AnalyticsMigrationReport{SourcePath: sourcePath, TargetPath: targetPath, Tables: map[string]int{}}
+	if sourcePath == "" || targetPath == "" {
+		return report, fmt.Errorf("源库和目标库路径不能为空")
+	}
+	if _, err := os.Stat(targetPath); err != nil {
+		return report, fmt.Errorf("分析库不存在，无法收尾：%w", err)
+	}
+	target, err := Open(targetPath)
+	if err != nil {
+		return report, err
+	}
+	defer target.Close()
+	raw := target.DB()
+	if _, err := raw.Exec("PRAGMA foreign_keys = OFF"); err != nil {
+		return report, err
+	}
+	defer raw.Exec("PRAGMA foreign_keys = ON")
+	quoted := "'" + strings.ReplaceAll(filepath.ToSlash(sourcePath), "'", "''") + "'"
+	if _, err := raw.Exec("ATTACH DATABASE " + quoted + " AS legacy_analytics"); err != nil {
+		return report, fmt.Errorf("附加旧库失败：%w", err)
+	}
+	defer raw.Exec("DETACH DATABASE legacy_analytics")
+
+	// ① 行数对齐：任何一个表少了就说明上次复制没做完，交给调用方重做。
+	for i, table := range AnalyticsTables {
+		if progress != nil {
+			progress("核对 "+table, i, len(AnalyticsTables))
+		}
+		var sourceCount, targetCount int
+		if err := raw.QueryRow("SELECT COUNT(*) FROM legacy_analytics." + quoteIdent(table)).Scan(&sourceCount); err != nil {
+			return report, fmt.Errorf("统计旧分析表 %s 失败：%w", table, err)
+		}
+		if err := raw.QueryRow("SELECT COUNT(*) FROM " + quoteIdent(table)).Scan(&targetCount); err != nil {
+			return report, fmt.Errorf("统计目标分析表 %s 失败：%w", table, err)
+		}
+		if sourceCount != targetCount {
+			return report, fmt.Errorf("分析表 %s 行数不一致（源=%d 目标=%d），上次复制未完成", table, sourceCount, targetCount)
+		}
+		report.Tables[table] = targetCount
+	}
+
+	// ② 重建索引（幂等）+ ③ 逐表 quick_check，进度按表推进。
+	if progress != nil {
+		progress("索引重建", len(AnalyticsTables), len(AnalyticsTables))
+	}
+	if err := ensureAnalyticsIndexes(raw); err != nil {
+		return report, fmt.Errorf("重建分析索引失败：%w", err)
+	}
+	for i, table := range AnalyticsTables {
+		if progress != nil {
+			progress("检查 "+table, i, len(AnalyticsTables))
+		}
+		var check string
+		if err := raw.QueryRow("PRAGMA quick_check(" + quoteIdent(table) + ")").Scan(&check); err != nil {
+			return report, fmt.Errorf("检查分析表 %s 失败：%w", table, err)
+		}
+		if check != "ok" {
+			return report, fmt.Errorf("分析表 %s quick_check 失败：%s", table, check)
+		}
+	}
+	report.QuickCheck = "ok"
+	return report, nil
+}
+
 // MigrateAnalyticsDatabase 复制旧单库中的分析/历史表到独立 analytics.db。
 // 目标必须不存在，源库不修改；失败删除目标。
 func MigrateAnalyticsDatabase(sourcePath, targetPath string) (AnalyticsMigrationReport, error) {

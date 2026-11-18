@@ -83,6 +83,7 @@ func (s *PortfolioService) MigrateStorage() (StorageMigrationState, error) {
 	if state.Status == "succeeded" {
 		return state, nil
 	}
+	prior := state // 上一次落盘的状态（判断能否直接接手分析库）
 	sourcePath := s.legacyDBPath()
 	if sourcePath == "" {
 		return state, fmt.Errorf("无法确定旧组合库路径")
@@ -100,6 +101,24 @@ func (s *PortfolioService) MigrateStorage() (StorageMigrationState, error) {
 	}
 
 	var err error
+	// 上次可能已经把数据复制完、只差收尾。先尝试"接手校验"，成功就直接完成，
+	// 不把几小时的复制成果归档重做。
+	if finalized, finErr := s.finalizeExistingAnalytics(sourcePath, analyticsTarget, prior, &state); finalized {
+		if finErr != nil {
+			slog.Warn("存储迁移：已有分析库收尾失败，将重新复制", "err", finErr)
+		} else {
+			state.Status = "succeeded"
+			state.Phase = "analytics-finalize"
+			state.AnalyticsQuick = "ok"
+			state.CompletedAt = time.Now().Format(time.RFC3339)
+			if stateErr := s.writeMigrationState(state); stateErr != nil {
+				return state, stateErr
+			}
+			slog.Info("存储迁移：直接接手完成（未重新复制）", "path", analyticsTarget)
+			return state, nil
+		}
+	}
+
 	// 上次失败/中止会留下目标文件；旧版本会因此直接拒绝迁移，用户就只能手删。
 	// 这里先做**安全的归档**：分析库只有派生数据（评分/信号/快照），可重算，
 	// 一律改名备份后重做；核心库只有在"明显不完整"（源有组合、目标 0 个）时
@@ -201,6 +220,32 @@ func (s *PortfolioService) MigrateStorage() (StorageMigrationState, error) {
 		return state, err
 	}
 	return state, nil
+}
+
+// finalizeExistingAnalytics 判断能否直接接手一个已有的分析库。
+//
+// 只在"上一次迁移已经把全部表复制完"（状态里 tablesDone ≥ 总表数）时才尝试，
+// 避免把半成品当成品。返回 finalized=true 表示目标存在且可收尾：
+//   - err == nil：收尾成功，可以标记迁移完成；
+//   - err != nil：收尾失败（行数不一致/校验失败），调用方应归档后重做。
+func (s *PortfolioService) finalizeExistingAnalytics(sourcePath, analyticsTarget string, prior StorageMigrationState, state *StorageMigrationState) (bool, error) {
+	if prior.TablesDone < len(portfolio.AnalyticsTables) {
+		return false, nil
+	}
+	if _, statErr := os.Stat(analyticsTarget); statErr != nil {
+		return false, nil
+	}
+	slog.Info("存储迁移：发现上次已复制完的分析库，改为只做校验收尾", "path", analyticsTarget,
+		"tablesDone", prior.TablesDone)
+	state.Phase = "analytics-finalize"
+	_, err := portfolio.FinalizeAnalyticsDatabase(sourcePath, analyticsTarget, func(table string, done, total int) {
+		state.CurrentTable = table
+		state.TablesDone = done
+		state.TablesTotal = total
+		state.RowsDone, state.RowsTotal = 0, 0
+		_ = s.writeMigrationState(*state)
+	})
+	return true, err
 }
 
 // archiveStaleTargets 处理上次迁移失败/中止留下的目标文件。
