@@ -745,10 +745,11 @@ func (s *PortfolioService) buildDigestFor(
 	digest.TradeDate = latestTradeDate(digest.Portfolios)
 
 	// 市场状态：同一个交易日全市场只有一份，读最新评分日的那一份即可
-	if label, err := s.latestMarketStateLabel(store); err == nil {
-		digest.MarketStateLabel = label
+	if analytics, err := s.analyticsDB(); err == nil {
+		if label, err := s.latestMarketStateLabel(analytics); err == nil {
+			digest.MarketStateLabel = label
+		}
 	}
-
 	return digest, nil
 }
 

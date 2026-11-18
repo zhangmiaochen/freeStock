@@ -109,6 +109,10 @@ func (s *PortfolioService) CreateBacktest(req BacktestRequest) (runResult *Backt
 	if err != nil {
 		return nil, err
 	}
+	analytics, err := s.analyticsDB()
+	if err != nil {
+		return nil, err
+	}
 	item, err := store.Get(req.PortfolioID)
 	if err != nil {
 		return nil, err
@@ -128,7 +132,7 @@ func (s *PortfolioService) CreateBacktest(req BacktestRequest) (runResult *Backt
 	// ⚠ 下面这些阶段计时是**为了定位"回测很慢"**加的：单看总耗时分不清
 	// 是取评分、贴信号、拉日线、还是引擎逐日跑计划慢。跑一次看日志即可。
 	phaseBegan := time.Now()
-	strengths, err := store.LoadStrengthRange(item.StrategyID, int64(req.StartDate), int64(req.EndDate))
+	strengths, err := analytics.LoadStrengthRange(item.StrategyID, int64(req.StartDate), int64(req.EndDate))
 	if err != nil {
 		return nil, err
 	}

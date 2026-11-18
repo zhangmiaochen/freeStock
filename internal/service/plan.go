@@ -768,11 +768,13 @@ func (s *PortfolioService) buildCandidatePoolFrom(
 	for _, row := range scopedRows {
 		scopedDates = append(scopedDates, row.TradeDate)
 	}
-	signalStore, err := s.analyticsDB()
-	if err != nil {
-		return nil, nil, nil
+	if signalStore, signalErr := s.analyticsDB(); signalErr == nil {
+		scopedRows = s.attachSignalsToRows(signalStore, scopedRows, scopedDates)
+	} else {
+		// 信号历史是可选增强；分析库不可用时维持原语义（无信号字段），
+		// 不应让候选池/组合建议整体失败。
+		slog.Warn("打开信号分析库失败，候选池按无信号处理", "err", signalErr)
 	}
-	scopedRows = s.attachSignalsToRows(signalStore, scopedRows, scopedDates)
 
 	// 广度闸门用的是**贴完信号之后**的帧（见函数注释）
 	universeScores := make([]float64, 0, len(scopedRows))
