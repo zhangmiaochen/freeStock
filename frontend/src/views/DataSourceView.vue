@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onActivated, onMounted, ref } from "vue";
+import { computed, onActivated, onMounted, onUnmounted, ref } from "vue";
 import {
   Check,
   Database,
@@ -32,6 +32,7 @@ const configPath = ref("");
 const migration = ref<Awaited<ReturnType<typeof api.portfolio.getStorageMigrationState>> | null>(null);
 const migrationBusy = ref(false);
 const migrationError = ref("");
+let migrationTimer: ReturnType<typeof setInterval> | null = null;
 
 async function loadMigration() {
   try { migration.value = await api.portfolio.getStorageMigrationState(); } catch (err) { migrationError.value = errorMessage(err); }
@@ -77,7 +78,20 @@ onActivated(() => {
   void loadMigration();
 });
 
-onMounted(async () => { await loadSources(); await loadMigration(); });
+onMounted(async () => {
+  await loadSources();
+  await loadMigration();
+  migrationTimer = setInterval(() => {
+    if (migration.value?.status === "running" || migrationBusy.value) void loadMigration();
+  }, 2000);
+});
+
+onUnmounted(() => {
+  if (migrationTimer !== null) {
+    clearInterval(migrationTimer);
+    migrationTimer = null;
+  }
+});
 
 async function test(kind: string, url: string) {
   busy.value = "test";

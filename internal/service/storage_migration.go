@@ -104,6 +104,9 @@ func (s *PortfolioService) MigrateStorage() (StorageMigrationState, error) {
 		} else {
 			coreProgressPath = coreTarget
 			state.CoreQuick = quick
+			state.Phase = "analytics"
+			state.TablesDone, state.TablesTotal = 0, len(portfolio.AnalyticsTables)
+			_ = s.writeMigrationState(state)
 		}
 	} else if !os.IsNotExist(statErr) {
 		err = statErr
