@@ -240,6 +240,7 @@ func (s *PortfolioService) MigrateStorage() (StorageMigrationState, error) {
 	var coreReport portfolio.CoreMigrationReport
 	if err == nil && coreProgressPath == "" {
 		slog.Info("存储迁移：开始核心库表复制", "path", coreTarget)
+		coreBegan := time.Now()
 		coreReport, err = portfolio.MigrateCoreDatabaseWithProgress(sourcePath, coreTarget, func(table string, done, total int) {
 			state.Phase = "core"
 			state.CurrentTable = table
@@ -253,6 +254,10 @@ func (s *PortfolioService) MigrateStorage() (StorageMigrationState, error) {
 				slog.Error("写核心迁移进度失败", "err", stateErr, "table", table)
 			}
 		})
+		if err == nil {
+			slog.Info("存储迁移：核心库复制+校验完成",
+				"elapsed", time.Since(coreBegan).Round(time.Millisecond).String())
+		}
 	}
 	if err == nil {
 		state.CoreQuick = coreReport.QuickCheck
@@ -267,6 +272,8 @@ func (s *PortfolioService) MigrateStorage() (StorageMigrationState, error) {
 	}
 	if err == nil && !analyticsFinalized {
 		slog.Info("存储迁移：开始分析库复制", "path", analyticsTarget)
+		analyticsBegan := time.Now()
+		lastLogRows := int64(0)
 		analyticsReport, analyticsErr := portfolio.MigrateAnalyticsDatabaseWithProgress(sourcePath, analyticsTarget, func(table string, done, total int, rowsDone, rowsTotal int64) {
 			state.CurrentTable = table
 			state.TablesDone = done
@@ -279,11 +286,20 @@ func (s *PortfolioService) MigrateStorage() (StorageMigrationState, error) {
 				state.Phase = "analytics-finalize"
 			}
 			_ = s.writeMigrationState(state)
+			// 每 20 万行打一条日志：状态文件之外再给一个"确实在动"的证据，
+			// 出问题时能区分"慢"和"卡死"。
+			if rowsDone-lastLogRows >= 200000 {
+				lastLogRows = rowsDone
+				slog.Info("存储迁移进度", "table", table, "rowsDone", rowsDone,
+					"elapsed", time.Since(analyticsBegan).Round(time.Second).String())
+			}
 		})
 		if analyticsErr != nil {
 			err = analyticsErr
 		} else {
 			state.AnalyticsQuick = analyticsReport.QuickCheck
+			slog.Info("存储迁移：分析库复制+校验完成",
+				"elapsed", time.Since(analyticsBegan).Round(time.Millisecond).String())
 		}
 	}
 	// ---- 回测库：三张结果表搬到独立文件 ----
