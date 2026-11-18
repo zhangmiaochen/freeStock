@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"math"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -30,6 +31,7 @@ type PortfolioService struct {
 	store *portfolio.Store
 	// analyticsStore 是可选的独立分析库；未配置时保持旧单库兼容路径。
 	analyticsStore   *portfolio.AnalyticsStore
+	legacyStore      *portfolio.Store
 	analyticsOpenErr error
 	// opened 记录打开失败过，避免每次调用都重试失败的文件操作
 	openErr error
@@ -124,12 +126,16 @@ func (s *PortfolioService) Close() {
 		_ = s.analyticsStore.Close()
 		s.analyticsStore = nil
 	}
+	if s.legacyStore != nil {
+		_ = s.legacyStore.Close()
+		s.legacyStore = nil
+	}
 }
 
-// db 惰性打开组合库。
+// db 惰性打开组合核心库（组合/持仓/资金）。
 //
-// 放在这里而不是启动时打开：组合库所在目录不可写（装在 Program Files 下）时，
-// 不该让整个程序起不来 —— 只有用到组合功能的操作才会报错。
+// 分析及回测表仍由 legacyDB()/analyticsDB() 提供，避免多库切换期间
+// 把旧分析查询错误地打到只有核心 schema 的文件。
 func (s *PortfolioService) db() (*portfolio.Store, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -179,8 +185,9 @@ func (s *PortfolioService) dbPath() string {
 	if path := strings.TrimSpace(os.Getenv("FREESTOCK_PORTFOLIO_CORE_DB_PATH")); path != "" {
 		return path
 	}
-	// 迁移成功后优先读取持久化状态，无需用户配置环境变量。
-	if state := s.migrationState(); state.Status == "succeeded" && state.CorePath != "" {
+	// 核心库单独校验通过后即可启用，不必等待数 GB 分析库迁移/quick_check。
+	// 这样组合热数据先从旧大库隔离；分析库仍由 analyticsDB 在整体迁移成功后启用。
+	if state := s.migrationState(); state.CoreQuick == "ok" && state.CorePath != "" {
 		return state.CorePath
 	}
 	if path := strings.TrimSpace(os.Getenv("FREESTOCK_PORTFOLIO_DB_PATH")); path != "" {
@@ -197,11 +204,38 @@ func (s *PortfolioService) dbPath() string {
 }
 
 // analyticsDB 返回可选独立分析库；未配置时返回核心/旧库，保持旧调用链兼容。
+// legacyDB 打开旧完整库，供尚未迁移的回测/分析调用兼容读取。
+func (s *PortfolioService) legacyDB() (*portfolio.Store, error) {
+	path := s.legacyDBPath()
+	if path == "" {
+		return nil, fmt.Errorf("无法确定旧数据库路径")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.legacyStore != nil {
+		return s.legacyStore, nil
+	}
+	if s.store != nil && filepath.Clean(s.store.Path()) == filepath.Clean(path) {
+		return s.store, nil
+	}
+	store, err := portfolio.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("打开兼容旧数据库失败（%s）：%w", path, err)
+	}
+	s.legacyStore = store
+	return store, nil
+}
+
 func (s *PortfolioService) analyticsDB() (*portfolio.Store, error) {
 	path := strings.TrimSpace(os.Getenv("FREESTOCK_ANALYTICS_DB_PATH"))
 	if path == "" {
-		if state := s.migrationState(); state.Status == "succeeded" {
+		state := s.migrationState()
+		if state.Status == "succeeded" {
 			path = state.AnalyticsPath
+		} else if state.CoreQuick == "ok" && state.SourcePath != "" {
+			// 核心库已切换但分析迁移未完成：分析查询明确回退旧单库，不能
+			// 跟随 dbPath() 误开只有核心表的 portfolio-core.db。
+			path = state.SourcePath
 		}
 	}
 	if path == "" {

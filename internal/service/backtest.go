@@ -105,7 +105,7 @@ func (s *PortfolioService) CreateBacktest(req BacktestRequest) (runResult *Backt
 			err = logged
 		}
 	}()
-	store, err := s.db()
+	store, err := s.legacyDB()
 	if err != nil {
 		return nil, err
 	}
@@ -447,7 +447,7 @@ func (s *PortfolioService) GetBacktestPayload(runID string) (payload *BacktestPa
 				err, "GetBacktestPayload", openHandleCount(), runtime.NumGoroutine())
 		}
 	}()
-	store, err := s.db()
+	store, err := s.legacyDB()
 	if err != nil {
 		return nil, err
 	}
@@ -491,7 +491,7 @@ func (s *PortfolioService) ListBacktests(portfolioID string) (runs []portfolio.B
 				err, "ListBacktests", openHandleCount(), runtime.NumGoroutine())
 		}
 	}()
-	store, err := s.db()
+	store, err := s.legacyDB()
 	if err != nil {
 		return nil, err
 	}
@@ -500,7 +500,7 @@ func (s *PortfolioService) ListBacktests(portfolioID string) (runs []portfolio.B
 
 // DeleteBacktest 删除一次回测（级联清净值与成交）。
 func (s *PortfolioService) DeleteBacktest(runID string) error {
-	store, err := s.db()
+	store, err := s.legacyDB()
 	if err != nil {
 		return err
 	}
@@ -519,7 +519,7 @@ func (s *PortfolioService) DeleteBacktests(runIDs []string) (deleted int, err er
 	if len(runIDs) == 0 {
 		return 0, nil
 	}
-	store, err := s.db()
+	store, err := s.legacyDB()
 	if err != nil {
 		return 0, err
 	}
