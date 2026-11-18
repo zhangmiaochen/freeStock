@@ -107,6 +107,13 @@ func (s *PortfolioService) MigrateStorage() (StorageMigrationState, error) {
 		if finErr != nil {
 			slog.Warn("存储迁移：已有分析库收尾失败，将重新复制", "err", finErr)
 		} else {
+			// 直接走收尾时没经过核心阶段，这里必须补上核心校验结果 ——
+			// dbPath() 只在 coreQuick=="ok" 时才启用核心库，否则会一直读旧库。
+			if prior.CoreQuick == "ok" {
+				state.CoreQuick = "ok"
+			} else if _, quick, vErr := portfolio.ValidateCoreDatabase(coreTarget); vErr == nil {
+				state.CoreQuick = quick
+			}
 			state.Status = "succeeded"
 			state.Phase = "analytics-finalize"
 			state.AnalyticsQuick = "ok"

@@ -396,6 +396,12 @@ func TestMigrateStorageFinalizesAlreadyCopiedAnalytics(t *testing.T) {
 	if state.Status != "succeeded" || state.AnalyticsQuick != "ok" {
 		t.Fatalf("应收尾成功：%+v", state)
 	}
+	if state.CoreQuick != "ok" {
+		t.Fatalf("收尾成功必须补上核心校验结果，否则程序不会启用核心库：%+v", state)
+	}
+	if got := svc.dbPath(); got != core {
+		t.Fatalf("收尾成功后组合库应指向核心库，得到 %q", got)
+	}
 	after, err := os.Stat(analytics)
 	if err != nil {
 		t.Fatal(err)
