@@ -109,20 +109,31 @@ func (s *PortfolioService) MigrateStorage() (StorageMigrationState, error) {
 			state.CoreQuick = quick
 			slog.Info("存储迁移：核心目标校验通过，进入分析库", "path", coreTarget)
 			state.Phase = "analytics"
+			state.CurrentTable = "准备分析库"
 			state.TablesDone, state.TablesTotal = 0, len(portfolio.AnalyticsTables)
-			_ = s.writeMigrationState(state)
+			state.RowsDone, state.RowsTotal = 0, 0
+			if stateErr := s.writeMigrationState(state); stateErr != nil {
+				slog.Error("写分析迁移初始状态失败", "err", stateErr)
+			}
 		}
 	} else if !os.IsNotExist(statErr) {
 		err = statErr
 	}
 	var coreReport portfolio.CoreMigrationReport
 	if err == nil && coreProgressPath == "" {
+		slog.Info("存储迁移：开始核心库表复制", "path", coreTarget)
 		coreReport, err = portfolio.MigrateCoreDatabaseWithProgress(sourcePath, coreTarget, func(table string, done, total int) {
 			state.Phase = "core"
 			state.CurrentTable = table
 			state.TablesDone = done
 			state.TablesTotal = total
-			_ = s.writeMigrationState(state)
+			if done == total {
+				state.Phase = "core-verify"
+				state.CurrentTable = "quick_check"
+			}
+			if stateErr := s.writeMigrationState(state); stateErr != nil {
+				slog.Error("写核心迁移进度失败", "err", stateErr, "table", table)
+			}
 		})
 	}
 	if err == nil {
