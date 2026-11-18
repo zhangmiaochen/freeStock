@@ -120,21 +120,14 @@ func (s *PortfolioService) MigrateStorage() (StorageMigrationState, error) {
 	defer migrationActive.Store(false)
 
 	state := s.migrationState()
-	// 老版本可能已经"整体成功"，但那时没有回测库（回测表还在旧库）。
-	// 这种状态不能直接返回：backtest.db 不存在 → backtestDB 回落旧库 →
-	// 迁移后新建的组合一跑回测就撞 787。这里把它当作"只差回测库"继续补齐。
-	upgradeBacktestOnly := false
+	// "成功"不等于"数据完整"：旧版本可能在没有行数校验时把空核心库判成成功，
+	// 或者当时还没有回测库。直接 return 会让用户永远停在"列表为空/回测写失败"。
+	// 这里按**实际数据**判断是否还需要补，需要就继续走迁移流程。
 	if state.Status == "succeeded" {
-		if state.BacktestPath != "" {
-			if _, statErr := os.Stat(state.BacktestPath); statErr == nil {
-				return state, nil
-			}
-		}
-		if state.CoreQuick == "ok" && state.AnalyticsQuick == "ok" {
-			upgradeBacktestOnly = true
-			slog.Info("存储迁移：已完成核心/分析库，仅补齐回测库")
-		} else {
+		if reason := s.migrationIncompleteReason(state); reason == "" {
 			return state, nil
+		} else {
+			slog.Warn("迁移状态是成功，但数据不完整，继续修复", "reason", reason)
 		}
 	}
 	prior := state // 上一次落盘的状态（判断能否直接接手分析库）
@@ -153,12 +146,6 @@ func (s *PortfolioService) MigrateStorage() (StorageMigrationState, error) {
 		SourcePath: sourcePath, CorePath: coreTarget,
 		AnalyticsPath: analyticsTarget, BacktestPath: backtestTarget,
 	}
-	if upgradeBacktestOnly {
-		// 核心/分析库上一步已经是成功的，保留它们的校验结果，只补回测库。
-		state.CoreQuick = prior.CoreQuick
-		state.AnalyticsQuick = prior.AnalyticsQuick
-		state.Phase = "backtest"
-	}
 	if err := s.writeMigrationState(state); err != nil {
 		return state, err
 	}
@@ -166,34 +153,32 @@ func (s *PortfolioService) MigrateStorage() (StorageMigrationState, error) {
 	var err error
 	// 上次可能已经把分析表复制完、只差收尾。先尝试"接手校验"，成功就跳过复制，
 	// 不把几小时的复制成果归档重做。回测段仍要照常执行。
-	analyticsFinalized := upgradeBacktestOnly // 升级补齐时分析库已经成功，不再碰它
-	if !upgradeBacktestOnly {
-		if finalized, finErr := s.finalizeExistingAnalytics(sourcePath, analyticsTarget, prior, &state); finalized {
-			switch {
-			case finErr == nil:
-				analyticsFinalized = true
-				state.AnalyticsQuick = "ok"
-				if prior.CoreQuick == "ok" {
-					state.CoreQuick = "ok"
-				} else if _, quick, vErr := portfolio.ValidateCoreDatabase(coreTarget); vErr == nil {
-					state.CoreQuick = quick
-				}
-				slog.Info("存储迁移：分析库直接接手完成（未重新复制）", "path", analyticsTarget)
-			case errors.Is(finErr, portfolio.ErrAnalyticsIncomplete):
-				// 缺行 = 上次复制确实没写完，归档重做是正确的。
-				slog.Warn("存储迁移：分析库缺行，将归档后重新复制", "err", finErr)
-			case portfolio.IsCorruptDatabaseError(finErr):
-				// 文件根本不是可用库（被截断/写坏）→ 没有保留价值，归档重做。
-				slog.Warn("存储迁移：分析库文件已损坏，将归档后重新复制", "err", finErr)
-			default:
-				// 其它错误（占用/IO/校验失败）不要动已复制好的文件：
-				// 归档重做等于再花几小时，先让用户看到真实错误。
-				slog.Error("存储迁移：分析库校验失败（文件已保留，未重新复制）", "err", finErr)
-				state.Status = "failed"
-				state.Error = fmt.Sprintf("分析库校验失败（已保留 %s，可稍后重试）：%v", analyticsTarget, finErr)
-				_ = s.writeMigrationState(state)
-				return state, finErr
+	analyticsFinalized := false
+	if finalized, finErr := s.finalizeExistingAnalytics(sourcePath, analyticsTarget, prior, &state); finalized {
+		switch {
+		case finErr == nil:
+			analyticsFinalized = true
+			state.AnalyticsQuick = "ok"
+			if prior.CoreQuick == "ok" {
+				state.CoreQuick = "ok"
+			} else if _, quick, vErr := portfolio.ValidateCoreDatabase(coreTarget); vErr == nil {
+				state.CoreQuick = quick
 			}
+			slog.Info("存储迁移：分析库直接接手完成（未重新复制）", "path", analyticsTarget)
+		case errors.Is(finErr, portfolio.ErrAnalyticsIncomplete):
+			// 缺行 = 上次复制确实没写完，归档重做是正确的。
+			slog.Warn("存储迁移：分析库缺行，将归档后重新复制", "err", finErr)
+		case portfolio.IsCorruptDatabaseError(finErr):
+			// 文件根本不是可用库（被截断/写坏）→ 没有保留价值，归档重做。
+			slog.Warn("存储迁移：分析库文件已损坏，将归档后重新复制", "err", finErr)
+		default:
+			// 其它错误（占用/IO/校验失败）不要动已复制好的文件：
+			// 归档重做等于再花几小时，先让用户看到真实错误。
+			slog.Error("存储迁移：分析库校验失败（文件已保留，未重新复制）", "err", finErr)
+			state.Status = "failed"
+			state.Error = fmt.Sprintf("分析库校验失败（已保留 %s，可稍后重试）：%v", analyticsTarget, finErr)
+			_ = s.writeMigrationState(state)
+			return state, finErr
 		}
 	}
 
@@ -466,6 +451,56 @@ func (s *PortfolioService) ResumeInterruptedMigration() {
 		return
 	}
 	slog.Info("存储迁移续跑完成", "status", s.migrationState().Status)
+}
+
+// migrationIncompleteReason 判断一个"成功"状态是否真的完整。
+//
+// 返回空串表示完整；否则返回人类可读的原因，调用方应继续走迁移补齐。
+//
+// 为什么不能只看 status：旧版本没有行数校验，可能把"核心库 0 行"判成成功，
+// 或者在还没有回测库时就写了 succeeded。用户那边的表现就是"迁移完成，
+// 但组合列表空白 / 回测写失败"。
+func (s *PortfolioService) migrationIncompleteReason(state StorageMigrationState) string {
+	if state.CoreQuick != "ok" || state.AnalyticsQuick != "ok" || state.BacktestQuick != "ok" {
+		return "校验结果不完整"
+	}
+	if state.CorePath == "" || state.AnalyticsPath == "" || state.BacktestPath == "" {
+		return "缺少库路径"
+	}
+	for _, path := range []string{state.CorePath, state.AnalyticsPath, state.BacktestPath} {
+		if _, err := os.Stat(path); err != nil {
+			return fmt.Sprintf("缺少文件 %s", filepath.Base(path))
+		}
+	}
+	// 核心库"空壳"：源库有组合、核心库 0 个 —— 组合列表会空白。
+	coreCount, err := countPortfoliosAt(state.CorePath)
+	if err != nil {
+		return fmt.Sprintf("核心库不可读：%v", err)
+	}
+	if coreCount == 0 {
+		if legacyCount, legacyErr := countPortfoliosAt(s.legacyDBPath()); legacyErr == nil && legacyCount > 0 {
+			return fmt.Sprintf("核心库 0 个组合，旧库有 %d 个", legacyCount)
+		}
+	}
+	return ""
+}
+
+// countPortfoliosAt 统计某个库里的组合数（portfolio 表很小，代价可忽略）。
+func countPortfoliosAt(path string) (int, error) {
+	if path == "" {
+		return 0, fmt.Errorf("路径为空")
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return 0, err
+	}
+	defer db.Close()
+	_, _ = db.Exec("PRAGMA busy_timeout = 5000")
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM portfolio`).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 // readStateFile 读取状态文件；不存在或解析失败返回 ok=false。

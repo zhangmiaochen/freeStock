@@ -473,6 +473,70 @@ func TestStaleMigrationWriteIsIgnored(t *testing.T) {
 	}
 }
 
+// 旧版本可能在没有行数校验时把"空核心库"判成成功。这种状态再次执行迁移时
+// 必须**自动补上核心库**（否则组合列表永远是空白）。
+func TestMigrateStorageRepairsEmptyCoreUnderSucceededState(t *testing.T) {
+	dir := t.TempDir()
+	legacy := filepath.Join(dir, "portfolio.db")
+	core := filepath.Join(dir, "portfolio-core.db")
+	analytics := filepath.Join(dir, "analytics.db")
+	backtestPath := filepath.Join(dir, "backtest.db")
+	const strengthRows = 100
+	item := buildLegacyFixture(t, legacy, strengthRows)
+
+	t.Setenv("FREESTOCK_PORTFOLIO_DB_PATH", legacy)
+	t.Setenv("FREESTOCK_PORTFOLIO_CORE_DB_PATH", "")
+	t.Setenv("FREESTOCK_ANALYTICS_DB_PATH", "")
+	t.Setenv("FREESTOCK_BACKTEST_DB_PATH", "")
+
+	svc := &PortfolioService{}
+	defer svc.Close()
+	if _, err := svc.MigrateStorage(); err != nil {
+		t.Fatalf("首次迁移失败：%v", err)
+	}
+
+	// 模拟"成功但是空壳"：清空核心库的组合，状态仍写 succeeded。
+	coreStore, err := portfolio.OpenCore(core)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coreStore.DB().Exec(`DELETE FROM portfolio`); err != nil {
+		_ = coreStore.Close()
+		t.Fatal(err)
+	}
+	_ = coreStore.Close()
+	writeMigrationFixture(t, dir, StorageMigrationState{
+		Status: "succeeded", SourcePath: legacy, CorePath: core,
+		AnalyticsPath: analytics, BacktestPath: backtestPath,
+		CoreQuick: "ok", AnalyticsQuick: "ok", BacktestQuick: "ok",
+		CompletedAt: time.Now().Format(time.RFC3339),
+		UpdatedAt:   time.Now().Format(time.RFC3339),
+	})
+
+	state, err := svc.MigrateStorage()
+	if err != nil {
+		t.Fatalf("空核心库应被自动补齐：%v", err)
+	}
+	if state.Status != "succeeded" {
+		t.Fatalf("补齐后应成功：%+v", state)
+	}
+	repaired, err := portfolio.OpenCore(core)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer repaired.Close()
+	if _, err := repaired.Get(item.ID); err != nil {
+		t.Fatalf("核心库仍未补上组合：%v", err)
+	}
+	var n int
+	if err := repaired.DB().QueryRow(`SELECT COUNT(*) FROM portfolio`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n == 0 {
+		t.Fatal("核心库仍为空")
+	}
+}
+
 // 状态文件停在 running、但进程已经不在了：必须报 interrupted，
 // 否则界面会一直显示“迁移中”、按钮永久禁用（用户只能手删状态文件）。
 func TestStorageMigrationStateMarksInterrupted(t *testing.T) {
