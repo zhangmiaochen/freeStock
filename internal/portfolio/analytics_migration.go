@@ -203,15 +203,24 @@ func migrateAnalyticsDatabase(sourcePath, targetPath string, progress func(table
 	if err := ensureAnalyticsIndexes(raw); err != nil {
 		return report, fmt.Errorf("重建分析索引失败：%w", err)
 	}
-	if progress != nil {
-		progress("完整性检查", len(AnalyticsTables), len(AnalyticsTables), 0, -1)
+	// 整库 quick_check 在 NAS 上可能很久没有输出；按表检查并及时更新状态，
+	// 让界面能说明当前正检查哪个大表，而不是显示一个无进度的黑盒阶段。
+	for index, table := range AnalyticsTables {
+		if progress != nil {
+			progress("检查 "+table, index, len(AnalyticsTables), 0, -1)
+		}
+		var tableCheck string
+		if err := raw.QueryRow("PRAGMA quick_check(" + quoteIdent(table) + ")").Scan(&tableCheck); err != nil {
+			return report, fmt.Errorf("检查分析表 %s 失败：%w", table, err)
+		}
+		if tableCheck != "ok" {
+			return report, fmt.Errorf("分析表 %s quick_check 失败：%s", table, tableCheck)
+		}
+		if progress != nil {
+			progress("检查 "+table, index+1, len(AnalyticsTables), 0, -1)
+		}
 	}
-	if err := raw.QueryRow("PRAGMA quick_check").Scan(&report.QuickCheck); err != nil {
-		return report, err
-	}
-	if report.QuickCheck != "ok" {
-		return report, fmt.Errorf("分析库 quick_check 失败：%s", report.QuickCheck)
-	}
+	report.QuickCheck = "ok"
 	// 迁移后核心库外键无法跨文件验证；检查分析库内部结构并记录跨库引用
 	// 由应用层维护，避免误把 787 当成数据损坏。
 	cleanup = false
