@@ -89,6 +89,90 @@ CREATE INDEX IF NOT EXISTS idx_bt_daily_run     ON portfolio_backtest_daily(run_
 CREATE INDEX IF NOT EXISTS idx_bt_trade_run     ON portfolio_backtest_trade(run_id, trade_date);
 `
 
+// backtestSchemaStandalone 是独立回测库用的 DDL：与 backtestSchema 逐列相同，
+// 只去掉 `portfolio_id → portfolio(portfolio_id)` 外键。
+//
+// 为什么必须去掉：回测库与核心库是两个文件，SQLite 外键不能跨文件。更致命的是
+// 迁移后**新建的组合只存在核心库**，回测库里没有对应 portfolio 行 —— 带外键就会
+// 在写回测结果时直接撞 787（已复现）。组合与分析库之间本来就靠 portfolio_id
+// 这个**应用层引用**，删组合时由 DeletePortfolio 显式清理。
+//
+// run_id 两个外键保留：它们在同文件内，删除单次回测时仍要靠级联清净值/成交。
+//
+// ⚠ 改列时必须同步 backtestSchema；`TestBacktestStandaloneSchemaMatchesFull`
+// 会逐列比对两边的 table_info，漂移会直接失败。
+const backtestSchemaStandalone = `
+CREATE TABLE IF NOT EXISTS portfolio_backtest_run (
+  run_id               TEXT PRIMARY KEY,
+  portfolio_id         TEXT NOT NULL,
+  portfolio_name       TEXT NOT NULL DEFAULT '',
+  strategy_id          TEXT NOT NULL DEFAULT '',
+  strategy_label       TEXT NOT NULL DEFAULT '',
+  portfolio_type       TEXT NOT NULL DEFAULT '',
+  portfolio_type_label TEXT NOT NULL DEFAULT '',
+  benchmark_code       TEXT NOT NULL DEFAULT '',
+  start_date           TEXT NOT NULL DEFAULT '',
+  end_date             TEXT NOT NULL DEFAULT '',
+  rebalance_frequency  TEXT NOT NULL DEFAULT 'signal',
+  initial_capital      REAL NOT NULL DEFAULT 0,
+  status               TEXT NOT NULL DEFAULT 'pending',
+  total_return         REAL NOT NULL DEFAULT 0,
+  annual_return        REAL NOT NULL DEFAULT 0,
+  max_drawdown         REAL NOT NULL DEFAULT 0,
+  sharpe_ratio         REAL NOT NULL DEFAULT 0,
+  total_trades         INTEGER NOT NULL DEFAULT 0,
+  avg_position_count   REAL NOT NULL DEFAULT 0,
+  final_value          REAL NOT NULL DEFAULT 0,
+  summary_json         TEXT NOT NULL DEFAULT '{}',
+  created_at           TEXT NOT NULL,
+  updated_at           TEXT NOT NULL,
+  finished_at          TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS portfolio_backtest_daily (
+  run_id           TEXT NOT NULL,
+  trade_date       TEXT NOT NULL,
+  total_value      REAL NOT NULL DEFAULT 0,
+  cash             REAL NOT NULL DEFAULT 0,
+  position_value   REAL NOT NULL DEFAULT 0,
+  daily_return     REAL NOT NULL DEFAULT 0,
+  cumulative_return REAL NOT NULL DEFAULT 0,
+  benchmark_value  REAL NOT NULL DEFAULT 0,
+  benchmark_return REAL NOT NULL DEFAULT 0,
+  position_count   INTEGER NOT NULL DEFAULT 0,
+  created_at       TEXT NOT NULL,
+  PRIMARY KEY (run_id, trade_date),
+  FOREIGN KEY (run_id) REFERENCES portfolio_backtest_run(run_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS portfolio_backtest_trade (
+  trade_id        TEXT PRIMARY KEY,
+  run_id          TEXT NOT NULL,
+  portfolio_id    TEXT NOT NULL,
+  ts_code         TEXT NOT NULL,
+  name            TEXT NOT NULL DEFAULT '',
+  action          TEXT NOT NULL,
+  trade_date      TEXT NOT NULL DEFAULT '',
+  price           REAL NOT NULL DEFAULT 0,
+  shares          INTEGER NOT NULL DEFAULT 0,
+  amount          REAL NOT NULL DEFAULT 0,
+  commission      REAL NOT NULL DEFAULT 0,
+  tax             REAL NOT NULL DEFAULT 0,
+  total_cost      REAL NOT NULL DEFAULT 0,
+  profit_loss     REAL NOT NULL DEFAULT 0,
+  profit_loss_pct REAL NOT NULL DEFAULT 0,
+  position_weight REAL NOT NULL DEFAULT 0,
+  score           REAL NOT NULL DEFAULT 0,
+  reason          TEXT NOT NULL DEFAULT '',
+  created_at      TEXT NOT NULL,
+  FOREIGN KEY (run_id) REFERENCES portfolio_backtest_run(run_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_bt_run_portfolio ON portfolio_backtest_run(portfolio_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_bt_daily_run     ON portfolio_backtest_daily(run_id, trade_date);
+CREATE INDEX IF NOT EXISTS idx_bt_trade_run     ON portfolio_backtest_trade(run_id, trade_date);
+`
+
 // BacktestRun 是一次回测的元信息与绩效。
 type BacktestRun struct {
 	RunID              string  `json:"runId"`

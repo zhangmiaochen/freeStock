@@ -22,8 +22,10 @@ type StorageMigrationState struct {
 	SourcePath     string `json:"sourcePath,omitempty"`
 	CorePath       string `json:"corePath,omitempty"`
 	AnalyticsPath  string `json:"analyticsPath,omitempty"`
+	BacktestPath   string `json:"backtestPath,omitempty"`
 	CoreQuick      string `json:"coreQuick,omitempty"`
 	AnalyticsQuick string `json:"analyticsQuick,omitempty"`
+	BacktestQuick  string `json:"backtestQuick,omitempty"`
 	Error          string `json:"error,omitempty"`
 	Phase          string `json:"phase,omitempty"`
 	CurrentTable   string `json:"currentTable,omitempty"`
@@ -97,46 +99,42 @@ func (s *PortfolioService) MigrateStorage() (StorageMigrationState, error) {
 	dir := filepath.Dir(sourcePath)
 	coreTarget := filepath.Join(dir, "portfolio-core.db")
 	analyticsTarget := filepath.Join(dir, "analytics.db")
-	slog.Info("存储迁移开始", "source", sourcePath, "core", coreTarget, "analytics", analyticsTarget)
+	backtestTarget := filepath.Join(dir, "backtest.db")
+	slog.Info("存储迁移开始", "source", sourcePath,
+		"core", coreTarget, "analytics", analyticsTarget, "backtest", backtestTarget)
 	state = StorageMigrationState{
 		Status: "running", Phase: "core", StartedAt: time.Now().Format(time.RFC3339),
-		SourcePath: sourcePath, CorePath: coreTarget, AnalyticsPath: analyticsTarget,
+		SourcePath: sourcePath, CorePath: coreTarget,
+		AnalyticsPath: analyticsTarget, BacktestPath: backtestTarget,
 	}
 	if err := s.writeMigrationState(state); err != nil {
 		return state, err
 	}
 
 	var err error
-	// 上次可能已经把数据复制完、只差收尾。先尝试"接手校验"，成功就直接完成，
-	// 不把几小时的复制成果归档重做。
+	// 上次可能已经把分析表复制完、只差收尾。先尝试"接手校验"，成功就跳过复制，
+	// 不把几小时的复制成果归档重做。回测段仍要照常执行。
+	analyticsFinalized := false
 	if finalized, finErr := s.finalizeExistingAnalytics(sourcePath, analyticsTarget, prior, &state); finalized {
 		if finErr != nil {
 			slog.Warn("存储迁移：已有分析库收尾失败，将重新复制", "err", finErr)
 		} else {
-			// 直接走收尾时没经过核心阶段，这里必须补上核心校验结果 ——
-			// dbPath() 只在 coreQuick=="ok" 时才启用核心库，否则会一直读旧库。
+			analyticsFinalized = true
+			state.AnalyticsQuick = "ok"
 			if prior.CoreQuick == "ok" {
 				state.CoreQuick = "ok"
 			} else if _, quick, vErr := portfolio.ValidateCoreDatabase(coreTarget); vErr == nil {
 				state.CoreQuick = quick
 			}
-			state.Status = "succeeded"
-			state.Phase = "analytics-finalize"
-			state.AnalyticsQuick = "ok"
-			state.CompletedAt = time.Now().Format(time.RFC3339)
-			if stateErr := s.writeMigrationState(state); stateErr != nil {
-				return state, stateErr
-			}
-			slog.Info("存储迁移：直接接手完成（未重新复制）", "path", analyticsTarget)
-			return state, nil
+			slog.Info("存储迁移：分析库直接接手完成（未重新复制）", "path", analyticsTarget)
 		}
 	}
 
 	// 上次失败/中止会留下目标文件；旧版本会因此直接拒绝迁移，用户就只能手删。
-	// 这里先做**安全的归档**：分析库只有派生数据（评分/信号/快照），可重算，
-	// 一律改名备份后重做；核心库只有在"明显不完整"（源有组合、目标 0 个）时
-	// 才归档，正常核心库继续复用。
-	if archived, archErr := s.archiveStaleTargets(sourcePath, coreTarget, analyticsTarget); archErr != nil {
+	// 这里先做**安全的归档**：分析库/回测库只有派生数据，可重算，一律改名备份后
+	// 重做；核心库只有在"明显不完整"（源有组合、目标 0 个）时才归档，正常核心库
+	// 继续复用。已经接手成功的分析库不再归档。
+	if archived, archErr := s.archiveStaleTargets(sourcePath, coreTarget, analyticsTarget, backtestTarget, analyticsFinalized); archErr != nil {
 		err = archErr
 	} else if len(archived) > 0 {
 		state.Archived = strings.Join(archived, "、")
@@ -200,7 +198,7 @@ func (s *PortfolioService) MigrateStorage() (StorageMigrationState, error) {
 		state.RowsDone, state.RowsTotal = 0, 0
 		_ = s.writeMigrationState(state)
 	}
-	if err == nil {
+	if err == nil && !analyticsFinalized {
 		slog.Info("存储迁移：开始分析库复制", "path", analyticsTarget)
 		analyticsReport, analyticsErr := portfolio.MigrateAnalyticsDatabaseWithProgress(sourcePath, analyticsTarget, func(table string, done, total int, rowsDone, rowsTotal int64) {
 			state.CurrentTable = table
@@ -219,6 +217,27 @@ func (s *PortfolioService) MigrateStorage() (StorageMigrationState, error) {
 			err = analyticsErr
 		} else {
 			state.AnalyticsQuick = analyticsReport.QuickCheck
+		}
+	}
+	// ---- 回测库：三张结果表搬到独立文件 ----
+	if err == nil {
+		slog.Info("存储迁移：开始回测库复制", "path", backtestTarget)
+		state.Phase = "backtest"
+		state.CurrentTable = "准备回测库"
+		state.TablesDone, state.TablesTotal = 0, len(portfolio.BacktestTables)
+		state.RowsDone, state.RowsTotal = 0, 0
+		_ = s.writeMigrationState(state)
+		backtestReport, backtestErr := portfolio.MigrateBacktestDatabaseWithProgress(sourcePath, backtestTarget, func(table string, done, total int, rowsDone int64) {
+			state.CurrentTable = table
+			state.TablesDone = done
+			state.TablesTotal = total
+			state.RowsDone, state.RowsTotal = rowsDone, 0
+			_ = s.writeMigrationState(state)
+		})
+		if backtestErr != nil {
+			err = backtestErr
+		} else {
+			state.BacktestQuick = backtestReport.QuickCheck
 		}
 	}
 	if err != nil {
@@ -268,15 +287,27 @@ func (s *PortfolioService) finalizeExistingAnalytics(sourcePath, analyticsTarget
 //     正常核心库保留给上面的"快速校验后复用"分支。
 //
 // 归档 = 改名为 `<原名>.stale-<时间戳>`（连同 -wal/-shm），不删除任何数据。
-func (s *PortfolioService) archiveStaleTargets(sourcePath, coreTarget, analyticsTarget string) ([]string, error) {
+func (s *PortfolioService) archiveStaleTargets(sourcePath, coreTarget, analyticsTarget, backtestTarget string, keepAnalytics bool) ([]string, error) {
 	stamp := time.Now().Format("20060102-150405")
-	archived := make([]string, 0, 2)
+	archived := make([]string, 0, 3)
 
-	if _, statErr := os.Stat(analyticsTarget); statErr == nil {
-		if err := renameWithSidecars(analyticsTarget, analyticsTarget+".stale-"+stamp); err != nil {
-			return archived, fmt.Errorf("归档上次遗留的分析库失败：%w", err)
+	if !keepAnalytics {
+		if _, statErr := os.Stat(analyticsTarget); statErr == nil {
+			if err := renameWithSidecars(analyticsTarget, analyticsTarget+".stale-"+stamp); err != nil {
+				return archived, fmt.Errorf("归档上次遗留的分析库失败：%w", err)
+			}
+			archived = append(archived, filepath.Base(analyticsTarget)+".stale-"+stamp)
+		} else if !os.IsNotExist(statErr) {
+			return archived, statErr
 		}
-		archived = append(archived, filepath.Base(analyticsTarget)+".stale-"+stamp)
+	}
+
+	// 回测库只有派生结果，且迁移成本远低于分析库：一律归档后重做。
+	if _, statErr := os.Stat(backtestTarget); statErr == nil {
+		if err := renameWithSidecars(backtestTarget, backtestTarget+".stale-"+stamp); err != nil {
+			return archived, fmt.Errorf("归档上次遗留的回测库失败：%w", err)
+		}
+		archived = append(archived, filepath.Base(backtestTarget)+".stale-"+stamp)
 	} else if !os.IsNotExist(statErr) {
 		return archived, statErr
 	}

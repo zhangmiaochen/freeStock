@@ -198,12 +198,15 @@ func TestSplitStoresKeepBacktestResultsReadable(t *testing.T) {
 			{Code: "600000.SH", Name: "测试", Action: "buy", TradeDate: "20260101", Price: 10, Shares: 5000, Amount: 50000},
 		},
 	}
-	legacyStore, err := svc.legacyDB()
+	resultStore, err := svc.backtestDB()
 	if err != nil {
 		t.Fatal(err)
 	}
+	if got, want := resultStore.Path(), filepath.Join(dir, "backtest.db"); got != want {
+		t.Fatalf("迁移后回测库应为 %q，得到 %q", want, got)
+	}
 	const runID = "run_split_store"
-	if err := svc.persistBacktest(legacyStore, runID, item, cfg, "000300.SH", result, backtest.Metrics{TotalReturn: 1, TotalTrades: 1}); err != nil {
+	if err := svc.persistBacktest(resultStore, runID, item, cfg, "000300.SH", result, backtest.Metrics{TotalReturn: 1, TotalTrades: 1}); err != nil {
 		t.Fatalf("写回测结果失败：%v", err)
 	}
 
@@ -244,16 +247,16 @@ func TestSplitStoresKeepBacktestResultsReadable(t *testing.T) {
 	}
 
 	// ⑤ 删除组合必须连带清掉跨库的引用数据，否则会留下孤儿：
-	//    旧库的回测（FK 不跨文件，不会级联）与分析库的四张快照。
-	rawLegacyWrite, err := sql.Open("sqlite", legacy)
+	//    回测库的回测（跨文件不级联）与分析库的四张快照。
+	rawBacktestWrite, err := sql.Open("sqlite", resultStore.Path())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := rawLegacyWrite.Exec(`INSERT INTO portfolio_backtest_run(run_id, portfolio_id, strategy_id, start_date, end_date, created_at, updated_at) VALUES ('run_orphan_check', ?, 'trend_growth', '20260101', '20260131', 't', 't')`, created.ID); err != nil {
-		_ = rawLegacyWrite.Close()
+	if _, err := rawBacktestWrite.Exec(`INSERT INTO portfolio_backtest_run(run_id, portfolio_id, strategy_id, start_date, end_date, created_at, updated_at) VALUES ('run_orphan_check', ?, 'trend_growth', '20260101', '20260131', 't', 't')`, created.ID); err != nil {
+		_ = rawBacktestWrite.Close()
 		t.Fatalf("写入待清理回测失败：%v", err)
 	}
-	_ = rawLegacyWrite.Close()
+	_ = rawBacktestWrite.Close()
 	if _, err := analyticsStore.DB().Exec(`INSERT INTO portfolio_score_snapshot(portfolio_id, trade_date, created_at, updated_at) VALUES (?, '20261009', 't', 't')`, created.ID); err != nil {
 		t.Fatalf("写入快照失败：%v", err)
 	}
@@ -262,7 +265,7 @@ func TestSplitStoresKeepBacktestResultsReadable(t *testing.T) {
 		t.Fatalf("删除组合失败：%v", err)
 	}
 
-	rawCheck, err := sql.Open("sqlite", legacy)
+	rawCheck, err := sql.Open("sqlite", resultStore.Path())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -272,7 +275,7 @@ func TestSplitStoresKeepBacktestResultsReadable(t *testing.T) {
 		t.Fatal(err)
 	}
 	if leftover != 0 {
-		t.Fatal("删除组合后旧库回测成了孤儿 —— 回测页仍会列出已删除组合的记录")
+		t.Fatal("删除组合后回测成了孤儿 —— 回测页仍会列出已删除组合的记录")
 	}
 	// 别的组合的回测不能被动到。
 	if err := rawCheck.QueryRow(`SELECT COUNT(*) FROM portfolio_backtest_run WHERE run_id=?`, runID).Scan(&leftover); err != nil {
@@ -419,6 +422,45 @@ func TestMigratedFeatureReadPaths(t *testing.T) {
 	svc.MaintainDatabase()
 }
 
+// 迁移后为**新建组合**写回测必须成功。旧实现把回测表留在旧库，而旧库里没有
+// 迁移后新建的 portfolio 行 → 外键 787（已复现）。回测库去掉 portfolio 外键后
+// 这层引用由应用层维护，写入不再依赖旧库有没有那行。
+func TestBacktestWriteForNewPortfolioAfterMigration(t *testing.T) {
+	dir := t.TempDir()
+	legacy := filepath.Join(dir, "portfolio.db")
+	buildLegacyFixture(t, legacy, 20)
+	t.Setenv("FREESTOCK_PORTFOLIO_DB_PATH", legacy)
+	t.Setenv("FREESTOCK_PORTFOLIO_CORE_DB_PATH", "")
+	t.Setenv("FREESTOCK_ANALYTICS_DB_PATH", "")
+	t.Setenv("FREESTOCK_BACKTEST_DB_PATH", "")
+	svc := &PortfolioService{}
+	defer svc.Close()
+	if _, err := svc.MigrateStorage(); err != nil {
+		t.Fatalf("迁移失败：%v", err)
+	}
+	created, err := svc.CreatePortfolio(portfolio.PortfolioInput{
+		Name: "新组合", Type: portfolio.TypeManual, StrategyID: portfolio.StrategyTrendGrowth,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := svc.backtestDB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := backtest.Config{
+		PortfolioID: created.ID, PortfolioName: created.Name, StrategyID: created.StrategyID,
+		StartDate: "20260101", EndDate: "20260131", InitialCapital: 100000,
+	}
+	res := &backtest.Result{Snapshots: []backtest.Snapshot{{Date: "20260101", TotalValue: 100000}}}
+	if err := svc.persistBacktest(store, "run_new_pf", *created, cfg, "000300.SH", res, backtest.Metrics{}); err != nil {
+		t.Fatalf("迁移后为新组合写回测失败（跨库外键未解除？）：%v", err)
+	}
+	if _, err := svc.GetBacktestPayload("run_new_pf"); err != nil {
+		t.Fatalf("新组合的回测读不回来：%v", err)
+	}
+}
+
 // 迁移后三个库的表所有权必须**互不重叠**。这是"切换数据库不会错位"的结构性
 // 保证：任何一处把查询发到错库，都会得到 no such table，而不是静默 0 行。
 func TestMigratedDatabasesOwnDisjointTables(t *testing.T) {
@@ -468,6 +510,25 @@ func TestMigratedDatabasesOwnDisjointTables(t *testing.T) {
 	for name := range coreTables {
 		if analyticsTables[name] {
 			t.Errorf("表 %q 同时存在于核心库和分析库 —— 所有权重叠，切换时会错位", name)
+		}
+	}
+
+	// 回测库：恰好三张回测表，且与另外两个库不重叠。
+	backtestPath := filepath.Join(dir, "backtest.db")
+	backtestTables := listUserTables(t, backtestPath)
+	wantBacktest := map[string]bool{}
+	for _, table := range portfolio.BacktestTables {
+		wantBacktest[table] = true
+	}
+	if got, want := len(backtestTables), len(wantBacktest); got != want {
+		t.Fatalf("回测库表数=%d，应为 %d：%v", got, want, backtestTables)
+	}
+	for name := range backtestTables {
+		if !wantBacktest[name] {
+			t.Errorf("回测库多出表 %q", name)
+		}
+		if coreTables[name] || analyticsTables[name] {
+			t.Errorf("表 %q 在多个库中重复出现", name)
 		}
 	}
 }

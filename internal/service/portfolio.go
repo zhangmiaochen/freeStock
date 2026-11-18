@@ -32,6 +32,7 @@ type PortfolioService struct {
 	// analyticsStore 是可选的独立分析库；未配置时保持旧单库兼容路径。
 	analyticsStore   *portfolio.AnalyticsStore
 	legacyStore      *portfolio.Store
+	backtestStore    *portfolio.Store
 	analyticsOpenErr error
 	// opened 记录打开失败过，避免每次调用都重试失败的文件操作
 	openErr error
@@ -129,6 +130,10 @@ func (s *PortfolioService) Close() {
 	if s.legacyStore != nil {
 		_ = s.legacyStore.Close()
 		s.legacyStore = nil
+	}
+	if s.backtestStore != nil {
+		_ = s.backtestStore.Close()
+		s.backtestStore = nil
 	}
 }
 
@@ -239,6 +244,51 @@ func (s *PortfolioService) coreIsDedicated(path string) bool {
 		return true
 	}
 	return false
+}
+
+// backtestDB 返回回测结果库。
+//
+// 优先级：显式 env → 迁移状态（backtest.db）→ 旧完整库（未迁移时行为不变）。
+// 之所以要独立文件：回测行的 portfolio_id 指向核心库，而旧库里没有迁移后
+// 新建的组合，写在旧库会直接撞外键 787；回测页也不该再去碰 4.9GB 的旧库。
+func (s *PortfolioService) backtestDB() (*portfolio.Store, error) {
+	if path := strings.TrimSpace(os.Getenv("FREESTOCK_BACKTEST_DB_PATH")); path != "" {
+		return s.openCachedBacktest(path, true)
+	}
+	state := s.migrationState()
+	if state.Status == "succeeded" && state.BacktestPath != "" {
+		if _, statErr := os.Stat(state.BacktestPath); statErr == nil {
+			return s.openCachedBacktest(state.BacktestPath, true)
+		}
+		slog.Warn("回测库文件不存在，回退旧库读取回测结果", "backtest", state.BacktestPath)
+	}
+	return s.legacyDB()
+}
+
+func (s *PortfolioService) openCachedBacktest(path string, standalone bool) (*portfolio.Store, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.backtestStore != nil && filepath.Clean(s.backtestStore.Path()) == filepath.Clean(path) {
+		return s.backtestStore, nil
+	}
+	var (
+		store *portfolio.Store
+		err   error
+	)
+	if standalone {
+		store, err = portfolio.OpenBacktest(path)
+	} else {
+		store, err = portfolio.Open(path)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("打开回测库失败（%s）：%w", path, err)
+	}
+	if s.backtestStore != nil {
+		_ = s.backtestStore.Close()
+	}
+	s.backtestStore = store
+	slog.Info("回测库就绪", "path", path)
+	return store, nil
 }
 
 // legacyDB 打开旧完整库，供尚未迁移的回测/分析调用兼容读取。
@@ -544,14 +594,14 @@ func (s *PortfolioService) DeletePortfolio(id string) error {
 	// 拆分存储后外键级联不跨文件：旧库里的回测结果、分析库里的四张快照
 	// 仍带着这个 portfolio_id。不清理就是孤儿数据（回测页仍会列出已删组合的回测）。
 	// 清理是 best-effort：删组合本身已经成功，不能因为清理失败而回滚。
-	if legacy, legacyErr := s.legacyDB(); legacyErr == nil {
-		if n, cleanupErr := legacy.DeleteBacktestRunsByPortfolio(id); cleanupErr != nil {
-			slog.Warn("删除组合后清理旧库回测失败（回测页可能出现孤儿记录）", "id", id, "err", cleanupErr)
+	if backtest, backtestErr := s.backtestDB(); backtestErr == nil {
+		if n, cleanupErr := backtest.DeleteBacktestRunsByPortfolio(id); cleanupErr != nil {
+			slog.Warn("删除组合后清理回测库失败（回测页可能出现孤儿记录）", "id", id, "err", cleanupErr)
 		} else if n > 0 {
-			slog.Info("已清理该组合的旧库回测记录", "id", id, "runs", n)
+			slog.Info("已清理该组合的回测记录", "id", id, "runs", n)
 		}
 	} else {
-		slog.Warn("删除组合后无法打开旧库清理回测", "id", id, "err", legacyErr)
+		slog.Warn("删除组合后无法打开回测库清理记录", "id", id, "err", backtestErr)
 	}
 	if analytics, analyticsErr := s.analyticsDB(); analyticsErr == nil {
 		if n, cleanupErr := analytics.DeleteSnapshotsByPortfolio(id); cleanupErr != nil {

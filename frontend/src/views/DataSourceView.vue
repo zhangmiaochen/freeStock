@@ -61,6 +61,7 @@ const phaseLabel = computed(() => {
     case "core-verify": return "核心库校验";
     case "analytics": return "分析库复制";
     case "analytics-finalize": return "分析库收尾（索引/完整性）";
+    case "backtest": return "回测库复制";
     default: return "准备";
   }
 });
@@ -336,6 +337,7 @@ function kindLabel(kind: string) {
           <p class="text-up">迁移已完成，不会重复执行。</p>
           <p class="text-muted-foreground break-all">核心库：{{ migration.corePath }}</p>
           <p class="text-muted-foreground break-all">分析库：{{ migration.analyticsPath }}</p>
+          <p class="text-muted-foreground break-all">回测库：{{ migration.backtestPath }}</p>
           <p class="text-muted-foreground">完成时间：{{ migration.completedAt }}</p>
         </div>
         <p v-else-if="migration?.status === 'failed'" class="text-destructive mt-2 text-xs break-all">

@@ -108,14 +108,14 @@ func (s *PortfolioService) CreateBacktest(req BacktestRequest) (runResult *Backt
 	// 三个库的分工必须严格：
 	//   core      —— 组合元数据（迁移后新建的组合只存在这里）；
 	//   analytics —— 评分 + 市场状态（signal_generate 等新写入落这里）；
-	//   legacy    —— 回测三张表（尚未拆分，读写都在旧库）。
+	//   backtest  —— 回测三张表（迁移后是独立的 backtest.db，未迁移时回退旧库）。
 	// 混用会直接改变回测结果：用旧库取组合会找不到新组合，
 	// 用旧库取 market_state 会拿到迁移前的过期状态（牛熊判断错→计划错）。
 	coreStore, err := s.db()
 	if err != nil {
 		return nil, err
 	}
-	legacyStore, err := s.legacyDB()
+	resultStore, err := s.backtestDB()
 	if err != nil {
 		return nil, err
 	}
@@ -430,7 +430,7 @@ func (s *PortfolioService) CreateBacktest(req BacktestRequest) (runResult *Backt
 
 	// ⑤ 落库
 	runID := portfolio.NewBacktestRunID()
-	if err := s.persistBacktest(legacyStore, runID, item, cfg, benchmarkCode, result, metrics); err != nil {
+	if err := s.persistBacktest(resultStore, runID, item, cfg, benchmarkCode, result, metrics); err != nil {
 		return nil, err
 	}
 
@@ -457,7 +457,7 @@ func (s *PortfolioService) GetBacktestPayload(runID string) (payload *BacktestPa
 				err, "GetBacktestPayload", openHandleCount(), runtime.NumGoroutine())
 		}
 	}()
-	store, err := s.legacyDB()
+	store, err := s.backtestDB()
 	if err != nil {
 		return nil, err
 	}
@@ -501,7 +501,7 @@ func (s *PortfolioService) ListBacktests(portfolioID string) (runs []portfolio.B
 				err, "ListBacktests", openHandleCount(), runtime.NumGoroutine())
 		}
 	}()
-	store, err := s.legacyDB()
+	store, err := s.backtestDB()
 	if err != nil {
 		return nil, err
 	}
@@ -510,7 +510,7 @@ func (s *PortfolioService) ListBacktests(portfolioID string) (runs []portfolio.B
 
 // DeleteBacktest 删除一次回测（级联清净值与成交）。
 func (s *PortfolioService) DeleteBacktest(runID string) error {
-	store, err := s.legacyDB()
+	store, err := s.backtestDB()
 	if err != nil {
 		return err
 	}
@@ -529,7 +529,7 @@ func (s *PortfolioService) DeleteBacktests(runIDs []string) (deleted int, err er
 	if len(runIDs) == 0 {
 		return 0, nil
 	}
-	store, err := s.legacyDB()
+	store, err := s.backtestDB()
 	if err != nil {
 		return 0, err
 	}

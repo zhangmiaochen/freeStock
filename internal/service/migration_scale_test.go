@@ -89,8 +89,9 @@ func TestMigrateStorageEndToEndWithLargeAnalytics(t *testing.T) {
 	if state.CoreQuick != "ok" || state.AnalyticsQuick != "ok" {
 		t.Fatalf("quick_check 未通过：core=%q analytics=%q", state.CoreQuick, state.AnalyticsQuick)
 	}
-	if state.TablesDone != len(portfolio.AnalyticsTables) {
-		t.Fatalf("分析表完成数=%d，应为 %d", state.TablesDone, len(portfolio.AnalyticsTables))
+	if state.TablesDone != len(portfolio.BacktestTables) || state.Phase != "backtest" {
+		t.Fatalf("最后一段应是回测库（%d 张表），得到 phase=%q done=%d/%d",
+			len(portfolio.BacktestTables), state.Phase, state.TablesDone, state.TablesTotal)
 	}
 	t.Logf("迁移 %d 行评分耗时 %s", strengthRows, elapsed.Round(time.Millisecond))
 
@@ -113,6 +114,24 @@ func TestMigrateStorageEndToEndWithLargeAnalytics(t *testing.T) {
 	}
 	if n != 0 {
 		t.Fatal("核心库不应包含 stock_strength 表")
+	}
+
+	// 回测库：结果搬过去了，原库仍保留。
+	backtestPath := filepath.Join(dir, "backtest.db")
+	rawBacktest, err := sql.Open("sqlite", backtestPath)
+	if err != nil {
+		t.Fatalf("打开回测库失败：%v", err)
+	}
+	defer rawBacktest.Close()
+	var runs int
+	if err := rawBacktest.QueryRow(`SELECT COUNT(*) FROM portfolio_backtest_run`).Scan(&runs); err != nil {
+		t.Fatalf("回测库读取失败：%v", err)
+	}
+	if runs != 1 {
+		t.Fatalf("回测库运行记录=%d，应为 1", runs)
+	}
+	if state.BacktestQuick != "ok" {
+		t.Fatalf("回测库校验结果=%q，应为 ok", state.BacktestQuick)
 	}
 
 	// 分析库：行数一致、索引已重建、quick_check 通过。

@@ -1083,9 +1083,9 @@ func (s *PortfolioService) createQualityGrowthBacktest(
 		},
 	}
 
-	// 回测三张表目前仍在旧完整库里（核心库是 core-only schema）：
-	// 写结果必须走 legacyDB，否则会报 no such table: portfolio_backtest_run。
-	store, err := s.legacyDB()
+	// 回测结果写回测库（迁移后是独立 backtest.db，未迁移时是旧库）；
+	// 写错库会报 no such table: portfolio_backtest_run。
+	store, err := s.backtestDB()
 	if err != nil {
 		return nil, err
 	}

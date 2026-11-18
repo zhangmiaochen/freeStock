@@ -571,6 +571,9 @@ const (
 	schemaCoreOnly
 	// schemaAnalyticsOnly 分析库：只有评分/市场状态/信号/四张留档表。
 	schemaAnalyticsOnly
+	// schemaBacktestOnly 回测库：只有回测三张表，且**不带 portfolio 外键**
+	// （跨文件引用无法用 SQLite 外键表达，组合删除由应用层清理）。
+	schemaBacktestOnly
 )
 
 // Open 打开（必要时创建）兼容组合库并建完整旧 schema。
@@ -591,6 +594,11 @@ func OpenCore(path string) (*Store, error) {
 // openAnalyticsOnly 打开只包含分析表的库（信号/评分/留档）。
 func openAnalyticsOnly(path string) (*Store, error) {
 	return open(path, schemaAnalyticsOnly)
+}
+
+// OpenBacktest 打开只包含回测三张表的独立库。
+func OpenBacktest(path string) (*Store, error) {
+	return open(path, schemaBacktestOnly)
 }
 
 func open(path string, mode schemaMode) (*Store, error) {
@@ -873,8 +881,9 @@ func (s *Store) migrateMode(mode schemaMode) error {
 	if _, err := s.db.Exec("PRAGMA foreign_keys = ON"); err != nil {
 		return fmt.Errorf("开启外键约束失败：%w", err)
 	}
-	// 核心表只属于旧单库和核心库；分析库不建它们（否则误查组合会得到空结果）。
-	if mode != schemaAnalyticsOnly {
+	// 核心表只属于旧单库和核心库；分析库/回测库都不建它们
+	// （否则误查组合/回测会得到空结果）。
+	if mode != schemaAnalyticsOnly && mode != schemaBacktestOnly {
 		if _, err := s.db.Exec(schema); err != nil {
 			return fmt.Errorf("建表失败：%w", err)
 		}
@@ -884,6 +893,12 @@ func (s *Store) migrateMode(mode schemaMode) error {
 		}
 	}
 	if mode == schemaCoreOnly {
+		return nil
+	}
+	if mode == schemaBacktestOnly {
+		if _, err := s.db.Exec(backtestSchemaStandalone); err != nil {
+			return fmt.Errorf("建回测表失败：%w", err)
+		}
 		return nil
 	}
 	// 以下表属于旧兼容库 / 分析库。

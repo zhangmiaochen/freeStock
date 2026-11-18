@@ -5925,8 +5925,10 @@ export class StorageMigrationState {
     "sourcePath"?: string;
     "corePath"?: string;
     "analyticsPath"?: string;
+    "backtestPath"?: string;
     "coreQuick"?: string;
     "analyticsQuick"?: string;
+    "backtestQuick"?: string;
     "error"?: string;
     "phase"?: string;
     "currentTable"?: string;
