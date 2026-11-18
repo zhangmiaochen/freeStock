@@ -5942,6 +5942,12 @@ export class StorageMigrationState {
      */
     "archived"?: string;
 
+    /**
+     * UpdatedAt 每次写状态时刷新。用来判断"状态停在 running 但进程已经没了"
+     * （容器重启/进程被杀），这种状态必须能被识别为中断，否则按钮永远点不动。
+     */
+    "updatedAt"?: string;
+
     /** Creates a new StorageMigrationState instance. */
     constructor($$source: Partial<StorageMigrationState> = {}) {
         if (!("status" in $$source)) {

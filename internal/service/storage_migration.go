@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"freestock/internal/portfolio"
@@ -35,9 +36,21 @@ type StorageMigrationState struct {
 	RowsTotal      int64  `json:"rowsTotal,omitempty"`
 	// Archived 记录本次迁移归档了哪些上次遗留的目标文件（改名为 *.stale-*）。
 	Archived string `json:"archived,omitempty"`
+	// UpdatedAt 每次写状态时刷新。用来判断"状态停在 running 但进程已经没了"
+	// （容器重启/进程被杀），这种状态必须能被识别为中断，否则按钮永远点不动。
+	UpdatedAt string `json:"updatedAt,omitempty"`
 }
 
-var storageMigrationMu sync.Mutex
+var (
+	storageMigrationMu sync.Mutex
+	// migrationActive 表示**本进程**里确实有一个迁移在跑。
+	// 状态文件里的 running 只代表"上次写到一半"，两者不是一回事。
+	migrationActive atomic.Bool
+)
+
+// staleMigrationAfter 多久没有状态更新就认为上次迁移已中断。
+// 迁移每张表/每批都会写状态，正常间隔远小于这个值。
+const staleMigrationAfter = 120 * time.Second
 
 // migrationState 读取状态文件；路径推导只使用旧库/配置路径，避免循环依赖。
 func (s *PortfolioService) migrationState() StorageMigrationState {
@@ -72,8 +85,24 @@ func (s *PortfolioService) legacyDBPath() string {
 }
 
 // GetStorageMigrationState 返回持久化迁移状态。
+//
+// 如果文件里停在 running、但本进程并没有迁移在跑、且状态已超过
+// staleMigrationAfter 没更新，就返回 `interrupted`：让界面能把按钮放回
+// “继续迁移”，而不是永久禁用。
 func (s *PortfolioService) GetStorageMigrationState() StorageMigrationState {
-	return s.migrationState()
+	state := s.migrationState()
+	if state.Status != "running" || migrationActive.Load() {
+		return state
+	}
+	if state.UpdatedAt == "" {
+		state.Status = "interrupted"
+		return state
+	}
+	updated, err := time.Parse(time.RFC3339, state.UpdatedAt)
+	if err != nil || time.Since(updated) > staleMigrationAfter {
+		state.Status = "interrupted"
+	}
+	return state
 }
 
 // MigrateStorage 执行一次核心库+分析库迁移。
@@ -86,6 +115,8 @@ func (s *PortfolioService) MigrateStorage() (StorageMigrationState, error) {
 		return s.migrationState(), fmt.Errorf("迁移已在进行中，请等待当前任务完成（可刷新页面查看进度）")
 	}
 	defer storageMigrationMu.Unlock()
+	migrationActive.Store(true)
+	defer migrationActive.Store(false)
 
 	state := s.migrationState()
 	// 老版本可能已经"整体成功"，但那时没有回测库（回测表还在旧库）。
@@ -386,6 +417,28 @@ func renameWithSidecars(path, newPath string) error {
 	return nil
 }
 
+// ResumeInterruptedMigration 在启动时接着跑上次被中断的迁移。
+//
+// 典型场景：更新容器/重启进程时迁移正在跑，状态文件停在 running。
+// 这里在后台续跑，恢复逻辑（复用核心库、接手已完成的分析库、归档半成品、
+// 补回测库）都会自动生效，用户不需要重新点。
+//
+// 只处理 running：failed 需要用户自己决定重试（可能要先处理磁盘/权限问题）。
+func (s *PortfolioService) ResumeInterruptedMigration() {
+	state := s.migrationState()
+	if state.Status != "running" {
+		return
+	}
+	slog.Info("检测到上次未完成的存储迁移，后台续跑",
+		"phase", state.Phase, "table", state.CurrentTable,
+		"tablesDone", state.TablesDone, "tablesTotal", state.TablesTotal)
+	if resumed, err := s.MigrateStorage(); err != nil {
+		slog.Error("续跑存储迁移失败（可在设置页手动重试）", "err", err, "state", resumed.Status)
+		return
+	}
+	slog.Info("存储迁移续跑完成", "status", s.migrationState().Status)
+}
+
 func (s *PortfolioService) migrationStatePath() string {
 	path := s.legacyDBPath()
 	if path == "" {
@@ -399,6 +452,8 @@ func (s *PortfolioService) writeMigrationState(state StorageMigrationState) erro
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
+	// 每次落盘都刷新心跳：判断"running 是否已成孤儿"就靠它。
+	state.UpdatedAt = time.Now().Format(time.RFC3339)
 	raw, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return err

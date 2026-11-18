@@ -430,6 +430,75 @@ func TestMigratedFeatureReadPaths(t *testing.T) {
 	svc.MaintainDatabase()
 }
 
+// 状态文件停在 running、但进程已经不在了：必须报 interrupted，
+// 否则界面会一直显示“迁移中”、按钮永久禁用（用户只能手删状态文件）。
+func TestStorageMigrationStateMarksInterrupted(t *testing.T) {
+	dir := t.TempDir()
+	legacy := filepath.Join(dir, "portfolio.db")
+	t.Setenv("FREESTOCK_PORTFOLIO_DB_PATH", legacy)
+	t.Setenv("FREESTOCK_PORTFOLIO_CORE_DB_PATH", "")
+	t.Setenv("FREESTOCK_ANALYTICS_DB_PATH", "")
+
+	old := time.Now().Add(-10 * time.Minute).Format(time.RFC3339)
+	writeMigrationFixture(t, dir, StorageMigrationState{
+		Status: "running", Phase: "analytics", SourcePath: legacy,
+		CorePath:      filepath.Join(dir, "portfolio-core.db"),
+		AnalyticsPath: filepath.Join(dir, "analytics.db"),
+		CurrentTable:  "完整性检查", TablesDone: 10, TablesTotal: 10, UpdatedAt: old,
+	})
+	svc := &PortfolioService{}
+	defer svc.Close()
+	if got := svc.GetStorageMigrationState(); got.Status != "interrupted" {
+		t.Fatalf("陈旧 running 应报 interrupted，得到 %q", got.Status)
+	}
+
+	// 心跳是新的 → 仍视为进行中（可能在另一个请求里跑）。
+	writeMigrationFixture(t, dir, StorageMigrationState{
+		Status: "running", Phase: "analytics", SourcePath: legacy,
+		UpdatedAt: time.Now().Format(time.RFC3339),
+	})
+	if got := svc.GetStorageMigrationState(); got.Status != "running" {
+		t.Fatalf("新鲜心跳应保持 running，得到 %q", got.Status)
+	}
+}
+
+// 启动续跑：状态停在 running（上次被重启打断）时，后台应能接着做完。
+func TestResumeInterruptedMigrationContinues(t *testing.T) {
+	dir := t.TempDir()
+	legacy := filepath.Join(dir, "portfolio.db")
+	buildLegacyFixture(t, legacy, 100)
+	t.Setenv("FREESTOCK_PORTFOLIO_DB_PATH", legacy)
+	t.Setenv("FREESTOCK_PORTFOLIO_CORE_DB_PATH", "")
+	t.Setenv("FREESTOCK_ANALYTICS_DB_PATH", "")
+	t.Setenv("FREESTOCK_BACKTEST_DB_PATH", "")
+
+	writeMigrationFixture(t, dir, StorageMigrationState{
+		Status: "running", Phase: "core", SourcePath: legacy,
+		CorePath:      filepath.Join(dir, "portfolio-core.db"),
+		AnalyticsPath: filepath.Join(dir, "analytics.db"),
+		BacktestPath:  filepath.Join(dir, "backtest.db"),
+		TablesDone:    0, TablesTotal: 5,
+		UpdatedAt: time.Now().Add(-10 * time.Minute).Format(time.RFC3339),
+	})
+
+	svc := &PortfolioService{}
+	defer svc.Close()
+	svc.ResumeInterruptedMigration()
+
+	state := svc.GetStorageMigrationState()
+	if state.Status != "succeeded" {
+		t.Fatalf("续跑后应成功，得到 %+v", state)
+	}
+	if state.CoreQuick != "ok" || state.AnalyticsQuick != "ok" || state.BacktestQuick != "ok" {
+		t.Fatalf("三个库都应校验通过：%+v", state)
+	}
+	for _, name := range []string{"portfolio-core.db", "analytics.db", "backtest.db"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Fatalf("%s 未生成：%v", name, err)
+		}
+	}
+}
+
 // 删除组合时若跨库清理失败（崩溃/占用），墓碑必须留下；下次启动的
 // RetryPendingCleanup 要能补完并清掉墓碑 —— 不依赖"一次删成功"。
 func TestRetryPendingCleanupClearsLeftovers(t *testing.T) {

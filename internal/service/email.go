@@ -206,6 +206,8 @@ func (s *PortfolioService) ServiceStartup(context.Context, application.ServiceOp
 	goSafe("dbMaintain", s.MaintainDatabase)
 	// 上次删除组合时若跨库清理没做完（进程被杀/文件被占用），这里补上。
 	goSafe("orphanCleanup", s.RetryPendingCleanup)
+	// 更新容器/重启进程时迁移可能被打断：后台接着跑，不用用户再点一次。
+	goSafe("resumeMigration", s.ResumeInterruptedMigration)
 
 	prefs := s.emailPrefs()
 	if prefs.Enabled {

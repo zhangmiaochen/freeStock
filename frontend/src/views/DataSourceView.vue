@@ -42,6 +42,7 @@ async function loadMigration() {
 //   - 状态仍是 running → 继续轮询显示进度，按钮保持禁用；
 //   - 状态已是 succeeded → 直接显示完成，不需要再点。
 const migrationRunning = computed(() => migrationBusy.value || migration.value?.status === "running");
+const migrationInterrupted = computed(() => migration.value?.status === "interrupted");
 
 async function migrateStorage() {
   // 后端已在跑时不重复发起（后端也会拒绝，这里先拦住避免一次无用的报错）。
@@ -329,6 +330,7 @@ function kindLabel(kind: string) {
           <h3 class="text-sm font-medium">数据存储迁移</h3>
           <Badge v-if="migration?.status === 'succeeded'" variant="secondary">已完成</Badge>
           <Badge v-else-if="migration?.status === 'running'" variant="secondary">迁移中</Badge>
+          <Badge v-else-if="migrationInterrupted" variant="secondary">已中断</Badge>
         </div>
         <p class="text-muted-foreground mt-2 text-xs leading-relaxed">
           将组合核心数据和评分/分析数据复制到独立数据库。迁移不会覆盖旧库，完成后可在 Docker 配置中启用新路径。
@@ -340,6 +342,12 @@ function kindLabel(kind: string) {
           <p class="text-muted-foreground break-all">回测库：{{ migration.backtestPath }}</p>
           <p class="text-muted-foreground">完成时间：{{ migration.completedAt }}</p>
         </div>
+        <p v-else-if="migrationInterrupted" class="text-muted-foreground mt-2 text-xs">
+          上次迁移没有跑完（进程重启或页面断开）。可以直接点“继续迁移”，会从断点接着做：
+          已校验的核心库直接复用、复制完的分析库只做校验收尾、不完整的会归档后重做。
+          <br />
+          <span class="break-all">停在：{{ phaseLabel }} / {{ migration?.currentTable || '—' }}（{{ migration?.tablesDone || 0 }}/{{ migration?.tablesTotal || 0 }} 张表）</span>
+        </p>
         <p v-else-if="migration?.status === 'failed'" class="text-destructive mt-2 text-xs break-all">
           上次迁移失败：{{ migration.error }}
         </p>
@@ -354,7 +362,7 @@ function kindLabel(kind: string) {
           <Button size="sm" :disabled="migrationRunning || migration?.status === 'succeeded'" @click="migrateStorage">
             <LoaderCircle v-if="migrationRunning" class="animate-spin" />
             <Database v-else />
-            {{ migrationRunning ? '迁移中…' : migration?.status === 'failed' ? '重试迁移' : '开始迁移' }}
+            {{ migrationRunning ? '迁移中…' : migrationInterrupted ? '继续迁移' : migration?.status === 'failed' ? '重试迁移' : '开始迁移' }}
           </Button>
         </div>
       </section>
