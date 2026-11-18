@@ -133,6 +133,10 @@ func migrateAnalyticsDatabase(sourcePath, targetPath string, progress func(table
 	// 删除不完整目标，源库始终不变。
 	const batchSize = 50000
 	for index, table := range AnalyticsTables {
+		// 先通知“正在进入下一张表”，避免上一张表完成后 UI 长时间显示旧表。
+		if progress != nil {
+			progress(table, index, len(AnalyticsTables), 0, -1)
+		}
 		var sourceCount int
 		if err := raw.QueryRow("SELECT COUNT(*) FROM legacy_analytics." + quoteIdent(table)).Scan(&sourceCount); err != nil {
 			return report, fmt.Errorf("统计旧分析表 %s 失败：%w", table, err)

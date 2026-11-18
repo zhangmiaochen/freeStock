@@ -138,7 +138,9 @@ func (s *PortfolioService) MigrateStorage() (StorageMigrationState, error) {
 			state.TablesDone = done
 			state.TablesTotal = total
 			state.RowsDone = rowsDone
-			state.RowsTotal = rowsTotal
+			if rowsTotal >= 0 {
+				state.RowsTotal = rowsTotal
+			}
 			_ = s.writeMigrationState(state)
 		})
 		if analyticsErr != nil {
