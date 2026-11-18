@@ -3,6 +3,7 @@ package service
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -86,6 +87,7 @@ func (s *PortfolioService) MigrateStorage() (StorageMigrationState, error) {
 	dir := filepath.Dir(sourcePath)
 	coreTarget := filepath.Join(dir, "portfolio-core.db")
 	analyticsTarget := filepath.Join(dir, "analytics.db")
+	slog.Info("存储迁移开始", "source", sourcePath, "core", coreTarget, "analytics", analyticsTarget)
 	state = StorageMigrationState{
 		Status: "running", Phase: "core", StartedAt: time.Now().Format(time.RFC3339),
 		SourcePath: sourcePath, CorePath: coreTarget, AnalyticsPath: analyticsTarget,
@@ -97,13 +99,15 @@ func (s *PortfolioService) MigrateStorage() (StorageMigrationState, error) {
 	var err error
 	coreProgressPath := ""
 	if _, statErr := os.Stat(coreTarget); statErr == nil {
-		// 可复用的核心目标必须是合法库，并且核心表计数匹配；否则拒绝覆盖。
+		slog.Info("存储迁移：发现已有核心目标，开始快速校验", "path", coreTarget)
+		// 可复用的核心目标只做目标 quick_check，不再扫描旧大库。
 		_, quick, validateErr := portfolio.ValidateCoreDatabase(coreTarget)
 		if validateErr != nil {
 			err = fmt.Errorf("已有核心目标校验失败：%w；请先备份后移走该目标", validateErr)
 		} else {
 			coreProgressPath = coreTarget
 			state.CoreQuick = quick
+			slog.Info("存储迁移：核心目标校验通过，进入分析库", "path", coreTarget)
 			state.Phase = "analytics"
 			state.TablesDone, state.TablesTotal = 0, len(portfolio.AnalyticsTables)
 			_ = s.writeMigrationState(state)
@@ -133,6 +137,7 @@ func (s *PortfolioService) MigrateStorage() (StorageMigrationState, error) {
 		_ = s.writeMigrationState(state)
 	}
 	if err == nil {
+		slog.Info("存储迁移：开始分析库复制", "path", analyticsTarget)
 		analyticsReport, analyticsErr := portfolio.MigrateAnalyticsDatabaseWithProgress(sourcePath, analyticsTarget, func(table string, done, total int, rowsDone, rowsTotal int64) {
 			state.CurrentTable = table
 			state.TablesDone = done
