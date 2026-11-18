@@ -3,6 +3,7 @@ package portfolio
 import (
 	"database/sql"
 	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -56,6 +57,50 @@ func TestVerifyMigratedTableUsesSamplingForLargeTables(t *testing.T) {
 	// 行数对不上必须报错（抽样也要能发现截断）。
 	if _, err := verifyMigratedTable(target, "legacy", "stock_strength", 6, 2); err == nil {
 		t.Fatal("行数不一致时应报错")
+	}
+}
+
+// 复制完成但**校验失败**时不能删除目标文件：历史上一次 rowid 误判就让
+// 几小时的复制成果被清掉。下次运行应能直接收尾。
+func TestMigrateAnalyticsKeepsTargetWhenVerificationFails(t *testing.T) {
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, "src.db")
+	targetPath := filepath.Join(dir, "dst.db")
+	source, err := Open(sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := []StrengthRow{{TradeDate: 20261009, StrategyID: StrategyTrendGrowth, Code: "600000.SH", Name: "x", TotalScore: 60}}
+	if err := source.SaveStrength(20261009, StrategyTrendGrowth, rows); err != nil {
+		t.Fatal(err)
+	}
+	if err := source.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	verifyTableHook = func(*sql.DB, string, string, int, int) (string, error) {
+		return "", fmt.Errorf("模拟校验失败")
+	}
+	defer func() { verifyTableHook = nil }()
+
+	if _, err := MigrateAnalyticsDatabase(sourcePath, targetPath); err == nil {
+		t.Fatal("校验失败应返回错误")
+	}
+	if _, err := os.Stat(targetPath); err != nil {
+		t.Fatalf("校验失败时不该删除已复制好的目标文件：%v", err)
+	}
+	// 数据确实还在，下次可以直接收尾。
+	raw, err := sql.Open("sqlite", targetPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	var n int
+	if err := raw.QueryRow(`SELECT COUNT(*) FROM stock_strength`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("目标表行数=%d，应为 1", n)
 	}
 }
 

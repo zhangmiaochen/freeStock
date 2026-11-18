@@ -254,6 +254,10 @@ func migrateAnalyticsDatabase(sourcePath, targetPath string, progress func(table
 			progress(table, index+1, len(AnalyticsTables), copied, copied)
 		}
 	}
+	// 数据复制完 = 目标已经可用于"下次收尾"。从这里开始**失败也不删目标**：
+	// 校验失败可能只是一次误报（历史上就出过 rowid 误判），删掉等于几小时白跑。
+	// 下次运行会先走 FinalizeAnalyticsDatabase，按行数判断能不能直接收尾。
+	cleanup = false
 	if progress != nil {
 		progress("索引重建", len(AnalyticsTables), len(AnalyticsTables), 0, -1)
 	}
@@ -261,7 +265,9 @@ func migrateAnalyticsDatabase(sourcePath, targetPath string, progress func(table
 		return report, fmt.Errorf("重建分析索引失败：%w", err)
 	}
 	// 逐表校验。大表不再整表 quick_check（4.9GB 全扫在 NAS 上要几十分钟且
-	// 没有任何进度），改用行数 + rowid 边界校验；阈值见 verifyMigratedTable。
+	// 没有任何进度），改用行数 + 首尾行校验；阈值见 verifyMigratedTable。
+	// 这里的失败**不会删除目标**（cleanup 已置 false）：下次运行先按行数判断
+	// 能否直接收尾，避免一次误报就重搬几小时。
 	for index, table := range AnalyticsTables {
 		if progress != nil {
 			progress("检查 "+table, index, len(AnalyticsTables), 0, -1)
@@ -271,7 +277,7 @@ func migrateAnalyticsDatabase(sourcePath, targetPath string, progress func(table
 			return report, err
 		}
 		if mode == "sampled" {
-			slog.Info("大表跳过整表 quick_check，已做行数+rowid 边界校验",
+			slog.Info("大表跳过整表 quick_check，已做行数+首尾行校验",
 				"table", table, "rows", report.Tables[table],
 				"hint", "需要全量校验可设 FREESTOCK_MIGRATION_FULL_VERIFY=1")
 		}
@@ -280,9 +286,6 @@ func migrateAnalyticsDatabase(sourcePath, targetPath string, progress func(table
 		}
 	}
 	report.QuickCheck = "ok"
-	// 迁移后核心库外键无法跨文件验证；检查分析库内部结构并记录跨库引用
-	// 由应用层维护，避免误把 787 当成数据损坏。
-	cleanup = false
 	return report, nil
 }
 

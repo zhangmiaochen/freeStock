@@ -28,6 +28,10 @@ func fullVerifyEnabled() bool {
 	return false
 }
 
+// verifyTableHook 是包内接缝：测试用它模拟"复制成功但校验失败"，
+// 验证迁移不会把已经复制好的目标文件删掉。
+var verifyTableHook func(raw *sql.DB, srcAlias, table string, wantCount, limit int) (string, error)
+
 // verifyMigratedTable 校验一张已复制完的表。
 //
 //   - 行数不超过 limit（或强制全量）→ `PRAGMA main.quick_check(table)`；
@@ -45,6 +49,9 @@ func fullVerifyEnabled() bool {
 //
 // 返回 "full"/"sampled" 便于日志说明到底做了哪种检查。
 func verifyMigratedTable(raw *sql.DB, srcAlias, table string, wantCount int, limit int) (string, error) {
+	if verifyTableHook != nil {
+		return verifyTableHook(raw, srcAlias, table, wantCount, limit)
+	}
 	if limit <= 0 {
 		limit = defaultFullQuickCheckRowLimit
 	}
