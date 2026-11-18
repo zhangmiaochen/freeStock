@@ -138,8 +138,32 @@ func quoteIdent(value string) string {
 }
 
 // CoreTableCounts 返回核心表行数，用于迁移前后对比和诊断。
+// ValidateCoreDatabase checks an already-created core target without touching the
+// large legacy source. It is used by resumable UI migration: the original migration
+// already verified source/target counts, and rescanning a multi-GB source here would
+// make a completed core phase look hung.
+func ValidateCoreDatabase(targetPath string) (map[string]int, string, error) {
+	db, err := sql.Open("sqlite", targetPath)
+	if err != nil {
+		return nil, "", err
+	}
+	defer db.Close()
+	counts, err := CoreTableCounts(db)
+	if err != nil {
+		return nil, "", err
+	}
+	var check string
+	if err := db.QueryRow("PRAGMA quick_check").Scan(&check); err != nil {
+		return nil, "", err
+	}
+	if check != "ok" {
+		return nil, check, fmt.Errorf("核心目标 quick_check: %s", check)
+	}
+	return counts, check, nil
+}
+
 // ValidateCoreDatabasePair checks source/target core table counts and both quick_check values.
-// It opens existing DBs and performs read-only queries; it never runs schema migration.
+// It is intended for offline/manual validation, not for the resumable UI path.
 func ValidateCoreDatabasePair(sourcePath, targetPath string) (map[string]int, string, error) {
 	source, err := sql.Open("sqlite", sourcePath)
 	if err != nil {

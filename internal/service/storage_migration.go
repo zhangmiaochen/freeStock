@@ -98,7 +98,7 @@ func (s *PortfolioService) MigrateStorage() (StorageMigrationState, error) {
 	coreProgressPath := ""
 	if _, statErr := os.Stat(coreTarget); statErr == nil {
 		// 可复用的核心目标必须是合法库，并且核心表计数匹配；否则拒绝覆盖。
-		_, quick, validateErr := portfolio.ValidateCoreDatabasePair(sourcePath, coreTarget)
+		_, quick, validateErr := portfolio.ValidateCoreDatabase(coreTarget)
 		if validateErr != nil {
 			err = fmt.Errorf("已有核心目标校验失败：%w；请先备份后移走该目标", validateErr)
 		} else {
