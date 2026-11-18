@@ -891,6 +891,10 @@ func (s *Store) migrateMode(mode schemaMode) error {
 		if _, err := s.db.Exec(moneySchema); err != nil {
 			return fmt.Errorf("建资金表失败：%w", err)
 		}
+		// 跨库清理的墓碑表：见 DeleteWithTombstone 的注释。
+		if _, err := s.db.Exec(deletedPortfolioSchema); err != nil {
+			return fmt.Errorf("建待清理登记表失败：%w", err)
+		}
 	}
 	if mode == schemaCoreOnly {
 		return nil

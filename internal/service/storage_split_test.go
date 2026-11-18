@@ -290,6 +290,14 @@ func TestSplitStoresKeepBacktestResultsReadable(t *testing.T) {
 	if leftover != 0 {
 		t.Fatal("删除组合后分析库快照成了孤儿")
 	}
+	// 清理成功的删除不该留下墓碑。
+	pending, err := coreStore.ListDeletedPortfolios()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("清理成功后墓碑应被清除，仍剩 %v", pending)
+	}
 }
 
 // 迁移后的写入路径同样要在正确的库上：组合/持仓/资金进核心库，
@@ -420,6 +428,88 @@ func TestMigratedFeatureReadPaths(t *testing.T) {
 
 	// 启动维护：迁移后不能因为 schema 不对而报错（只允许日志告警）
 	svc.MaintainDatabase()
+}
+
+// 删除组合时若跨库清理失败（崩溃/占用），墓碑必须留下；下次启动的
+// RetryPendingCleanup 要能补完并清掉墓碑 —— 不依赖"一次删成功"。
+func TestRetryPendingCleanupClearsLeftovers(t *testing.T) {
+	dir := t.TempDir()
+	legacy := filepath.Join(dir, "portfolio.db")
+	item := buildLegacyFixture(t, legacy, 50)
+	t.Setenv("FREESTOCK_PORTFOLIO_DB_PATH", legacy)
+	t.Setenv("FREESTOCK_PORTFOLIO_CORE_DB_PATH", "")
+	t.Setenv("FREESTOCK_ANALYTICS_DB_PATH", "")
+	t.Setenv("FREESTOCK_BACKTEST_DB_PATH", "")
+
+	svc := &PortfolioService{}
+	defer svc.Close()
+	if _, err := svc.MigrateStorage(); err != nil {
+		t.Fatalf("迁移失败：%v", err)
+	}
+
+	// 造一个"已删组合"的现场：组合已从核心库消失、墓碑还在、
+	// 回测库与分析库里仍留着它（模拟上次清理失败）。
+	coreStore, err := svc.db()
+	if err != nil {
+		t.Fatal(err)
+	}
+	gone, err := svc.CreatePortfolio(portfolio.PortfolioInput{
+		Name: "待清理", Type: portfolio.TypeManual, StrategyID: portfolio.StrategyTrendGrowth,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	backtestStore, err := svc.backtestDB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backtestStore.DB().Exec(`INSERT INTO portfolio_backtest_run(run_id, portfolio_id, strategy_id, start_date, end_date, created_at, updated_at) VALUES ('run_leftover', ?, 'trend_growth', '20260101', '20260131', 't', 't')`, gone.ID); err != nil {
+		t.Fatal(err)
+	}
+	analyticsStore, err := svc.analyticsDB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := analyticsStore.DB().Exec(`INSERT INTO portfolio_score_snapshot(portfolio_id, trade_date, created_at, updated_at) VALUES (?, '20261009', 't', 't')`, gone.ID); err != nil {
+		t.Fatal(err)
+	}
+	// 手动做"删组合 + 留墓碑"，但不做外部清理。
+	if _, err := coreStore.DB().Exec(`DELETE FROM portfolio WHERE portfolio_id=?`, gone.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coreStore.DB().Exec(`INSERT OR REPLACE INTO portfolio_deleted(portfolio_id, deleted_at) VALUES (?, 't')`, gone.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	svc.RetryPendingCleanup()
+
+	var n int
+	if err := backtestStore.DB().QueryRow(`SELECT COUNT(*) FROM portfolio_backtest_run WHERE portfolio_id=?`, gone.ID).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("重试后回测库仍有 %d 条孤儿", n)
+	}
+	if err := analyticsStore.DB().QueryRow(`SELECT COUNT(*) FROM portfolio_score_snapshot WHERE portfolio_id=?`, gone.ID).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("重试后分析库仍有 %d 条孤儿快照", n)
+	}
+	pending, err := coreStore.ListDeletedPortfolios()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("清理完成后墓碑应被清除，仍剩 %v", pending)
+	}
+	// 其它组合的数据不能被波及。
+	if err := backtestStore.DB().QueryRow(`SELECT COUNT(*) FROM portfolio_backtest_run WHERE portfolio_id=?`, item.ID).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("误删了其它组合的回测（剩余 %d）", n)
+	}
 }
 
 // 老版本已经"迁移成功"，但那时没有回测库（回测表还在旧库）。升级后再次点击
@@ -587,9 +677,10 @@ func TestMigratedDatabasesOwnDisjointTables(t *testing.T) {
 	}
 
 	coreTables := listUserTables(t, core)
+	// `portfolio_deleted` 是核心库自己的"跨库清理墓碑"，属于核心库记账数据。
 	wantCore := map[string]bool{
 		"portfolio": true, "portfolio_position": true, "portfolio_position_txn": true,
-		"position_shares": true, "portfolio_money": true,
+		"position_shares": true, "portfolio_money": true, "portfolio_deleted": true,
 	}
 	analyticsTables := listUserTables(t, analytics)
 	wantAnalytics := map[string]bool{}

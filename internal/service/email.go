@@ -204,6 +204,8 @@ func (s *PortfolioService) ServiceStartup(context.Context, application.ServiceOp
 	// 启动时做一次数据库维护（体检、必要时压缩、可选的评分清理）。
 	// 后台执行：它可能跑几十秒（4.9GB 库的 VACUUM），绝不能挡启动。
 	goSafe("dbMaintain", s.MaintainDatabase)
+	// 上次删除组合时若跨库清理没做完（进程被杀/文件被占用），这里补上。
+	goSafe("orphanCleanup", s.RetryPendingCleanup)
 
 	prefs := s.emailPrefs()
 	if prefs.Enabled {

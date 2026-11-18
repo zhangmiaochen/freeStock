@@ -582,38 +582,93 @@ func (s *PortfolioService) UpdatePortfolio(id string, in portfolio.PortfolioInpu
 	return &item, nil
 }
 
-// DeletePortfolio 删除组合（持仓与流水级联清理）。
+// DeletePortfolio 删除组合。
+//
+// 持仓/流水/资金靠核心库内部的外键级联清掉；回测结果与四张快照在**另外两个
+// 文件**里，SQLite 外键不跨文件。所以这里用"墓碑 + 重试"保证最终一致：
+//  1. 核心库事务里删组合并写 `portfolio_deleted` 墓碑；
+//  2. 清理回测库与分析库；
+//  3. 两处都清干净才删墓碑，否则留给启动时的 RetryPendingCleanup 继续。
+//
+// 这样即使清理中途进程被杀、或文件被占用，也不会永久留下孤儿记录。
 func (s *PortfolioService) DeletePortfolio(id string) error {
 	store, err := s.db()
 	if err != nil {
 		return err
 	}
-	if err := store.Delete(id); err != nil {
+	if err := store.DeleteWithTombstone(id); err != nil {
 		return err
 	}
-	// 拆分存储后外键级联不跨文件：旧库里的回测结果、分析库里的四张快照
-	// 仍带着这个 portfolio_id。不清理就是孤儿数据（回测页仍会列出已删组合的回测）。
-	// 清理是 best-effort：删组合本身已经成功，不能因为清理失败而回滚。
+	if s.cleanupDeletedPortfolio(id) {
+		if err := store.ClearDeletedPortfolio(id); err != nil {
+			slog.Warn("清除待清理登记失败（下次启动会重试）", "id", id, "err", err)
+		}
+	} else {
+		slog.Warn("组合已删除，但跨库清理未完成；已登记，下次启动自动重试", "id", id)
+	}
+	slog.Info("组合已删除", "id", id)
+	return nil
+}
+
+// cleanupDeletedPortfolio 清掉已删组合在回测库/分析库里的残留；
+// 返回 true 表示两处都已清理成功（可以删墓碑）。
+func (s *PortfolioService) cleanupDeletedPortfolio(id string) bool {
+	ok := true
 	if backtest, backtestErr := s.backtestDB(); backtestErr == nil {
 		if n, cleanupErr := backtest.DeleteBacktestRunsByPortfolio(id); cleanupErr != nil {
-			slog.Warn("删除组合后清理回测库失败（回测页可能出现孤儿记录）", "id", id, "err", cleanupErr)
+			slog.Warn("清理回测库失败（会重试）", "id", id, "err", cleanupErr)
+			ok = false
 		} else if n > 0 {
 			slog.Info("已清理该组合的回测记录", "id", id, "runs", n)
 		}
 	} else {
-		slog.Warn("删除组合后无法打开回测库清理记录", "id", id, "err", backtestErr)
+		slog.Warn("无法打开回测库清理记录（会重试）", "id", id, "err", backtestErr)
+		ok = false
 	}
 	if analytics, analyticsErr := s.analyticsDB(); analyticsErr == nil {
 		if n, cleanupErr := analytics.DeleteSnapshotsByPortfolio(id); cleanupErr != nil {
-			slog.Warn("删除组合后清理分析库快照失败（会留下孤儿快照）", "id", id, "err", cleanupErr)
+			slog.Warn("清理分析库快照失败（会重试）", "id", id, "err", cleanupErr)
+			ok = false
 		} else if n > 0 {
 			slog.Info("已清理该组合的分析库快照", "id", id, "rows", n)
 		}
 	} else {
-		slog.Warn("删除组合后无法打开分析库清理快照", "id", id, "err", analyticsErr)
+		slog.Warn("无法打开分析库清理快照（会重试）", "id", id, "err", analyticsErr)
+		ok = false
 	}
-	slog.Info("组合已删除", "id", id)
-	return nil
+	return ok
+}
+
+// RetryPendingCleanup 重试所有"已删除但跨库清理未完成"的组合。
+//
+// 启动时在后台跑一次：把上次崩溃/失败留下的孤儿数据清干净。
+// 墓碑数量通常为 0，代价可以忽略。
+func (s *PortfolioService) RetryPendingCleanup() {
+	store, err := s.db()
+	if err != nil {
+		return
+	}
+	pending, err := store.ListDeletedPortfolios()
+	if err != nil {
+		slog.Warn("读取待清理组合失败", "err", err)
+		return
+	}
+	if len(pending) == 0 {
+		return
+	}
+	slog.Info("开始重试跨库清理", "pending", len(pending))
+	cleared := 0
+	for _, id := range pending {
+		if !s.cleanupDeletedPortfolio(id) {
+			continue
+		}
+		if err := store.ClearDeletedPortfolio(id); err != nil {
+			slog.Warn("清除待清理登记失败", "id", id, "err", err)
+			continue
+		}
+		cleared++
+	}
+	slog.Info("跨库清理重试结束", "pending", len(pending), "cleared", cleared)
 }
 
 // GetPortfolioDetail 返回组合详情：持仓（含现价与盈亏）、流水、汇总。

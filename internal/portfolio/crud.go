@@ -370,6 +370,71 @@ func (s *Store) Delete(id string) error {
 	return nil
 }
 
+// deletedPortfolioSchema 记录"已删除但跨库清理还没完成"的组合。
+//
+// 拆分存储之后，组合在核心库，而回测结果/快照在另外两个文件里 —— SQLite 的
+// 外键级联**不会跨文件**。删组合时若清理那两处失败（进程被杀、文件被占用、
+// 介质只读），就会永久留下孤儿记录。
+//
+// 做法：删组合与写墓碑在**同一个核心库事务**里完成，然后清理两个外部库；
+// 只有两处都清干净才删墓碑。启动时重试剩下的墓碑 —— 崩溃/失败都能自愈，
+// 不依赖"每一次删除都顺利走完"。
+const deletedPortfolioSchema = `
+CREATE TABLE IF NOT EXISTS portfolio_deleted (
+  portfolio_id TEXT PRIMARY KEY,
+  deleted_at   TEXT NOT NULL
+);
+`
+
+// DeleteWithTombstone 在一个事务里删除组合并登记墓碑。
+func (s *Store) DeleteWithTombstone(id string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("删除组合失败：%w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	res, err := tx.Exec(`DELETE FROM portfolio WHERE portfolio_id=?`, id)
+	if err != nil {
+		return fmt.Errorf("删除组合失败：%w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("组合 %s 不存在", id)
+	}
+	if _, err := tx.Exec(`INSERT OR REPLACE INTO portfolio_deleted(portfolio_id, deleted_at) VALUES (?, ?)`,
+		id, nowText()); err != nil {
+		return fmt.Errorf("登记待清理组合失败：%w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("提交删除组合失败：%w", err)
+	}
+	return nil
+}
+
+// ListDeletedPortfolios 返回还没清理完外部数据的已删组合。
+func (s *Store) ListDeletedPortfolios() ([]string, error) {
+	rows, err := s.db.Query(`SELECT portfolio_id FROM portfolio_deleted ORDER BY deleted_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+// ClearDeletedPortfolio 在外部数据清理完成后移除墓碑。
+func (s *Store) ClearDeletedPortfolio(id string) error {
+	_, err := s.db.Exec(`DELETE FROM portfolio_deleted WHERE portfolio_id=?`, id)
+	return err
+}
+
 // Get 读取单个组合（含运行时汇总）。
 func (s *Store) Get(id string) (Portfolio, error) {
 	row := s.db.QueryRow(portfolioSelect+` WHERE p.portfolio_id=?`, id)
