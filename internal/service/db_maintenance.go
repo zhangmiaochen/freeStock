@@ -159,8 +159,15 @@ func (s *PortfolioService) MaintainDatabase() {
 	// 之后任何查 stock_strength 的语句都退化成全表扫描，用户库 4.9GB、
 	// 7.9MB/s 读速下就是十分钟卡顿（实测栈里 pread 卡 12 分钟）。
 	// 这里是幂等的 CREATE INDEX IF NOT EXISTS，代价小于一次查询。
+	//
+	// ⚠ 评分表在**分析库**里：切到 core-only 核心库后这里必须去分析库建索引，
+	// 否则每次启动都会对核心库报 no such table（噪声日志 + 索引始终缺着）。
+	strengthStore := store
+	if analytics, err := s.analyticsDB(); err == nil {
+		strengthStore = analytics
+	}
 	beganIdx := time.Now()
-	if err := store.EnsureStrengthLookupIndex(); err != nil {
+	if err := strengthStore.EnsureStrengthLookupIndex(); err != nil {
 		slog.Warn("确保评分查询索引失败（查询可能变慢）", "err", err)
 	} else {
 		slog.Info("评分查询索引已确认存在",
@@ -202,7 +209,8 @@ func (s *PortfolioService) pruneOldScores(retentionDays int) {
 	if retentionDays <= 0 {
 		return
 	}
-	store, err := s.db()
+	// 评分表在分析库（或未拆分时的旧单库）；不能对 core-only 核心库执行 DELETE。
+	store, err := s.analyticsDB()
 	if err != nil {
 		return
 	}

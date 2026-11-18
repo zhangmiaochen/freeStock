@@ -49,6 +49,15 @@ async function migrateStorage() {
 
 const isOK = computed(() => status.value?.ok === true);
 const hasStatus = computed(() => status.value !== null);
+const phaseLabel = computed(() => {
+  switch (migration.value?.phase) {
+    case "core": return "核心库复制";
+    case "core-verify": return "核心库校验";
+    case "analytics": return "分析库复制";
+    case "analytics-finalize": return "分析库收尾（索引/完整性）";
+    default: return "准备";
+  }
+});
 
 async function loadSources() {
   try {
@@ -327,7 +336,10 @@ function kindLabel(kind: string) {
           上次迁移失败：{{ migration.error }}
         </p>
         <p v-if="migration?.status === 'running'" class="text-muted-foreground mt-2 text-xs">
-          阶段：{{ migration.phase === 'core' ? '核心库' : migration.phase === 'core-verify' ? '核心库校验' : migration.phase === 'analytics' ? '分析库' : migration.phase === 'analytics-finalize' ? '分析库收尾' : '准备' }}；正在处理：{{ migration.currentTable || '校验/准备目标库' }}（{{ migration.tablesDone || 0 }}/{{ migration.tablesTotal || 10 }} 张表，{{ migration.rowsDone || 0 }}{{ (migration.rowsTotal ?? 0) > 0 ? `/${migration.rowsTotal}` : ' 行已处理（总数边读边统计）' }}）
+          阶段：{{ phaseLabel }}；正在处理：{{ migration.currentTable || '校验/准备目标库' }}（{{ migration.tablesDone || 0 }}/{{ migration.tablesTotal || 0 }} 张表，{{ migration.rowsDone || 0 }}{{ (migration.rowsTotal ?? 0) > 0 ? `/${migration.rowsTotal}` : ' 行已处理（总数边读边统计）' }}）
+        </p>
+        <p v-if="migration?.archived" class="text-muted-foreground mt-1 text-xs break-all">
+          上次遗留的目标文件已改名归档（不删数据）：{{ migration.archived }}
         </p>
         <p v-if="migrationError" class="text-destructive mt-2 text-xs">{{ migrationError }}</p>
         <div class="mt-3 flex items-center gap-2">

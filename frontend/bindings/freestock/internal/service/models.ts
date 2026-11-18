@@ -5935,6 +5935,11 @@ export class StorageMigrationState {
     "rowsDone"?: number;
     "rowsTotal"?: number;
 
+    /**
+     * Archived 记录本次迁移归档了哪些上次遗留的目标文件（改名为 *.stale-*）。
+     */
+    "archived"?: string;
+
     /** Creates a new StorageMigrationState instance. */
     constructor($$source: Partial<StorageMigrationState> = {}) {
         if (!("status" in $$source)) {

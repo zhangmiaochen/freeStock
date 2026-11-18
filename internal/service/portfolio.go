@@ -203,7 +203,6 @@ func (s *PortfolioService) dbPath() string {
 	return portfolio.DefaultPath(configPath)
 }
 
-// analyticsDB 返回可选独立分析库；未配置时返回核心/旧库，保持旧调用链兼容。
 // legacyDB 打开旧完整库，供尚未迁移的回测/分析调用兼容读取。
 func (s *PortfolioService) legacyDB() (*portfolio.Store, error) {
 	path := s.legacyDBPath()
@@ -226,6 +225,19 @@ func (s *PortfolioService) legacyDB() (*portfolio.Store, error) {
 	return store, nil
 }
 
+// analyticsConfigured 报告是否存在**独立分析库**（显式 env 或迁移成功）。
+//
+// 只在"确实另有分析库文件"时才把分析读写切过去；未配置时继续用旧单库，
+// 保证 Windows/NAS 旧部署和测试里 &PortfolioService{} 的行为不变。
+func (s *PortfolioService) analyticsConfigured() bool {
+	if strings.TrimSpace(os.Getenv("FREESTOCK_ANALYTICS_DB_PATH")) != "" {
+		return true
+	}
+	state := s.migrationState()
+	return state.Status == "succeeded" && state.AnalyticsPath != ""
+}
+
+// analyticsDB 返回可选独立分析库；未配置时返回核心/旧库，保持旧调用链兼容。
 func (s *PortfolioService) analyticsDB() (*portfolio.Store, error) {
 	path := strings.TrimSpace(os.Getenv("FREESTOCK_ANALYTICS_DB_PATH"))
 	if path == "" {
@@ -578,9 +590,15 @@ func (s *PortfolioService) AddPosition(portfolioID string, in portfolio.Position
 	if in.EntryDate == "" {
 		filled := false
 		// ① 全表最新评分日（原版 `_get_latest_strength_trade_date()`）
-		if date, err := store.LatestStrengthDateAny(); err == nil && date > 0 {
-			in.EntryDate = fmt.Sprintf("%d", date)
-			filled = true
+		//
+		// ⚠ 评分表在分析库里（核心库是 core-only schema），**不能**用持仓所在的
+		// core store 去查：那会报 no such table 并静默回落到行情日，
+		// 让 entry_date 与原版差出几天（持有交易日数/120日窗口起点都会偏）。
+		if analytics, err := s.analyticsDB(); err == nil {
+			if date, err := analytics.LatestStrengthDateAny(); err == nil && date > 0 {
+				in.EntryDate = fmt.Sprintf("%d", date)
+				filled = true
+			}
 		}
 		// ③ 行情最新交易日（原版 `pro.get_latest_daily_trade_date()`）
 		if !filled && s.stock != nil {

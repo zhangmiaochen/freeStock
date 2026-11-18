@@ -763,17 +763,27 @@ func (s *PortfolioService) buildCandidatePoolFrom(
 	// ---- ①.5 信号 attach（原实现 :2469，在广度统计之前）----
 	//
 	// `scoped` 本身就是 `[]score.Row`，不再有"转回 StrengthRow 再转回来"的往返。
+	//
+	// 信号源的选择必须与"评分行来自哪个库"一致：
+	//   - 配置了独立分析库（env 或迁移成功）→ 信号也在分析库；
+	//   - 否则用调用方传进来的 stored（旧单库，信号与评分同库）；
+	//   - stored == nil 表示**行上已经带了信号**（回测按区间预贴一次），
+	//     不能再从别的库重复贴，否则会用空信号覆盖已有字段。
 	scopedRows := scoped
 	scopedDates := make([]int64, 0, len(scopedRows))
 	for _, row := range scopedRows {
 		scopedDates = append(scopedDates, row.TradeDate)
 	}
-	if signalStore, signalErr := s.analyticsDB(); signalErr == nil {
+	signalStore := stored
+	if s.analyticsConfigured() {
+		if analytics, analyticsErr := s.analyticsDB(); analyticsErr == nil {
+			signalStore = analytics
+		} else {
+			slog.Warn("打开信号分析库失败，候选池按无信号处理", "err", analyticsErr)
+		}
+	}
+	if signalStore != nil {
 		scopedRows = s.attachSignalsToRows(signalStore, scopedRows, scopedDates)
-	} else {
-		// 信号历史是可选增强；分析库不可用时维持原语义（无信号字段），
-		// 不应让候选池/组合建议整体失败。
-		slog.Warn("打开信号分析库失败，候选池按无信号处理", "err", signalErr)
 	}
 
 	// 广度闸门用的是**贴完信号之后**的帧（见函数注释）

@@ -9,10 +9,15 @@ import (
 )
 
 // AnalyticsTables 是从旧组合库迁移到分析库的派生/历史表集合。
+//
+// ⚠ **不含回测三张表**（portfolio_backtest_run/daily/trade）。它们带
+// `portfolio_id` 外键，而分析库里没有核心组合表 → 复制时必然撞 787；
+// 而且回测结果目前仍由旧完整库读写（尚未拆出独立 BacktestStore），
+// 复制到分析库会立刻变成"两份数据、新结果只落一边"的分叉。
+// 回测表留在旧库，等独立回测库那一步再整体搬。
 var AnalyticsTables = []string{
 	"stock_strength", "market_state", "signal_history",
 	"portfolio_score_snapshot", "portfolio_candidate_snapshot", "rotation_signal", "hold_compare",
-	"portfolio_backtest_run", "portfolio_backtest_daily", "portfolio_backtest_trade",
 }
 
 // AnalyticsMigrationReport 是分析库迁移校验结果。
@@ -34,13 +39,10 @@ var analyticsIndexDDL = []string{
 	`CREATE INDEX IF NOT EXISTS idx_cand_snap_date ON portfolio_candidate_snapshot(portfolio_id, trade_date)`,
 	`CREATE INDEX IF NOT EXISTS idx_rot_signal_date ON rotation_signal(portfolio_id, trade_date)`,
 	`CREATE INDEX IF NOT EXISTS idx_hold_compare ON hold_compare(portfolio_id, trade_date)`,
-	`CREATE INDEX IF NOT EXISTS idx_bt_run_portfolio ON portfolio_backtest_run(portfolio_id, created_at)`,
-	`CREATE INDEX IF NOT EXISTS idx_bt_daily_run ON portfolio_backtest_daily(run_id, trade_date)`,
-	`CREATE INDEX IF NOT EXISTS idx_bt_trade_run ON portfolio_backtest_trade(run_id, trade_date)`,
 }
 
 func dropAnalyticsIndexes(db *sql.DB) error {
-	for _, name := range []string{"idx_strength_lookup", "idx_signal_history_date", "idx_signal_history_code", "idx_score_snap_date", "idx_cand_snap_date", "idx_rot_signal_date", "idx_hold_compare", "idx_bt_run_portfolio", "idx_bt_daily_run", "idx_bt_trade_run"} {
+	for _, name := range []string{"idx_strength_lookup", "idx_signal_history_date", "idx_signal_history_code", "idx_score_snap_date", "idx_cand_snap_date", "idx_rot_signal_date", "idx_hold_compare"} {
 		if _, err := db.Exec("DROP INDEX IF EXISTS " + quoteIdent(name)); err != nil {
 			return fmt.Errorf("删除分析索引 %s 失败：%w", name, err)
 		}
