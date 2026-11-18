@@ -148,7 +148,17 @@ func (s *PortfolioService) db() (*portfolio.Store, error) {
 	}
 
 	path := s.dbPath()
-	store, err := portfolio.Open(path)
+	// ⚠ 迁移后打开的是 core-only 核心库，必须用 OpenCore。
+	// 用 Open(path)（完整兼容 schema）会**把空的分析/回测表重新建进核心库**，
+	// 于是"表不存在"这种本该立刻暴露的错误，变成"表存在但永远为空"的静默错误
+	// （例如 LatestStrengthDateAny 返回 0、pruneOldScores 什么都不删）。
+	var store *portfolio.Store
+	var err error
+	if s.coreIsDedicated(path) {
+		store, err = portfolio.OpenCore(path)
+	} else {
+		store, err = portfolio.Open(path)
+	}
 	if err != nil {
 		s.openErr = fmt.Errorf("打开组合库失败（%s）：%w", path, err)
 		// ⚠ **把句柄数一并记下来**。
@@ -201,6 +211,18 @@ func (s *PortfolioService) dbPath() string {
 		return ""
 	}
 	return portfolio.DefaultPath(configPath)
+}
+
+// coreIsDedicated 判断 path 是否就是迁移出来的"只有核心表"的库。
+//
+// 只有这种库才用 OpenCore；旧单库（迁移源）必须用完整 schema 打开，
+// 否则运行期会以为分析表不存在（其实只是没打开对 schema）。
+func (s *PortfolioService) coreIsDedicated(path string) bool {
+	state := s.migrationState()
+	if state.CoreQuick != "ok" || state.CorePath == "" || path == "" {
+		return false
+	}
+	return filepath.Clean(state.CorePath) == filepath.Clean(path)
 }
 
 // legacyDB 打开旧完整库，供尚未迁移的回测/分析调用兼容读取。

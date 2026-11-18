@@ -105,7 +105,17 @@ func (s *PortfolioService) CreateBacktest(req BacktestRequest) (runResult *Backt
 			err = logged
 		}
 	}()
-	store, err := s.legacyDB()
+	// 三个库的分工必须严格：
+	//   core      —— 组合元数据（迁移后新建的组合只存在这里）；
+	//   analytics —— 评分 + 市场状态（signal_generate 等新写入落这里）；
+	//   legacy    —— 回测三张表（尚未拆分，读写都在旧库）。
+	// 混用会直接改变回测结果：用旧库取组合会找不到新组合，
+	// 用旧库取 market_state 会拿到迁移前的过期状态（牛熊判断错→计划错）。
+	coreStore, err := s.db()
+	if err != nil {
+		return nil, err
+	}
+	legacyStore, err := s.legacyDB()
 	if err != nil {
 		return nil, err
 	}
@@ -113,7 +123,7 @@ func (s *PortfolioService) CreateBacktest(req BacktestRequest) (runResult *Backt
 	if err != nil {
 		return nil, err
 	}
-	item, err := store.Get(req.PortfolioID)
+	item, err := coreStore.Get(req.PortfolioID)
 	if err != nil {
 		return nil, err
 	}
@@ -142,7 +152,7 @@ func (s *PortfolioService) CreateBacktest(req BacktestRequest) (runResult *Backt
 	loadStrengthElapsed := time.Since(phaseBegan)
 
 	phaseBegan = time.Now()
-	days, codes, scopeErrors, readyByDate := s.buildStrengthDays(store, strengths, item)
+	days, codes, scopeErrors, readyByDate := s.buildStrengthDays(analytics, strengths, item)
 	if len(days) == 0 {
 		return nil, fmt.Errorf("回测区间内没有可用的评分交易日")
 	}
@@ -186,7 +196,7 @@ func (s *PortfolioService) CreateBacktest(req BacktestRequest) (runResult *Backt
 	// 一次取整个区间的候选 + 日历，**按 20 天分块**贴（分块而不是整段摊平、
 	// 也不是逐日，理由见 `attachSignalsToDays` 的注释）。
 	attachBegan := time.Now()
-	days = s.attachSignalsToDays(store, days)
+	days = s.attachSignalsToDays(analytics, days)
 	attachedRows := 0
 	for _, day := range days {
 		attachedRows += len(day.Rows)
@@ -295,7 +305,7 @@ func (s *PortfolioService) CreateBacktest(req BacktestRequest) (runResult *Backt
 			indexGates = s.stock.lowBuyIndexGatesForRange(dates)
 		}
 	}
-	buildPlan := s.backtestPlanBuilder(item, store, marketStateByDate(store, days), targetCount, maxStocks, indexGates, readyByDate)
+	buildPlan := s.backtestPlanBuilder(item, analytics, marketStateByDate(analytics, days), targetCount, maxStocks, indexGates, readyByDate)
 
 	// ★ 缠论辅助（可选）：在计划生成之后、引擎执行之前叠加。
 	//
@@ -420,7 +430,7 @@ func (s *PortfolioService) CreateBacktest(req BacktestRequest) (runResult *Backt
 
 	// ⑤ 落库
 	runID := portfolio.NewBacktestRunID()
-	if err := s.persistBacktest(store, runID, item, cfg, benchmarkCode, result, metrics); err != nil {
+	if err := s.persistBacktest(legacyStore, runID, item, cfg, benchmarkCode, result, metrics); err != nil {
 		return nil, err
 	}
 

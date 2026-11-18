@@ -38,8 +38,14 @@ async function loadMigration() {
   try { migration.value = await api.portfolio.getStorageMigrationState(); } catch (err) { migrationError.value = errorMessage(err); }
 }
 
+// 迁移跑在后端进程里，刷新/切页都不会中止它。页面回来后：
+//   - 状态仍是 running → 继续轮询显示进度，按钮保持禁用；
+//   - 状态已是 succeeded → 直接显示完成，不需要再点。
+const migrationRunning = computed(() => migrationBusy.value || migration.value?.status === "running");
+
 async function migrateStorage() {
-  if (migration.value?.status === "succeeded" || migrationBusy.value) return;
+  // 后端已在跑时不重复发起（后端也会拒绝，这里先拦住避免一次无用的报错）。
+  if (migration.value?.status === "succeeded" || migrationRunning.value) return;
   migrationBusy.value = true;
   migrationError.value = "";
   try { migration.value = await api.portfolio.migrateStorage(); }
@@ -343,10 +349,10 @@ function kindLabel(kind: string) {
         </p>
         <p v-if="migrationError" class="text-destructive mt-2 text-xs">{{ migrationError }}</p>
         <div class="mt-3 flex items-center gap-2">
-          <Button size="sm" :disabled="migrationBusy || migration?.status === 'succeeded'" @click="migrateStorage">
-            <LoaderCircle v-if="migrationBusy" class="animate-spin" />
+          <Button size="sm" :disabled="migrationRunning || migration?.status === 'succeeded'" @click="migrateStorage">
+            <LoaderCircle v-if="migrationRunning" class="animate-spin" />
             <Database v-else />
-            {{ migrationBusy ? '迁移中…' : migration?.status === 'failed' ? '重试迁移' : '开始迁移' }}
+            {{ migrationRunning ? '迁移中…' : migration?.status === 'failed' ? '重试迁移' : '开始迁移' }}
           </Button>
         </div>
       </section>

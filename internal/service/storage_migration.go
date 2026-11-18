@@ -75,8 +75,14 @@ func (s *PortfolioService) GetStorageMigrationState() StorageMigrationState {
 }
 
 // MigrateStorage 执行一次核心库+分析库迁移。
+//
+// 迁移跑在后端进程里，**与页面生命周期无关**：切换页面/刷新页面不会中止它；
+// 页面回来只需重新读状态文件即可继续显示进度。若已有迁移在跑，
+// 这里不排队（排队会让第二个请求一直挂到几小时后），直接返回当前状态。
 func (s *PortfolioService) MigrateStorage() (StorageMigrationState, error) {
-	storageMigrationMu.Lock()
+	if !storageMigrationMu.TryLock() {
+		return s.migrationState(), fmt.Errorf("迁移已在进行中，请等待当前任务完成（可刷新页面查看进度）")
+	}
 	defer storageMigrationMu.Unlock()
 
 	state := s.migrationState()
