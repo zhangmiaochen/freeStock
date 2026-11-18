@@ -51,6 +51,46 @@ func TestMigrateStorageRefusesConcurrentCall(t *testing.T) {
 	}
 }
 
+// 迁移不挂在调用方身上：发起后即使页面离开/刷新（等价于没人再等结果），
+// 后端仍会继续推进，状态文件可以被独立轮询到 succeeded。
+func TestMigrationProgressesWithoutCallerWaiting(t *testing.T) {
+	dir := t.TempDir()
+	legacy := filepath.Join(dir, "portfolio.db")
+	buildLegacyFixture(t, legacy, 2000)
+
+	t.Setenv("FREESTOCK_PORTFOLIO_DB_PATH", legacy)
+	t.Setenv("FREESTOCK_PORTFOLIO_CORE_DB_PATH", "")
+	t.Setenv("FREESTOCK_ANALYTICS_DB_PATH", "")
+
+	svc := &PortfolioService{}
+	defer svc.Close()
+
+	// 发起后立刻"放弃等待"。
+	go func() { _, _ = svc.MigrateStorage() }()
+
+	deadline := time.Now().Add(60 * time.Second)
+	sawRunning := false
+	for time.Now().Before(deadline) {
+		state := svc.GetStorageMigrationState()
+		switch state.Status {
+		case "running":
+			sawRunning = true
+		case "succeeded":
+			if !sawRunning {
+				t.Log("迁移太快，未观察到 running 中间态（不影响结论）")
+			}
+			if state.CoreQuick != "ok" || state.AnalyticsQuick != "ok" {
+				t.Fatalf("完成但校验结果缺失：%+v", state)
+			}
+			return
+		case "failed":
+			t.Fatalf("迁移失败：%s", state.Error)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("超时：调用方不再等待后迁移没有继续推进")
+}
+
 // 迁移后三个库各司其职，不能串库：
 //   - 组合（含迁移后新建的）只在核心库；
 //   - 评分/市场状态在分析库；
