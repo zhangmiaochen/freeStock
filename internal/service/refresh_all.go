@@ -113,6 +113,11 @@ func (s *PortfolioService) RefreshBackfillAll(startDate, endDate, limit int, for
 		Strategies: make([]BackfillStrategy, 0, len(ids)),
 	}
 	began := time.Now()
+	// 入口/出口各一行：前端报 "Failed to fetch" 时，这两行能立刻区分
+	//   - 只有"开始"没有"完成" → 进程/连接在计算途中死了（崩溃或被杀）；
+	//   - 两行都有 → 后端算完了，问题在响应回传（代理超时之类）。
+	slog.Info("区间回填（所有活跃策略）开始",
+		"from", startDate, "to", endDate, "strategies", len(ids), "limit", limit, "force", force)
 	for _, id := range ids {
 		// 质量成长不写 stock_strength，跳过（否则会按别的策略口径白算一遍）
 		if !portfolio.StrategyUsesStrength(id) {
