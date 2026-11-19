@@ -122,6 +122,13 @@ func (s *PortfolioService) RefreshBackfill(
 	if len(dates) == 0 {
 		return nil, fmt.Errorf("区间内没有交易日（%d ~ %d）", startDate, endDate)
 	}
+	// 结束日填到未来/暂无数据的日子时**不会报错**：日期列表来自基准指数的实际行情，
+	// 自然截断到最后一个有数据的交易日。这里把"实际到哪天"写进日志，
+	// 免得用户以为区间没生效（或者以为程序漏算）。
+	if effective := dates[len(dates)-1]; effective < endDate {
+		slog.Info("结束日超出已有数据，按最后一个有数据的交易日处理",
+			"requested", endDate, "effective", effective)
+	}
 
 	// 评分范围（股票列表 + 所有组合持仓）由 scoringUniverse 自己读核心库；
 	// 这里不再传 store，避免误把分析库当组合库用。

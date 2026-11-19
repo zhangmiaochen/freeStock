@@ -130,6 +130,15 @@ func (s *PortfolioService) CreateBacktest(req BacktestRequest) (runResult *Backt
 	if req.StartDate <= 0 || req.EndDate <= 0 || req.StartDate > req.EndDate {
 		return nil, fmt.Errorf("回测区间格式错误，应为 YYYYMMDD 且开始日不能晚于结束日")
 	}
+	// 结束日填未来/暂无数据的日子：各阶段都只按"实际有行情的交易日"推进（评分行、
+	// 基准指数、日线都是区间过滤），所以不会报错，只是曲线到最后一个有数据的日子为止。
+	// 这里提前说明一句，避免用户以为区间被忽略。
+	if wantDays, err := s.tradingDates(req.StartDate, req.EndDate); err == nil && len(wantDays) > 0 {
+		if effective := wantDays[len(wantDays)-1]; effective < req.EndDate {
+			slog.Info("回测结束日超出已有数据，按最后一个有数据的交易日处理",
+				"requested", req.EndDate, "effective", effective)
+		}
+	}
 
 	// 质量成长策略不走 stock_strength：它直接从数据湖取 PIT 财报 + 日线现算，
 	// 用独立的计划构建器（权重制，TotalLayers=100）。见 reports/fund_strategy/开发说明_v3.md。
