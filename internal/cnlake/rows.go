@@ -3,6 +3,7 @@ package cnlake
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"log/slog"
@@ -1348,13 +1349,16 @@ func (l *Lake) barPartitionDirs() []barPartitionDir {
 // latestDateFromPartitions 求"实际有行情数据的最新交易日"。
 //
 // 真实数据湖常常是**混合布局**：历史按天分区（trade_date=2020-01-04），
-// 而 cne 的日更先写当月分区（trade_date=2026-11）。所以：
+// 而 cne 的日更先写当期分区（trade_date=2026-11）。所以：
 //
 //  1. 按天分区的名字直接给出日期，零成本；
-//  2. 只有"可能比它更新"的粗分区（按月/按年）才需要读内容求最大日期，
-//     通常只有 1 个（当前月），几千行 → 毫秒级；
-//  3. 既不依赖目录 mtime（cne 会原地重写当月 parquet，mtime 不变），
-//     也不会把整个 daily_bars 扫一遍（几百 MB~GB，NAS 上就是卡 IO）。
+//  2. 只读**最新的 1~2 个粗分区**（按月/按年）—— 当期分区必然包含最新数据，
+//     读完就停；不读更早的，更不读整个数据集；
+//  3. 判据是文件指纹（名字+大小+mtime）而不是目录 mtime：cne 会原地重写
+//     当期 parquet，目录 mtime 不变，只靠目录会让进程一直答旧日期。
+//
+// 之前那版"按分区名倒序取最新目录"会在混合布局里挑到旧的按天分区；
+// 全量扫描版则会在 NAS 上读几百 MB~GB（正是用户抱怨的卡 IO 和请求超时）。
 func (l *Lake) latestDateFromPartitions() (int64, error) {
 	dirs := l.barPartitionDirs()
 	if len(dirs) == 0 {
@@ -1376,17 +1380,15 @@ func (l *Lake) latestDateFromPartitions() (int64, error) {
 		}
 		coarse = append(coarse, dir)
 	}
+	// 粗分区按名字倒序 = 从新到旧（2026-11 > 2026-10 > 2026）。
+	sort.Slice(coarse, func(i, j int) bool { return coarse[i].name > coarse[j].name })
+	if len(coarse) > 2 {
+		coarse = coarse[:2]
+	}
 
-	// 缓存键 = 最大天分区名 + 相关粗分区文件指纹。
-	// 文件被原地重写时指纹变化 → 立刻重算，不依赖目录 mtime。
 	var key strings.Builder
 	key.WriteString(dayMaxName)
-	relevant := make([]barPartitionDir, 0, len(coarse))
 	for _, dir := range coarse {
-		if !coarsePartitionMayExceed(dir.name, dayBest) {
-			continue
-		}
-		relevant = append(relevant, dir)
 		key.WriteString("|")
 		key.WriteString(dir.name)
 		key.WriteString(":")
@@ -1403,18 +1405,39 @@ func (l *Lake) latestDateFromPartitions() (int64, error) {
 	l.barDatesMu.Unlock()
 
 	best := dayBest
-	for _, dir := range relevant {
-		files := l.parquetFilesIn(dir.path)
-		rows, err := readTyped[BarRow](files, nil)
-		if err != nil {
-			// 分区正在被 cne 写入 → 用已有的（更早的）日期，不要因此让评分失败。
+	for _, dir := range coarse {
+		if !coarsePartitionMayExceed(dir.name, best) {
 			continue
 		}
-		for _, row := range rows {
-			if date := row.Date(); date > best {
+		files := l.parquetFilesIn(dir.path)
+		if len(files) == 0 {
+			continue
+		}
+		// 先用 parquet **footer 里的 min/max 统计**求最大日期：只读文件尾部几 KB，
+		// 不用把当期分区（几万~几百万行）整个读进内存。cne 的落盘都会写这个统计。
+		if date, ok := maxDateFromFooters(files); ok {
+			if date > best {
 				best = date
 			}
+			break
 		}
+		// 统计缺失（少数写入器不写 stats）才退化为读内容。
+		rows, err := readTyped[BarRow](files, nil)
+		if err != nil {
+			// 分区正在被 cne 写入 → 试下一个（更早的）分区。
+			continue
+		}
+		partitionBest := int64(0)
+		for _, row := range rows {
+			if date := row.Date(); date > partitionBest {
+				partitionBest = date
+			}
+		}
+		if partitionBest > best {
+			best = partitionBest
+		}
+		// 当期分区已经处理过：更早的分区不可能更新，停止。
+		break
 	}
 	if best == 0 {
 		return 0, fmt.Errorf("数据湖的 daily_bars 分区里没有可用的行情日期，请确认已同步")
@@ -1447,6 +1470,51 @@ func coarsePartitionMayExceed(name string, best int64) bool {
 		return true
 	}
 	return upper > best
+}
+
+// maxDateFromFooters 只读 parquet footer 的列统计，求 trade_date 的最大值。
+//
+// 代价与文件大小无关（几 KB 元数据），所以月度/年度分区也能瞬间回答
+// "这里最新是哪一天"，不必把整月/整年行情读进内存 —— 在 NAS 上这决定了
+// 评分请求是 50ms 还是几分钟。
+//
+// 返回 ok=false 表示这些文件没写统计（或找不到 trade_date 列），调用方应退化为读内容。
+func maxDateFromFooters(files []string) (int64, bool) {
+	best := int64(0)
+	found := false
+	for _, path := range files {
+		handle, err := openParquet(path)
+		if err != nil {
+			continue
+		}
+		metadata := handle.file.Metadata()
+		for _, group := range metadata.RowGroups {
+			for _, column := range group.Columns {
+				meta := column.MetaData
+				if len(meta.PathInSchema) == 0 {
+					continue
+				}
+				if meta.PathInSchema[len(meta.PathInSchema)-1] != "trade_date" {
+					continue
+				}
+				stats := meta.Statistics
+				raw := stats.MaxValue
+				if len(raw) == 0 {
+					raw = stats.Max
+				}
+				if len(raw) < 4 {
+					continue
+				}
+				days := int32(binary.LittleEndian.Uint32(raw[:4]))
+				if date := daysToDate(days); date > best {
+					best = date
+					found = true
+				}
+			}
+		}
+		_ = handle.Close()
+	}
+	return best, found
 }
 
 // parquetFilesIn 列出目录下的 parquet 文件（升序，保证指纹稳定）。

@@ -215,6 +215,19 @@ func (s *PortfolioService) db() (*portfolio.Store, error) {
 		store, err = portfolio.Open(path)
 	}
 	if err != nil {
+		// 配置的核心库打不开（文件损坏/被占用/指到目录）时**不要直接让功能失败**：
+		// 旧库还在的话回退旧库，至少组合列表、评分、回填都还能用，
+		// 否则用户只会看到"请求失败"，而且不清楚是哪个文件的问题。
+		legacyPath := s.legacyDBPath()
+		if legacyPath != "" && filepath.Clean(legacyPath) != filepath.Clean(path) {
+			slog.Error("打开配置的核心库失败，回退旧库",
+				"configured", path, "legacy", legacyPath, "err", err)
+			if fallback, fbErr := portfolio.Open(legacyPath); fbErr == nil {
+				s.store = fallback
+				slog.Info("组合库就绪（回退旧库）", "path", legacyPath)
+				return fallback, nil
+			}
+		}
 		s.openErr = fmt.Errorf("打开组合库失败（%s）：%w", path, err)
 		// ⚠ **把句柄数一并记下来**。
 		//
@@ -482,6 +495,17 @@ func (s *PortfolioService) analyticsDB() (*portfolio.Store, error) {
 	}
 	store, err := portfolio.OpenAnalytics(path)
 	if err != nil {
+		// 与核心库同理：配置的分析库打不开时回退旧库，别让"刷新评分/回填"整块失败。
+		legacy := s.legacyDBPath()
+		if legacy != "" && filepath.Clean(legacy) != filepath.Clean(path) {
+			slog.Error("打开配置的分析库失败，回退旧库",
+				"configured", path, "legacy", legacy, "err", err)
+			if fallback, fbErr := portfolio.OpenAnalytics(legacy); fbErr == nil {
+				s.analyticsStore = fallback
+				slog.Info("分析库就绪（回退旧库）", "path", legacy)
+				return fallback.Store, nil
+			}
+		}
 		s.analyticsOpenErr = fmt.Errorf("打开分析库失败（%s）：%w", path, err)
 		return nil, s.analyticsOpenErr
 	}
