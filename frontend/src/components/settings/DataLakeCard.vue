@@ -100,7 +100,7 @@ function formatRows(rows: number): string {
       <FolderOpen class="text-muted-foreground size-4 shrink-0" />
       <Input
         v-model="rootInput"
-        class="h-8 min-w-[320px] flex-1 font-mono text-xs"
+        class="h-8 min-w-0 flex-1 font-mono text-xs"
         placeholder="数据湖根目录（包含 curated 的那一级），留空则自动探测"
         @keyup.enter="applyRoot"
       />
@@ -128,28 +128,30 @@ function formatRows(rows: number): string {
       <span class="text-muted-foreground"> — {{ info.detail }}</span>
     </div>
 
-    <!-- 各数据集 -->
-    <div v-if="status.length" class="mt-3 overflow-hidden rounded-md border">
+    <!-- 各数据集：窄屏隐藏"分区"列（次要信息），长数据集名换行，避免挤压/重叠 -->
+    <div v-if="status.length" class="mt-3 overflow-x-auto rounded-md border">
       <table class="w-full text-xs">
         <thead class="bg-muted/40 text-muted-foreground">
           <tr>
             <th class="px-3 py-1.5 text-left font-medium">数据集</th>
             <th class="px-3 py-1.5 text-left font-medium">状态</th>
             <th class="px-3 py-1.5 text-right font-medium">行数</th>
-            <th class="px-3 py-1.5 text-left font-medium">分区</th>
+            <th class="hidden px-3 py-1.5 text-left font-medium sm:table-cell">分区</th>
           </tr>
         </thead>
         <tbody>
           <tr v-for="item in status" :key="item.name" class="border-t">
-            <td class="px-3 py-1.5 font-mono">{{ item.name }}</td>
-            <td class="px-3 py-1.5">
+            <td class="px-3 py-1.5 font-mono break-all">{{ item.name }}</td>
+            <td class="px-3 py-1.5 whitespace-nowrap">
               <span v-if="item.exists" class="text-emerald-500">已入库</span>
               <span v-else class="text-muted-foreground">未入库</span>
             </td>
-            <td class="tabular px-3 py-1.5 text-right">
+            <td class="tabular px-3 py-1.5 text-right whitespace-nowrap">
               {{ item.exists ? formatRows(item.rows) : "—" }}
             </td>
-            <td class="text-muted-foreground px-3 py-1.5">{{ partitionSummary(item) }}</td>
+            <td class="text-muted-foreground hidden px-3 py-1.5 whitespace-nowrap sm:table-cell">
+              {{ partitionSummary(item) }}
+            </td>
           </tr>
         </tbody>
       </table>
@@ -162,10 +164,7 @@ function formatRows(rows: number): string {
       <code>still incomplete after retry</code>。
     </p>
 
-    <p
-      v-if="info?.available && presentDatasets.length"
-      class="text-muted-foreground mt-2 text-[11px]"
-    >
+    <p v-if="info?.available && presentDatasets.length" class="text-muted-foreground mt-2 text-[11px] break-words">
       当前 curated 下已有：{{ presentDatasets.join("、") }}
     </p>
   </section>

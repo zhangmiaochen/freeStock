@@ -198,22 +198,22 @@ function kindLabel(kind: string) {
 
 <template>
   <div class="h-full overflow-auto">
-    <div class="mx-auto max-w-3xl space-y-6 px-6 py-6">
+    <div class="mx-auto max-w-3xl space-y-4 px-3 py-4 sm:space-y-6 sm:px-6 sm:py-6">
       <!-- 当前数据源 -->
-      <section class="bg-card space-y-3 rounded-lg border p-5">
+      <section class="bg-card space-y-3 rounded-lg border p-4 sm:p-5">
         <div class="flex items-center gap-2">
           <Database class="size-4" />
           <h2 class="text-sm font-semibold">当前数据源</h2>
         </div>
         <div v-if="current" class="space-y-2 text-sm">
-          <div class="flex items-center gap-2">
+          <div class="flex flex-wrap items-center gap-2">
             <Badge variant="secondary">{{ kindLabel(current.kind) }}</Badge>
-            <span class="font-medium">{{ current.name }}</span>
+            <span class="font-medium break-words">{{ current.name }}</span>
           </div>
-          <p class="text-muted-foreground font-mono text-xs">{{ current.url }}</p>
+          <p class="text-muted-foreground font-mono text-xs break-all">{{ current.url }}</p>
         </div>
         <p v-else class="text-muted-foreground text-sm">还没有选择数据源。</p>
-        <div class="flex gap-2 pt-1">
+        <div class="flex flex-wrap gap-2 pt-1">
           <Button
             size="sm"
             variant="outline"
@@ -237,12 +237,12 @@ function kindLabel(kind: string) {
           <div
             v-for="source in sources"
             :key="source.key"
-            class="bg-card flex items-center gap-4 rounded-lg border p-4"
+            class="bg-card flex flex-wrap items-start gap-3 rounded-lg border p-4 sm:items-center sm:gap-4"
           >
             <HardDrive v-if="source.kind === 'cnlake'" class="text-muted-foreground size-4 shrink-0" />
             <Server v-else class="text-muted-foreground size-4 shrink-0" />
             <div class="min-w-0 flex-1">
-              <div class="flex items-center gap-2">
+              <div class="flex flex-wrap items-center gap-2">
                 <span class="text-sm font-medium">{{ source.name }}</span>
                 <Badge v-if="source.current" variant="default" class="gap-1">
                   <Check class="size-3" /> 使用中
@@ -251,7 +251,7 @@ function kindLabel(kind: string) {
                   全部数据
                 </Badge>
               </div>
-              <p class="text-muted-foreground truncate font-mono text-xs">
+              <p class="text-muted-foreground font-mono text-xs break-all sm:truncate">
                 {{ source.url || "未找到数据湖" }}
               </p>
               <p v-if="source.kind === 'cnlake'" class="text-muted-foreground mt-0.5 text-[11px]">
@@ -261,6 +261,7 @@ function kindLabel(kind: string) {
             <Button
               size="sm"
               variant="outline"
+              class="basis-full justify-center sm:basis-auto"
               :disabled="busy !== ''"
               @click="useSource(source.kind, source.url)"
             >
@@ -278,11 +279,11 @@ function kindLabel(kind: string) {
       <!-- 自定义 -->
       <section class="space-y-3">
         <h2 class="text-sm font-semibold">自定义地址</h2>
-        <div class="flex gap-2">
+        <div class="flex flex-wrap gap-2">
           <Input
             v-model="customURL"
             placeholder="http://192.168.1.10:7899"
-            class="font-mono text-xs"
+            class="min-w-0 flex-1 basis-full font-mono text-xs sm:basis-0"
           />
           <Button
             size="sm"
@@ -315,7 +316,7 @@ function kindLabel(kind: string) {
             耗时 {{ status.elapsed }}
           </span>
         </div>
-        <p class="text-muted-foreground mt-1 font-mono text-xs">{{ status?.url }}</p>
+        <p class="text-muted-foreground mt-1 font-mono text-xs break-all">{{ status?.url }}</p>
         <p class="mt-1 text-xs">{{ status?.message }}</p>
       </section>
 
@@ -325,7 +326,7 @@ function kindLabel(kind: string) {
       <DataLakeCard />
 
       <section class="bg-card rounded-lg border p-4">
-        <div class="flex items-center gap-2">
+        <div class="flex flex-wrap items-center gap-2">
           <Database class="text-muted-foreground size-4" />
           <h3 class="text-sm font-medium">数据存储迁移</h3>
           <Badge v-if="migration?.status === 'succeeded'" variant="secondary">已完成</Badge>

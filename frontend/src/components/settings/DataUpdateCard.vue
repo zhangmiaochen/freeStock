@@ -532,14 +532,14 @@ onUnmounted(stopPolling);
           </Button>
         </div>
 
-        <div v-if="freshness?.datasets?.length" class="overflow-hidden rounded border text-xs">
-          <div class="bg-muted grid grid-cols-4 gap-2 px-3 py-1.5 font-medium">
+        <div v-if="freshness?.datasets?.length" class="overflow-x-auto rounded border text-xs">
+          <div class="bg-muted grid min-w-[520px] grid-cols-4 gap-2 px-3 py-1.5 font-medium">
             <span>数据集</span><span>最新日期</span><span>最后交易日</span><span>落后</span>
           </div>
           <div
             v-for="d in freshness.datasets"
             :key="d.name"
-            class="grid grid-cols-4 gap-2 border-t px-3 py-1.5"
+            class="grid min-w-[520px] grid-cols-4 gap-2 border-t px-3 py-1.5"
           >
             <span>{{ d.name }}</span>
             <span>{{ d.missing ? '未入库' : fmtDate(d.latestDate) }}</span>
@@ -587,14 +587,14 @@ onUnmounted(stopPolling);
           </Button>
         </div>
 
-        <div v-if="runResult.datasets?.length" class="overflow-hidden rounded border text-xs">
-          <div class="bg-muted grid grid-cols-4 gap-2 px-3 py-1.5 font-medium">
+        <div v-if="runResult.datasets?.length" class="overflow-x-auto rounded border text-xs">
+          <div class="bg-muted grid min-w-[520px] grid-cols-4 gap-2 px-3 py-1.5 font-medium">
             <span>数据集</span><span>状态</span><span>写入行数</span><span>说明</span>
           </div>
           <div
             v-for="d in runResult.datasets"
             :key="d.dataset"
-            class="grid grid-cols-4 gap-2 border-t px-3 py-1.5"
+            class="grid min-w-[520px] grid-cols-4 gap-2 border-t px-3 py-1.5"
           >
             <span>{{ d.dataset }}</span>
             <span
@@ -704,9 +704,9 @@ onUnmounted(stopPolling);
       <!-- 进度：日志尾部 + 解析出的步骤。方案 §8.1 说 cne 会定期打
            "still working: fund_flow 2m50s"，可以直接判断卡住没卡住。 -->
       <div v-if="status?.logPath" class="space-y-2">
-        <div class="text-muted-foreground flex items-center gap-2 text-xs">
+        <div class="text-muted-foreground flex flex-wrap items-center gap-2 text-xs">
           <span>日志</span>
-          <code class="truncate">{{ status.logPath }}</code>
+          <code class="min-w-0 break-all sm:truncate">{{ status.logPath }}</code>
         </div>
         <!-- ⚠ 非交易日跳过行情组是最容易被误解的情形：用户点"更新到今天"、
              看到任务成功，却不知道**行情数据这次根本没碰**（方案 §2.3）。
