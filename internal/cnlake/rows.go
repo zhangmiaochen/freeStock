@@ -1619,6 +1619,23 @@ func (l *Lake) TradeDateAt(before int64) (int64, error) {
 //     （按年分区最多几十个），所以代价可控。
 func (l *Lake) BarPartitionDates() ([]int64, error) {
 	dir := l.DatasetDir("daily_bars")
+
+	// ⚠ 缓存检查必须放在 **ReadDir 之前**：这个函数会被按股票反复调用，
+	// 而 6000+ 个目录的 ReadDir 在 NAS 上要几百毫秒。这里先用一次 stat
+	// （微秒级）比对目录 mtime，未变就直接返回缓存，完全不碰目录内容。
+	dirMod := time.Time{}
+	if info, statErr := os.Stat(dir); statErr == nil {
+		dirMod = info.ModTime()
+	}
+	l.barDatesMu.Lock()
+	if l.barDatesLoaded && len(l.barDates) > 0 && l.barDatesDirMod.Equal(dirMod) {
+		out := make([]int64, len(l.barDates))
+		copy(out, l.barDates)
+		l.barDatesMu.Unlock()
+		return out, nil
+	}
+	l.barDatesMu.Unlock()
+
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, fmt.Errorf("cnlake: 读取 daily_bars 分区失败：%w", err)
@@ -1641,17 +1658,17 @@ func (l *Lake) BarPartitionDates() ([]int64, error) {
 	//
 	// 判据同 DatasetFiles：目录 mtime 变了就重列（stat 微秒级，
 	// 比 ReadDir 2612 个目录便宜得多），再加一道 TTL 兜底。
-	dirMod := time.Time{}
-	if info, statErr := os.Stat(dir); statErr == nil {
-		dirMod = info.ModTime()
-	}
 	l.barDatesMu.Lock()
-	// ⚠ 只有当日期是**从分区名读出来**的时候，目录 mtime 才是充分判据
-	// （新增一天 = 新增一个 trade_date=YYYY-MM-DD 目录）。
-	// 按年/按月分区的退化布局下，日期是从 parquet 内容里读的，
-	// cne 会**原地重写**当前分区文件而目录 mtime 不变 —— 这里若直接返回缓存，
-	// 下面基于文件指纹的失效逻辑根本没机会执行（现象：数据更到 1118，评分还是 1113）。
-	if l.barDatesLoaded && len(l.barDates) > 0 && l.barDatesDirMod.Equal(dirMod) && l.barDatesFromNames {
+	// 判据只用目录 mtime：**新增一天 = 新增一个 trade_date=YYYY-MM-DD 目录**。
+	//
+	// ⚠ 2026-11 的一次改动曾在这里加"文件指纹"来判断 cne 是否原地重写了当期分区，
+	// 结果是：混合布局下（历史按天 + 当期按月）每次指纹变化都要把**整个
+	// daily_bars（几千个 parquet）重读一遍**来重算日期列表。回填/评分期间
+	// `bulkFillAllowed` 会按股票反复调这个函数 —— NAS 上就是几分钟的全盘扫描，
+	// 请求直接超时（前端只看到 "Failed to fetch"）。
+	// "最新交易日"现在由 LatestTradeDate 用 parquet footer 统计回答（毫秒级），
+	// 这里不需要再为"原地重写"负责。
+	if l.barDatesLoaded && len(l.barDates) > 0 && l.barDatesDirMod.Equal(dirMod) {
 		out := make([]int64, len(l.barDates))
 		copy(out, l.barDates)
 		l.barDatesMu.Unlock()
@@ -1684,7 +1701,6 @@ func (l *Lake) BarPartitionDates() ([]int64, error) {
 		l.barDatesMu.Lock()
 		l.barDates = fromNames
 		l.barDatesLoaded = true
-		l.barDatesFromNames = true
 		l.barDatesDirMod = dirMod
 		l.barDatesMu.Unlock()
 		return fromNames, nil
@@ -1712,33 +1728,12 @@ func (l *Lake) ensureDailyBarDates() error {
 	if info, statErr := os.Stat(dir); statErr == nil {
 		dirMod = info.ModTime()
 	}
-
-	// 快路径：目录没变、最近一次核对也在 TTL 内 → 直接用缓存。
-	// 这里只做一次 stat + 一次加锁；指纹要 stat 每个 parquet 文件，
-	// 不能每次调用都算（bulkFillAllowed 会按股票逐只调用）。
 	l.barDatesMu.Lock()
-	loaded := l.barDatesLoaded
-	sameDir := l.barDatesDirMod.Equal(dirMod)
-	recent := !l.barDatesFPAt.IsZero() && time.Since(l.barDatesFPAt) <= datasetFilesTTL
-	l.barDatesMu.Unlock()
-	if loaded && sameDir && recent {
-		return nil
-	}
-
-	// 过了 TTL（或目录变了）才看文件指纹：
-	// cne 日更常常**原地重写**当月/当年分区里的 parquet，目录 mtime 不变，
-	// 只按目录 mtime 失效会一直答旧日期（"数据更到 1118，评分还是 1113"）。
-	fp := l.dailyBarFilesFingerprint()
-	l.barDatesMu.Lock()
-	loaded = l.barDatesLoaded
-	sameFP := l.barDatesFP == fp && fp != ""
-	l.barDatesMu.Unlock()
-	if loaded && sameFP {
-		l.barDatesMu.Lock()
-		l.barDatesFPAt = time.Now()
+	if l.barDatesLoaded && l.barDatesDirMod.Equal(dirMod) {
 		l.barDatesMu.Unlock()
 		return nil
 	}
+	l.barDatesMu.Unlock()
 
 	rows, err := readTyped[BarRow](l.DatasetFiles("daily_bars"), nil)
 	if err != nil {
@@ -1759,31 +1754,7 @@ func (l *Lake) ensureDailyBarDates() error {
 	l.barDatesMu.Lock()
 	l.barDates = dates
 	l.barDatesLoaded = true
-	l.barDatesFromNames = false
 	l.barDatesDirMod = dirMod
-	l.barDatesFP = fp
-	l.barDatesFPAt = time.Now()
 	l.barDatesMu.Unlock()
 	return nil
-}
-
-// dailyBarFilesFingerprint 用"文件路径 + 大小 + mtime"给 daily_bars 做指纹。
-//
-// 为什么需要它：cne 的日更经常**原地重写**当月分区里的 parquet，
-// 目录 mtime 不变 → 只按目录 mtime 失效的缓存会一直认为"最新交易日还是旧的那天"。
-// 文件级指纹能发现原地重写；代价是对每个 parquet 做一次 stat
-// （按月分区约几百个文件，毫秒级），且只在数据集文件列表缓存过期时才重新计算。
-func (l *Lake) dailyBarFilesFingerprint() string {
-	// 只统计**最新两个分区**的文件：cne 的日更只改当期分区，
-	// 而给 6000+ 个文件逐个 stat 在 NAS 上就是几秒到几十秒的卡顿。
-	dirs := l.barPartitionDirs()
-	var b strings.Builder
-	from := len(dirs) - 2
-	if from < 0 {
-		from = 0
-	}
-	for _, dir := range dirs[from:] {
-		b.WriteString(filesFingerprint(l.parquetFilesIn(dir.path)))
-	}
-	return b.String()
 }
