@@ -80,6 +80,11 @@ type Lake struct {
 	recentBarDate int64
 	recentBarFP   string
 	recentBarAt   time.Time
+	// partsCache / partsAt：daily_bars 的分区目录列表缓存。
+	// 列 6000+ 个目录在 NAS 上不是免费的，而 LatestTradeDate / BarPartitionDates
+	// 会被反复调用（按持仓、按股票），必须缓存。
+	partsCache []barPartitionDir
+	partsAt    time.Time
 
 	// 静态数据集缓存：内容几乎不变，读一次就留着
 	instruments []InstrumentRow

@@ -1330,6 +1330,17 @@ type barPartitionDir struct {
 
 // barPartitionDirs 列出 daily_bars 的分区目录（按名字升序）。
 func (l *Lake) barPartitionDirs() []barPartitionDir {
+	// 结果缓存：NAS 上 os.ReadDir 6000+ 个目录要几十毫秒到几秒，
+	// 而这个函数会被 LatestTradeDate / BarPartitionDates 反复调用。
+	l.barDatesMu.Lock()
+	if l.partsCache != nil && time.Since(l.partsAt) <= datasetFilesTTL {
+		out := make([]barPartitionDir, len(l.partsCache))
+		copy(out, l.partsCache)
+		l.barDatesMu.Unlock()
+		return out
+	}
+	l.barDatesMu.Unlock()
+
 	root := l.DatasetDir("daily_bars")
 	entries, err := os.ReadDir(root)
 	if err != nil {
@@ -1343,7 +1354,13 @@ func (l *Lake) barPartitionDirs() []barPartitionDir {
 		out = append(out, barPartitionDir{name: entry.Name(), path: filepath.Join(root, entry.Name())})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].name < out[j].name })
-	return out
+	l.barDatesMu.Lock()
+	l.partsCache = out
+	l.partsAt = time.Now()
+	l.barDatesMu.Unlock()
+	copied := make([]barPartitionDir, len(out))
+	copy(copied, out)
+	return copied
 }
 
 // latestDateFromPartitions 求"实际有行情数据的最新交易日"。
@@ -1360,6 +1377,20 @@ func (l *Lake) barPartitionDirs() []barPartitionDir {
 // 之前那版"按分区名倒序取最新目录"会在混合布局里挑到旧的按天分区；
 // 全量扫描版则会在 NAS 上读几百 MB~GB（正是用户抱怨的卡 IO 和请求超时）。
 func (l *Lake) latestDateFromPartitions() (int64, error) {
+	// ⚠ **先查结果缓存，再碰文件系统**。
+	//
+	// LatestTradeDate 在组合页/评分/回测/邮件里会被反复调用（甚至按持仓逐个调）。
+	// 之前把缓存检查放在"列分区 + 读 footer"之后，每次调用都要在 NAS 上
+	// 列 6000+ 个目录、再打开当期 parquet 读 footer —— 请求就这样卡到超时。
+	// 现在 30 秒内的重复调用零 IO。
+	l.barDatesMu.Lock()
+	if l.recentBarDate > 0 && time.Since(l.recentBarAt) <= datasetFilesTTL {
+		date := l.recentBarDate
+		l.barDatesMu.Unlock()
+		return date, nil
+	}
+	l.barDatesMu.Unlock()
+
 	dirs := l.barPartitionDirs()
 	if len(dirs) == 0 {
 		return 0, fmt.Errorf("数据湖的 daily_bars 没有任何分区，请确认已同步")
@@ -1735,14 +1766,16 @@ func (l *Lake) ensureDailyBarDates() error {
 // 文件级指纹能发现原地重写；代价是对每个 parquet 做一次 stat
 // （按月分区约几百个文件，毫秒级），且只在数据集文件列表缓存过期时才重新计算。
 func (l *Lake) dailyBarFilesFingerprint() string {
-	files := l.DatasetFiles("daily_bars")
+	// 只统计**最新两个分区**的文件：cne 的日更只改当期分区，
+	// 而给 6000+ 个文件逐个 stat 在 NAS 上就是几秒到几十秒的卡顿。
+	dirs := l.barPartitionDirs()
 	var b strings.Builder
-	for _, file := range files {
-		info, err := os.Stat(file)
-		if err != nil {
-			continue
-		}
-		fmt.Fprintf(&b, "%s|%d|%d;", filepath.Base(filepath.Dir(file)), info.Size(), info.ModTime().UnixNano())
+	from := len(dirs) - 2
+	if from < 0 {
+		from = 0
+	}
+	for _, dir := range dirs[from:] {
+		b.WriteString(filesFingerprint(l.parquetFilesIn(dir.path)))
 	}
 	return b.String()
 }

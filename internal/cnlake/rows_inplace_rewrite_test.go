@@ -113,6 +113,9 @@ func TestLatestTradeDateSeesInPlaceParquetRewrite(t *testing.T) {
 	// 让指纹核对越过 TTL（生产是 30s，测试直接改时间戳）。
 	lake.barDatesMu.Lock()
 	lake.barDatesFPAt = time.Now().Add(-time.Hour)
+	// LatestTradeDate 自己还有一道"结果缓存"（30s 内零 IO），测试要模拟
+	// "过了 TTL 才重新核对"，否则会直接命中缓存看不到重写。
+	lake.recentBarAt = time.Now().Add(-time.Hour)
 	lake.barDatesMu.Unlock()
 
 	second, err := lake.LatestTradeDate()
