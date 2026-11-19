@@ -99,9 +99,14 @@ COPY --from=frontend /src/frontend/dist ./frontend/dist
 #               本项目用的 modernc.org/sqlite / parquet-go 都是纯 Go，关掉没问题。
 # GOOS/GOARCH 取 buildx 注入的 TARGETOS/TARGETARCH。
 # -trimpath -ldflags "-s -w"：去掉本机路径与调试符号，镜像更小且可复现。
+# 构建戳：把提交号/构建时间注入二进制，启动日志会打印出来。
+# 容器里通常没有 .git，光靠 debug.ReadBuildInfo() 拿不到 vcs.revision，
+# 于是"镜像是不是最新"永远说不清。CI 通过 --build-arg 传进来。
+ARG GIT_SHA=unknown
+ARG BUILD_TIME=unknown
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
       go build -tags server -trimpath \
-      -ldflags "-s -w" \
+      -ldflags "-s -w -X freestock/internal/service.BuildCommit=${GIT_SHA} -X freestock/internal/service.BuildTime=${BUILD_TIME}" \
       -o /out/freestock-server . \
  && ls -lh /out/freestock-server
 

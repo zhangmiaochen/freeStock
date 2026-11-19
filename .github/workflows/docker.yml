@@ -76,6 +76,12 @@ jobs:
           username: ${{ env.DOCKERHUB_USERNAME }}
           password: ${{ env.DOCKERHUB_TOKEN }}
 
+      - name: 计算构建戳（提交号 + UTC 时间）
+        id: stamp
+        run: |
+          echo "sha=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
       - name: 计算镜像名（GHCR 要求全小写）
         id: image
         run: |
@@ -126,6 +132,8 @@ jobs:
             # 可选：把 cne 打进镜像。默认空 = 不打（推荐运行期装进 /data，见文档）
             # 在仓库 Settings → Variables 里设 CNE_PIP_SPEC 即可生效。
             CNE_PIP_SPEC=${{ vars.CNE_PIP_SPEC }}
+            GIT_SHA=${{ steps.stamp.outputs.sha }}
+            BUILD_TIME=${{ steps.stamp.outputs.time }}
 
       - name: 构建并推送（首次失败后重试一次）
         if: steps.build.outcome == 'failure'
@@ -144,6 +152,8 @@ jobs:
             NODE_VERSION=22
             PNPM_VERSION=12
             CNE_PIP_SPEC=${{ vars.CNE_PIP_SPEC }}
+            GIT_SHA=${{ steps.stamp.outputs.sha }}
+            BUILD_TIME=${{ steps.stamp.outputs.time }}
 
       - name: 输出摘要
         if: always()

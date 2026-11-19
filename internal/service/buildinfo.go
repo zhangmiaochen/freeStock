@@ -5,35 +5,61 @@ import (
 	"runtime/debug"
 )
 
-// logBuildInfo 打印当前二进制的版本与 git 提交。
+// 下面三个变量由构建时注入（见 Dockerfile / .github/workflows/docker.yml）：
+//
+//	go build -ldflags "-X freestock/internal/service.BuildCommit=<sha> ..."
 //
 // 为什么需要：镜像 tag 是 latest，CI 一旦没跟上，"docker compose pull" 拉到的
 // 还是旧构建，但日志/界面看起来和新版一模一样 —— 排查会一直在旧代码里打转。
-// 有了这行，`docker compose logs | grep 构建信息` 就能确认到底跑的是哪个提交。
+// 另外容器里通常没有 .git，`debug.ReadBuildInfo()` 的 vcs.revision 是空的，
+// 只靠它无法确认版本。
+var (
+	BuildVersion = ""
+	BuildCommit  = ""
+	BuildTime    = ""
+)
+
+// logBuildInfo 打印当前二进制的版本与 git 提交。
 func logBuildInfo() {
+	version, commit, buildTime := BuildVersion, BuildCommit, BuildTime
+
 	info, ok := debug.ReadBuildInfo()
-	if !ok {
-		slog.Info("构建信息不可用（未嵌入 build info）")
-		return
-	}
-	var revision, buildTime, modified string
-	for _, setting := range info.Settings {
-		switch setting.Key {
-		case "vcs.revision":
-			revision = setting.Value
-		case "vcs.time":
-			buildTime = setting.Value
-		case "vcs.modified":
-			modified = setting.Value
+	if ok {
+		var vcsRevision, vcsTime string
+		for _, setting := range info.Settings {
+			switch setting.Key {
+			case "vcs.revision":
+				vcsRevision = setting.Value
+			case "vcs.time":
+				vcsTime = setting.Value
+			}
+		}
+		if commit == "" {
+			commit = vcsRevision
+		}
+		if buildTime == "" {
+			buildTime = vcsTime
+		}
+		if version == "" {
+			version = info.Main.Version
 		}
 	}
-	if len(revision) > 12 {
-		revision = revision[:12]
+	if len(commit) > 12 {
+		commit = commit[:12]
+	}
+	if commit == "" {
+		commit = "unknown（镜像未注入提交号）"
 	}
 	slog.Info("构建信息",
-		"version", info.Main.Version,
-		"revision", revision,
+		"version", version,
+		"revision", commit,
 		"buildTime", buildTime,
-		"modified", modified,
-		"go", info.GoVersion)
+		"go", goVersion(info, ok))
+}
+
+func goVersion(info *debug.BuildInfo, ok bool) string {
+	if !ok || info == nil {
+		return "unknown"
+	}
+	return info.GoVersion
 }
