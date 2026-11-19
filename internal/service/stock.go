@@ -183,6 +183,12 @@ type StockService struct {
 	indexMu       sync.Mutex
 	searchIdx     []searchEntry
 	indexLoadedAt string
+	// liteIdx / liteAt：**不依赖行情**的搜索索引（只来自 instruments）。
+	// K 线页搜索框每敲一个字都会调 SearchStocks；如果为了搜索去加载全市场行情
+	// （冷启动要读当期分区 + 估值索引，几百 MB、好几分钟），输入框就会卡死、
+	// 内存飙升。搜索只需要代码/名称/拼音，这些 instruments 里都有。
+	liteIdx []searchEntry
+	liteAt  time.Time
 
 	// 最新交易日缓存
 	tradeDateMu sync.Mutex
@@ -937,6 +943,20 @@ func (s *StockService) buildUniverse(
 		if quote == nil {
 			misses = append(misses, i)
 		}
+	}
+	// ⚠ 只有"少数票没拿到"才值得逐只回溯补抓（那是停牌/新股）。
+	// 如果大面积为空，说明是**批量取行情超预算 / 源慢**，不是停牌 ——
+	// 这时再对几千只票逐只发 `QuoteRangeDesc`，就是几千次文件打开：
+	// NAS 上等于把请求拖死（前端表现为"卡住 + 内存飙升"）。宁可先返回
+	// 部分数据（缺的显示「—」），下一次刷新再补。
+	fallbackCap := len(targets) / 3
+	if fallbackCap < 50 {
+		fallbackCap = 50
+	}
+	if len(misses) > fallbackCap {
+		slog.Warn("跳过逐只回溯补抓：缺失比例过高，更像数据源慢而不是停牌",
+			"missing", len(misses), "total", len(targets), "cap", fallbackCap)
+		misses = nil
 	}
 	if len(misses) > 0 {
 		s.emit("stock:progress", Progress{Phase: "fallback", Total: len(misses)})

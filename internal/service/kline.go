@@ -13,6 +13,7 @@ import (
 
 	"freestock/internal/cnlake"
 	"freestock/internal/market"
+	"freestock/internal/portfolio"
 	"freestock/internal/stockdb"
 )
 
@@ -215,7 +216,59 @@ func firstVariant(value string) string {
 	return value
 }
 
-// searchIndex 依据当前股票列表构建（并缓存）搜索索引。
+// cachedUniverse 只读地取"已经加载好且未过期"的股票列表，**绝不触发加载**。
+func (s *StockService) cachedUniverse() *StockUniverse {
+	s.universeMu.Lock()
+	defer s.universeMu.Unlock()
+	if s.universe != nil && time.Since(s.universeAt) < universeTTL {
+		return s.universe
+	}
+	return nil
+}
+
+// searchEntriesLite 只从 instruments 构建搜索索引（不取任何行情）。
+//
+// 为什么单独一条：SearchStocks 被搜索框逐字调用，而"带行情的全量列表"冷启动要
+// 读当期分区 + 估值索引（几百 MB、几分钟）。为了联想去加载全市场行情，输入框
+// 就会卡死、内存飙升。代码 / 名称 / 拼音在 instruments 里都有，够联想用。
+func (s *StockService) searchEntriesLite() []searchEntry {
+	s.indexMu.Lock()
+	defer s.indexMu.Unlock()
+	if s.liteIdx != nil && time.Since(s.liteAt) < universeTTL {
+		return s.liteIdx
+	}
+
+	started := time.Now()
+	lake := s.lakeHandle()
+	if lake == nil {
+		return nil
+	}
+	rows, err := lake.Instruments()
+	if err != nil {
+		return nil
+	}
+	index := make([]searchEntry, 0, len(rows))
+	for _, row := range rows {
+		code := portfolio.BareCode(row.Symbol)
+		full, initials := pinyinVariants(row.Name)
+		key := market.KeyOf(code)
+		index = append(index, searchEntry{
+			code:     code,
+			name:     row.Name,
+			pinyin:   full,
+			initials: initials,
+			market:   key,
+			marketCN: market.NameOf(key),
+		})
+	}
+	s.liteIdx = index
+	s.liteAt = time.Now()
+	slog.Info("搜索索引已构建（轻量：只有标的与名称，不取行情）",
+		"entries", len(index), "elapsed", time.Since(started).Round(time.Millisecond).String())
+	return index
+}
+
+// searchIndex 依据当前股票列表构建（并缓存）带行情的搜索索引。
 func (s *StockService) searchIndex(universe *StockUniverse) []searchEntry {
 	s.indexMu.Lock()
 	defer s.indexMu.Unlock()
@@ -276,6 +329,11 @@ func matchScore(entry searchEntry, keyword string) (int, string) {
 	if name == keyword {
 		return 78, "name"
 	}
+	// 名称**前缀**匹配要高于"包含"：搜「上证」时，「上证指数」应该排在
+	// 「上证180E」「上证50」这类基金前面（它们只是包含这两个字）。
+	if strings.HasPrefix(name, keyword) {
+		return 74, "name"
+	}
 	if strings.Contains(name, keyword) {
 		return 72, "name"
 	}
@@ -308,11 +366,15 @@ func (s *StockService) SearchStocks(keyword string, limit int) ([]StockSearchIte
 		limit = 20
 	}
 
-	universe, err := s.GetStockUniverse(false)
-	if err != nil {
-		return nil, err
+	// 搜索只用**轻量索引**（instruments），绝不为了联想触发全市场行情加载：
+	// 那个加载在 NAS 上是几分钟、几百 MB，表现就是输入框卡死 + 内存飙升。
+	// 如果全量列表恰好已经加载过（同一份缓存），就顺手复用它，能带上最新价。
+	index := s.searchEntriesLite()
+	if cached := s.cachedUniverse(); cached != nil {
+		if full := s.searchIndex(cached); len(full) > 0 {
+			index = full
+		}
 	}
-	index := s.searchIndex(universe)
 
 	type hit struct {
 		entry   searchEntry
@@ -336,9 +398,19 @@ func (s *StockService) SearchStocks(keyword string, limit int) ([]StockSearchIte
 		if hits[i].score != hits[j].score {
 			return hits[i].score > hits[j].score
 		}
-		// 同分时股票优先：裸码 000001 既是平安银行也是上证指数的一部分，
-		// 用户输入裸码时更可能想找股票（指数请带后缀，界面也是这么展示的）
-		if hits[i].entry.isIndex != hits[j].entry.isIndex {
+		// 同名次时"名字更短 = 更贴近前缀"：搜「上证」时「上证指数」要排在
+		// 「上证180E」「上证综合」这类只是前缀相同的基金前面。
+		if hits[i].matchOn == "name" && hits[j].matchOn == "name" {
+			li, lj := len([]rune(hits[i].entry.name)), len([]rune(hits[j].entry.name))
+			if li != lj {
+				return li < lj
+			}
+		}
+		// 同分时股票优先**只针对代码命中**：裸码 000001 既是平安银行也是上证
+		// 指数的一部分，用户输入裸码时更可能想找股票（指数请带后缀）。
+		// 名称命中不适用——否则「上证指数」会被一堆「上证××」基金挤掉。
+		if hits[i].matchOn == "code" && hits[j].matchOn == "code" &&
+			hits[i].entry.isIndex != hits[j].entry.isIndex {
 			return !hits[i].entry.isIndex
 		}
 		return hits[i].entry.code < hits[j].entry.code
