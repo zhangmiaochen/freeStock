@@ -1318,7 +1318,165 @@ func (l *Lake) TopHolders(code string) ([]TopHolderRow, error) {
 // 行情源的"最新交易日"语义应当是"最后一根 K 线的日期"，
 // 这也与 stockdb 那头（从真实行情取）一致。
 func (l *Lake) LatestTradeDate() (int64, error) {
-	return l.TradeDateAt(0)
+	return l.latestDateFromPartitions()
+}
+
+// barPartitionDir 是 daily_bars 下的一个分区目录。
+type barPartitionDir struct {
+	name string // trade_date=2026-11
+	path string
+}
+
+// barPartitionDirs 列出 daily_bars 的分区目录（按名字升序）。
+func (l *Lake) barPartitionDirs() []barPartitionDir {
+	root := l.DatasetDir("daily_bars")
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil
+	}
+	out := make([]barPartitionDir, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "trade_date=") {
+			continue
+		}
+		out = append(out, barPartitionDir{name: entry.Name(), path: filepath.Join(root, entry.Name())})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].name < out[j].name })
+	return out
+}
+
+// latestDateFromPartitions 求"实际有行情数据的最新交易日"。
+//
+// 真实数据湖常常是**混合布局**：历史按天分区（trade_date=2020-01-04），
+// 而 cne 的日更先写当月分区（trade_date=2026-11）。所以：
+//
+//  1. 按天分区的名字直接给出日期，零成本；
+//  2. 只有"可能比它更新"的粗分区（按月/按年）才需要读内容求最大日期，
+//     通常只有 1 个（当前月），几千行 → 毫秒级；
+//  3. 既不依赖目录 mtime（cne 会原地重写当月 parquet，mtime 不变），
+//     也不会把整个 daily_bars 扫一遍（几百 MB~GB，NAS 上就是卡 IO）。
+func (l *Lake) latestDateFromPartitions() (int64, error) {
+	dirs := l.barPartitionDirs()
+	if len(dirs) == 0 {
+		return 0, fmt.Errorf("数据湖的 daily_bars 没有任何分区，请确认已同步")
+	}
+	dayBest := int64(0)
+	dayMaxName := ""
+	coarse := make([]barPartitionDir, 0, 4)
+	for _, dir := range dirs {
+		raw := strings.ReplaceAll(strings.TrimPrefix(dir.name, "trade_date="), "-", "")
+		if len(raw) == 8 {
+			if raw > dayMaxName {
+				dayMaxName = raw
+			}
+			if date, err := strconv.ParseInt(raw, 10, 64); err == nil && date > dayBest {
+				dayBest = date
+			}
+			continue
+		}
+		coarse = append(coarse, dir)
+	}
+
+	// 缓存键 = 最大天分区名 + 相关粗分区文件指纹。
+	// 文件被原地重写时指纹变化 → 立刻重算，不依赖目录 mtime。
+	var key strings.Builder
+	key.WriteString(dayMaxName)
+	relevant := make([]barPartitionDir, 0, len(coarse))
+	for _, dir := range coarse {
+		if !coarsePartitionMayExceed(dir.name, dayBest) {
+			continue
+		}
+		relevant = append(relevant, dir)
+		key.WriteString("|")
+		key.WriteString(dir.name)
+		key.WriteString(":")
+		key.WriteString(filesFingerprint(l.parquetFilesIn(dir.path)))
+	}
+	cacheKey := key.String()
+
+	l.barDatesMu.Lock()
+	if l.recentBarDate > 0 && l.recentBarFP == cacheKey && time.Since(l.recentBarAt) <= datasetFilesTTL {
+		date := l.recentBarDate
+		l.barDatesMu.Unlock()
+		return date, nil
+	}
+	l.barDatesMu.Unlock()
+
+	best := dayBest
+	for _, dir := range relevant {
+		files := l.parquetFilesIn(dir.path)
+		rows, err := readTyped[BarRow](files, nil)
+		if err != nil {
+			// 分区正在被 cne 写入 → 用已有的（更早的）日期，不要因此让评分失败。
+			continue
+		}
+		for _, row := range rows {
+			if date := row.Date(); date > best {
+				best = date
+			}
+		}
+	}
+	if best == 0 {
+		return 0, fmt.Errorf("数据湖的 daily_bars 分区里没有可用的行情日期，请确认已同步")
+	}
+	l.barDatesMu.Lock()
+	l.recentBarDate = best
+	l.recentBarFP = cacheKey
+	l.recentBarAt = time.Now()
+	l.barDatesMu.Unlock()
+	return best, nil
+}
+
+// coarsePartitionMayExceed 判断一个粗粒度分区（2026 / 2026-11）是否可能含有
+// 比 best 更晚的日期。用分区能表示的最大日期做上界，避免无谓地读 parquet。
+func coarsePartitionMayExceed(name string, best int64) bool {
+	digits := strings.ReplaceAll(strings.TrimPrefix(name, "trade_date="), "-", "")
+	value, err := strconv.ParseInt(digits, 10, 64)
+	if err != nil {
+		return true
+	}
+	upper := int64(0)
+	switch len(digits) {
+	case 4:
+		upper = value*10000 + 1231
+	case 6:
+		upper = value*100 + 31
+	case 8:
+		upper = value
+	default:
+		return true
+	}
+	return upper > best
+}
+
+// parquetFilesIn 列出目录下的 parquet 文件（升序，保证指纹稳定）。
+func (l *Lake) parquetFilesIn(dir string) []string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	out := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".parquet") {
+			continue
+		}
+		out = append(out, filepath.Join(dir, entry.Name()))
+	}
+	sort.Strings(out)
+	return out
+}
+
+// filesFingerprint 用"文件名 + 大小 + mtime"给一组文件做指纹。
+func filesFingerprint(files []string) string {
+	var b strings.Builder
+	for _, file := range files {
+		info, err := os.Stat(file)
+		if err != nil {
+			continue
+		}
+		fmt.Fprintf(&b, "%s|%d|%d;", filepath.Base(file), info.Size(), info.ModTime().UnixNano())
+	}
+	return b.String()
 }
 
 // TradeDateAt 找出**不晚于** before 的、**实际有行情数据**的最近交易日（YYYYMMDD）。
@@ -1381,7 +1539,12 @@ func (l *Lake) BarPartitionDates() ([]int64, error) {
 		dirMod = info.ModTime()
 	}
 	l.barDatesMu.Lock()
-	if l.barDatesLoaded && len(l.barDates) > 0 && l.barDatesDirMod.Equal(dirMod) {
+	// ⚠ 只有当日期是**从分区名读出来**的时候，目录 mtime 才是充分判据
+	// （新增一天 = 新增一个 trade_date=YYYY-MM-DD 目录）。
+	// 按年/按月分区的退化布局下，日期是从 parquet 内容里读的，
+	// cne 会**原地重写**当前分区文件而目录 mtime 不变 —— 这里若直接返回缓存，
+	// 下面基于文件指纹的失效逻辑根本没机会执行（现象：数据更到 1118，评分还是 1113）。
+	if l.barDatesLoaded && len(l.barDates) > 0 && l.barDatesDirMod.Equal(dirMod) && l.barDatesFromNames {
 		out := make([]int64, len(l.barDates))
 		copy(out, l.barDates)
 		l.barDatesMu.Unlock()
@@ -1414,6 +1577,7 @@ func (l *Lake) BarPartitionDates() ([]int64, error) {
 		l.barDatesMu.Lock()
 		l.barDates = fromNames
 		l.barDatesLoaded = true
+		l.barDatesFromNames = true
 		l.barDatesDirMod = dirMod
 		l.barDatesMu.Unlock()
 		return fromNames, nil
@@ -1436,16 +1600,38 @@ func (l *Lake) BarPartitionDates() ([]int64, error) {
 // `BarPartitionDates` 直接读目录名）。判据与它保持一致：
 // 目录 mtime 变了就必须重读，否则新增分区看不见。
 func (l *Lake) ensureDailyBarDates() error {
+	dir := l.DatasetDir("daily_bars")
 	dirMod := time.Time{}
-	if info, statErr := os.Stat(l.DatasetDir("daily_bars")); statErr == nil {
+	if info, statErr := os.Stat(dir); statErr == nil {
 		dirMod = info.ModTime()
 	}
+
+	// 快路径：目录没变、最近一次核对也在 TTL 内 → 直接用缓存。
+	// 这里只做一次 stat + 一次加锁；指纹要 stat 每个 parquet 文件，
+	// 不能每次调用都算（bulkFillAllowed 会按股票逐只调用）。
 	l.barDatesMu.Lock()
-	if l.barDatesLoaded && l.barDatesDirMod.Equal(dirMod) {
+	loaded := l.barDatesLoaded
+	sameDir := l.barDatesDirMod.Equal(dirMod)
+	recent := !l.barDatesFPAt.IsZero() && time.Since(l.barDatesFPAt) <= datasetFilesTTL
+	l.barDatesMu.Unlock()
+	if loaded && sameDir && recent {
+		return nil
+	}
+
+	// 过了 TTL（或目录变了）才看文件指纹：
+	// cne 日更常常**原地重写**当月/当年分区里的 parquet，目录 mtime 不变，
+	// 只按目录 mtime 失效会一直答旧日期（"数据更到 1118，评分还是 1113"）。
+	fp := l.dailyBarFilesFingerprint()
+	l.barDatesMu.Lock()
+	loaded = l.barDatesLoaded
+	sameFP := l.barDatesFP == fp && fp != ""
+	l.barDatesMu.Unlock()
+	if loaded && sameFP {
+		l.barDatesMu.Lock()
+		l.barDatesFPAt = time.Now()
 		l.barDatesMu.Unlock()
 		return nil
 	}
-	l.barDatesMu.Unlock()
 
 	rows, err := readTyped[BarRow](l.DatasetFiles("daily_bars"), nil)
 	if err != nil {
@@ -1466,7 +1652,29 @@ func (l *Lake) ensureDailyBarDates() error {
 	l.barDatesMu.Lock()
 	l.barDates = dates
 	l.barDatesLoaded = true
+	l.barDatesFromNames = false
 	l.barDatesDirMod = dirMod
+	l.barDatesFP = fp
+	l.barDatesFPAt = time.Now()
 	l.barDatesMu.Unlock()
 	return nil
+}
+
+// dailyBarFilesFingerprint 用"文件路径 + 大小 + mtime"给 daily_bars 做指纹。
+//
+// 为什么需要它：cne 的日更经常**原地重写**当月分区里的 parquet，
+// 目录 mtime 不变 → 只按目录 mtime 失效的缓存会一直认为"最新交易日还是旧的那天"。
+// 文件级指纹能发现原地重写；代价是对每个 parquet 做一次 stat
+// （按月分区约几百个文件，毫秒级），且只在数据集文件列表缓存过期时才重新计算。
+func (l *Lake) dailyBarFilesFingerprint() string {
+	files := l.DatasetFiles("daily_bars")
+	var b strings.Builder
+	for _, file := range files {
+		info, err := os.Stat(file)
+		if err != nil {
+			continue
+		}
+		fmt.Fprintf(&b, "%s|%d|%d;", filepath.Base(filepath.Dir(file)), info.Size(), info.ModTime().UnixNano())
+	}
+	return b.String()
 }

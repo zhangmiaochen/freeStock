@@ -66,6 +66,20 @@ type Lake struct {
 	// 目录变了（新增/删除交易日分区）就必须重列，否则进程不重启就永远答旧日期。
 	barDatesLoaded bool
 	barDatesDirMod time.Time
+	// barDatesFP / barDatesFPAt 是**文件指纹**兜底：cne 日更经常是**原地重写**
+	// 当月分区里的 parquet（如 trade_date=2026-11/part-0.parquet），
+	// 这种情况下**目录 mtime 不变**，只靠 dirMod 会一直答旧日期（用户看到
+	// "数据更到 1118，评分还是 1113"）。文件路径+大小+mtime 的指纹能发现它。
+	barDatesFP   string
+	barDatesFPAt time.Time
+	// barDatesFromNames 表示日期是从分区名直接解析出来的（正常布局）。
+	// 只有这种情况才能拿"目录 mtime"当唯一失效判据；按年/按月分区的退化布局下
+	// 日期来自 parquet 内容，必须走文件指纹（见 ensureDailyBarDates）。
+	barDatesFromNames bool
+	// recentBarDate / recentBarFP / recentBarAt：LatestTradeDate 的定向缓存（只扫最新分区）。
+	recentBarDate int64
+	recentBarFP   string
+	recentBarAt   time.Time
 
 	// 静态数据集缓存：内容几乎不变，读一次就留着
 	instruments []InstrumentRow
