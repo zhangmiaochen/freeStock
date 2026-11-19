@@ -137,6 +137,43 @@ func (s *PortfolioService) Close() {
 	}
 }
 
+// invalidateStoreCache 关闭并丢弃已打开的库句柄。
+//
+// 迁移成功会改变 dbPath()/analyticsDB()/backtestDB() 的解析结果，但进程里
+// 可能已经缓存了**旧库**的句柄（比如启动时就打开过 portfolio.db）。
+// 不失效的话，用户迁移完成后继续操作，新组合/新持仓会写进旧库 ——
+// 重启后按新路径读取，这些数据就"消失"了（其实落在旧库里）。
+func (s *PortfolioService) invalidateStoreCache() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	closed := 0
+	if s.store != nil {
+		_ = s.store.Close()
+		s.store = nil
+		closed++
+	}
+	if s.legacyStore != nil {
+		_ = s.legacyStore.Close()
+		s.legacyStore = nil
+		closed++
+	}
+	if s.analyticsStore != nil {
+		_ = s.analyticsStore.Close()
+		s.analyticsStore = nil
+		closed++
+	}
+	if s.backtestStore != nil {
+		_ = s.backtestStore.Close()
+		s.backtestStore = nil
+		closed++
+	}
+	s.openErr = nil
+	s.analyticsOpenErr = nil
+	if closed > 0 {
+		slog.Info("迁移后已释放旧库句柄，后续读写走新库", "closed", closed)
+	}
+}
+
 // db 惰性打开组合核心库（组合/持仓/资金）。
 //
 // 分析及回测表仍由 legacyDB()/analyticsDB() 提供，避免多库切换期间
@@ -644,6 +681,17 @@ func (s *PortfolioService) cleanupDeletedPortfolio(id string) bool {
 // 启动时在后台跑一次：把上次崩溃/失败留下的孤儿数据清干净。
 // 墓碑数量通常为 0，代价可以忽略。
 func (s *PortfolioService) RetryPendingCleanup() {
+	// 迁移进行中绝不能清：此时 analyticsDB()/backtestDB() 会解析到**旧库**
+	// （迁移还没成功），按 portfolio_id 删除等于去改迁移的源库；而且会和
+	// 归档/复制抢同一个文件。等迁移结束后再清（成功路径会主动清一次）。
+	if migrationActive.Load() {
+		slog.Info("迁移进行中，跳过跨库清理重试")
+		return
+	}
+	s.retryPendingCleanup()
+}
+
+func (s *PortfolioService) retryPendingCleanup() {
 	store, err := s.db()
 	if err != nil {
 		return

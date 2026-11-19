@@ -147,6 +147,46 @@ func quoteIdent(value string) string {
 	return `"` + value + `"`
 }
 
+// CoreTargetIncomplete 判断核心目标是否"比源库少行"（=上次复制没做完）。
+//
+// 只看 5 张核心表的行数，都是小表，代价可以忽略。
+//
+// 为什么不能只判断"目标为空"：如果复制被 kill 在半途，目标里可能已经有
+// 一部分组合 —— 那时目标非空、quick_check 也通过，会被当成"可复用"，
+// 用户看到的就是**组合少了几个**（而不是全空）。
+//
+// 方向也有讲究：目标比源多行是**正常**的（迁移后用户又新建了组合），
+// 只有"目标更少"才说明丢数据。
+func CoreTargetIncomplete(sourcePath, targetPath string) (bool, string, error) {
+	source, err := sql.Open("sqlite", sourcePath)
+	if err != nil {
+		return false, "", err
+	}
+	defer source.Close()
+	_, _ = source.Exec("PRAGMA busy_timeout = 15000")
+	target, err := sql.Open("sqlite", targetPath)
+	if err != nil {
+		return false, "", err
+	}
+	defer target.Close()
+	_, _ = target.Exec("PRAGMA busy_timeout = 15000")
+
+	for _, table := range CoreTables {
+		var sourceCount, targetCount int
+		if err := source.QueryRow("SELECT COUNT(*) FROM " + quoteIdent(table)).Scan(&sourceCount); err != nil {
+			return false, "", fmt.Errorf("统计源核心表 %s 失败：%w", table, err)
+		}
+		if err := target.QueryRow("SELECT COUNT(*) FROM " + quoteIdent(table)).Scan(&targetCount); err != nil {
+			// 目标表都读不出来 → 肯定是坏的。
+			return true, fmt.Sprintf("%s 不可读：%v", table, err), nil
+		}
+		if targetCount < sourceCount {
+			return true, fmt.Sprintf("%s 目标=%d 少于源=%d", table, targetCount, sourceCount), nil
+		}
+	}
+	return false, "", nil
+}
+
 // CoreTableCounts 返回核心表行数，用于迁移前后对比和诊断。
 // ValidateCoreDatabase checks an already-created core target without touching the
 // large legacy source. It is used by resumable UI migration: the original migration
@@ -163,7 +203,7 @@ func ValidateCoreDatabase(targetPath string) (map[string]int, string, error) {
 		return nil, "", err
 	}
 	var check string
-	if err := db.QueryRow("PRAGMA quick_check").Scan(&check); err != nil {
+	if err := db.QueryRow("PRAGMA main.quick_check").Scan(&check); err != nil {
 		return nil, "", err
 	}
 	if check != "ok" {

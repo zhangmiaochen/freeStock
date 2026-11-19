@@ -537,6 +537,220 @@ func TestMigrateStorageRepairsEmptyCoreUnderSucceededState(t *testing.T) {
 	}
 }
 
+// 复制被 kill 在半途时，核心库里可能**已经有一部分组合**（不是全空）。
+// 这种"少行"的核心库必须被识别并重做，否则用户看到的是"组合少了几个"。
+func TestMigrateStorageRecopiesPartialCore(t *testing.T) {
+	dir := t.TempDir()
+	legacy := filepath.Join(dir, "portfolio.db")
+	core := filepath.Join(dir, "portfolio-core.db")
+	analytics := filepath.Join(dir, "analytics.db")
+	backtestPath := filepath.Join(dir, "backtest.db")
+
+	// 源库：两个组合。
+	source, err := portfolio.Open(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := source.Create(portfolio.PortfolioInput{Name: "甲", Type: portfolio.TypeManual, StrategyID: portfolio.StrategyTrendGrowth})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := source.Create(portfolio.PortfolioInput{Name: "乙", Type: portfolio.TypeManual, StrategyID: portfolio.StrategyTrendGrowth}); err != nil {
+		t.Fatal(err)
+	}
+	if err := source.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("FREESTOCK_PORTFOLIO_DB_PATH", legacy)
+	t.Setenv("FREESTOCK_PORTFOLIO_CORE_DB_PATH", "")
+	t.Setenv("FREESTOCK_ANALYTICS_DB_PATH", "")
+	t.Setenv("FREESTOCK_BACKTEST_DB_PATH", "")
+
+	svc := &PortfolioService{}
+	defer svc.Close()
+	if _, err := svc.MigrateStorage(); err != nil {
+		t.Fatalf("迁移失败：%v", err)
+	}
+
+	// 模拟半途被 kill：核心库只剩 1 个组合，状态回到 running。
+	coreStore, err := portfolio.OpenCore(core)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coreStore.DB().Exec(`DELETE FROM portfolio WHERE portfolio_id<>?`, first.ID); err != nil {
+		_ = coreStore.Close()
+		t.Fatal(err)
+	}
+	_ = coreStore.Close()
+	writeMigrationFixture(t, dir, StorageMigrationState{
+		Status: "running", Phase: "core", SourcePath: legacy, CorePath: core,
+		AnalyticsPath: analytics, BacktestPath: backtestPath,
+		CoreQuick: "ok", AnalyticsQuick: "ok", BacktestQuick: "ok",
+		StartedAt: time.Now().Add(-time.Hour).Format(time.RFC3339),
+		UpdatedAt: time.Now().Add(-time.Hour).Format(time.RFC3339),
+	})
+
+	state, err := svc.MigrateStorage()
+	if err != nil {
+		t.Fatalf("应重做核心库：%v", err)
+	}
+	if state.Status != "succeeded" {
+		t.Fatalf("重做后应成功：%+v", state)
+	}
+	repaired, err := portfolio.OpenCore(core)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer repaired.Close()
+	var n int
+	if err := repaired.DB().QueryRow(`SELECT COUNT(*) FROM portfolio`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Fatalf("核心库组合数=%d，应为 2（部分复制没有被修复）", n)
+	}
+}
+
+// 迁移成功后用户继续刷新评分 → 分析库行数会比旧库多。再次迁移时不能把这份
+// 新数据判成"不一致"而归档重做（那等于丢掉用户后来跑出来的评分）。
+func TestFinalizeKeepsAnalyticsRowsNewerThanLegacy(t *testing.T) {
+	dir := t.TempDir()
+	legacy := filepath.Join(dir, "portfolio.db")
+	core := filepath.Join(dir, "portfolio-core.db")
+	analytics := filepath.Join(dir, "analytics.db")
+	backtestPath := filepath.Join(dir, "backtest.db")
+	buildLegacyFixture(t, legacy, 100)
+
+	t.Setenv("FREESTOCK_PORTFOLIO_DB_PATH", legacy)
+	t.Setenv("FREESTOCK_PORTFOLIO_CORE_DB_PATH", "")
+	t.Setenv("FREESTOCK_ANALYTICS_DB_PATH", "")
+	t.Setenv("FREESTOCK_BACKTEST_DB_PATH", "")
+
+	svc := &PortfolioService{}
+	defer svc.Close()
+	if _, err := svc.MigrateStorage(); err != nil {
+		t.Fatalf("首次迁移失败：%v", err)
+	}
+
+	// 迁移后又跑了一次评分（只写分析库）。
+	extra, err := portfolio.OpenAnalytics(analytics)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := extra.SaveStrength(20261010, portfolio.StrategyTrendGrowth, []portfolio.StrengthRow{{
+		TradeDate: 20261010, StrategyID: portfolio.StrategyTrendGrowth,
+		Code: "600000.SH", Name: "新评分", TotalScore: 66,
+	}}); err != nil {
+		_ = extra.Close()
+		t.Fatal(err)
+	}
+	_ = extra.Close()
+	before, err := os.Stat(analytics)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 状态回到 running（例如回测库丢失触发补齐），再次执行迁移。
+	if err := os.Remove(backtestPath); err != nil {
+		t.Fatal(err)
+	}
+	writeMigrationFixture(t, dir, StorageMigrationState{
+		Status: "running", Phase: "analytics-finalize", SourcePath: legacy,
+		CorePath: core, AnalyticsPath: analytics, BacktestPath: backtestPath,
+		CoreQuick: "ok", AnalyticsQuick: "ok",
+		StartedAt: time.Now().Add(-time.Hour).Format(time.RFC3339),
+		UpdatedAt: time.Now().Add(-time.Hour).Format(time.RFC3339),
+	})
+	state, err := svc.MigrateStorage()
+	if err != nil {
+		t.Fatalf("再次迁移失败：%v", err)
+	}
+	if state.Status != "succeeded" {
+		t.Fatalf("应成功：%+v", state)
+	}
+	after, err := os.Stat(analytics)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(before, after) {
+		t.Fatal("分析库被归档重做了 —— 迁移后新写入的评分被丢掉")
+	}
+	// 那条新评分必须还在。
+	check, err := portfolio.OpenAnalytics(analytics)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer check.Close()
+	var n int
+	if err := check.DB().QueryRow(`SELECT COUNT(*) FROM stock_strength WHERE trade_date=20261010`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("迁移后新写入的评分丢失（trade_date=20261010 行数=%d）", n)
+	}
+}
+
+// 迁移成功后，进程里缓存的旧库句柄必须失效；否则继续操作会把新组合写进旧库，
+// 重启后按新库读取就"消失"了。
+func TestMigrationInvalidatesCachedStores(t *testing.T) {
+	dir := t.TempDir()
+	legacy := filepath.Join(dir, "portfolio.db")
+	core := filepath.Join(dir, "portfolio-core.db")
+	buildLegacyFixture(t, legacy, 20)
+
+	t.Setenv("FREESTOCK_PORTFOLIO_DB_PATH", legacy)
+	t.Setenv("FREESTOCK_PORTFOLIO_CORE_DB_PATH", "")
+	t.Setenv("FREESTOCK_ANALYTICS_DB_PATH", "")
+	t.Setenv("FREESTOCK_BACKTEST_DB_PATH", "")
+
+	svc := &PortfolioService{}
+	defer svc.Close()
+	// 先在旧库上打开一次，模拟"迁移前已经用过组合页面"。
+	legacyStore, err := svc.db()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := legacyStore.Path(); got != legacy {
+		t.Fatalf("迁移前应指向旧库，得到 %q", got)
+	}
+
+	if _, err := svc.MigrateStorage(); err != nil {
+		t.Fatalf("迁移失败：%v", err)
+	}
+
+	// 迁移后必须立刻使用新库（而不是缓存的旧句柄）。
+	afterStore, err := svc.db()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := afterStore.Path(); got != core {
+		t.Fatalf("迁移后应指向核心库，得到 %q（缓存未失效）", got)
+	}
+	created, err := svc.CreatePortfolio(portfolio.PortfolioInput{
+		Name: "迁移后新建", Type: portfolio.TypeManual, StrategyID: portfolio.StrategyTrendGrowth,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 它必须只出现在核心库。
+	rawLegacy, err := sql.Open("sqlite", legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rawLegacy.Close()
+	var n int
+	if err := rawLegacy.QueryRow(`SELECT COUNT(*) FROM portfolio WHERE portfolio_id=?`, created.ID).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatal("迁移后新建的组合被写进了旧库（缓存没失效）")
+	}
+	if _, err := afterStore.Get(created.ID); err != nil {
+		t.Fatalf("核心库应能读到新组合：%v", err)
+	}
+}
+
 // 状态文件停在 running、但进程已经不在了：必须报 interrupted，
 // 否则界面会一直显示“迁移中”、按钮永久禁用（用户只能手删状态文件）。
 func TestStorageMigrationStateMarksInterrupted(t *testing.T) {

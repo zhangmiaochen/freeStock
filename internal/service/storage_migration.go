@@ -319,6 +319,10 @@ func (s *PortfolioService) MigrateStorage() (StorageMigrationState, error) {
 	if err := s.writeMigrationState(state); err != nil {
 		return state, err
 	}
+	// 关键：让进程里缓存的旧库句柄失效，否则迁移后继续操作会把数据写进旧库。
+	s.invalidateStoreCache()
+	// 迁移期间被跳过的"删组合遗留清理"，现在库已切换，可以安全补做。
+	s.retryPendingCleanup()
 	return state, nil
 }
 
@@ -355,6 +359,11 @@ func (s *PortfolioService) finalizeExistingAnalytics(sourcePath, analyticsTarget
 //
 // 归档 = 改名为 `<原名>.stale-<时间戳>`（连同 -wal/-shm），不删除任何数据。
 func (s *PortfolioService) archiveStaleTargets(sourcePath, coreTarget, analyticsTarget, backtestTarget string, keepAnalytics bool) ([]string, error) {
+	// 归档要 rename 目标文件；Windows 上只要还有打开的句柄就会失败
+	// （"The process cannot access the file because it is being used by another process"）。
+	// 先释放缓存句柄——它们指向的正是即将被替换的文件。
+	s.invalidateStoreCache()
+
 	stamp := time.Now().Format("20060102-150405")
 	archived := make([]string, 0, 3)
 
@@ -380,7 +389,12 @@ func (s *PortfolioService) archiveStaleTargets(sourcePath, coreTarget, analytics
 	}
 
 	if _, statErr := os.Stat(coreTarget); statErr == nil {
-		if incomplete := coreTargetLooksEmpty(sourcePath, coreTarget); incomplete {
+		// 核心目标是否"比源库少行"——少行说明上次复制没做完（可能只搬了一部分，
+		// 空库反而是最容易被发现的那种）。目标比源多行是正常的（迁移后新建过组合）。
+		if incomplete, detail, checkErr := portfolio.CoreTargetIncomplete(sourcePath, coreTarget); checkErr != nil {
+			slog.Warn("存储迁移：核对核心库行数失败，保留现有核心库", "err", checkErr)
+		} else if incomplete {
+			slog.Warn("存储迁移：核心库比源库少行，归档后重做", "detail", detail)
 			if err := renameWithSidecars(coreTarget, coreTarget+".stale-"+stamp); err != nil {
 				return archived, fmt.Errorf("归档不完整的核心库失败：%w", err)
 			}
@@ -390,32 +404,6 @@ func (s *PortfolioService) archiveStaleTargets(sourcePath, coreTarget, analytics
 		return archived, statErr
 	}
 	return archived, nil
-}
-
-// coreTargetLooksEmpty 判断核心目标是否"没搬进来东西"：源库有组合、目标没有。
-// 两个 COUNT 都只扫很小的 portfolio 表，不会碰到 4.9GB 的评分表。
-func coreTargetLooksEmpty(sourcePath, coreTarget string) bool {
-	source, err := sql.Open("sqlite", sourcePath)
-	if err != nil {
-		return false
-	}
-	defer source.Close()
-	_, _ = source.Exec("PRAGMA busy_timeout = 15000")
-	target, err := sql.Open("sqlite", coreTarget)
-	if err != nil {
-		return false
-	}
-	defer target.Close()
-	_, _ = target.Exec("PRAGMA busy_timeout = 15000")
-	var sourceCount, targetCount int
-	if err := source.QueryRow(`SELECT COUNT(*) FROM portfolio`).Scan(&sourceCount); err != nil {
-		return false
-	}
-	if err := target.QueryRow(`SELECT COUNT(*) FROM portfolio`).Scan(&targetCount); err != nil {
-		// 目标连 portfolio 表都读不出来 → 肯定是坏的，归档重做。
-		return true
-	}
-	return sourceCount > 0 && targetCount == 0
 }
 
 // renameWithSidecars 连同 SQLite 的 -wal/-shm 一起改名。

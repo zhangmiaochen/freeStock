@@ -140,9 +140,16 @@ func FinalizeAnalyticsDatabase(sourcePath, targetPath string, progress func(tabl
 		if err := raw.QueryRow("SELECT COUNT(*) FROM " + quoteIdent(table)).Scan(&targetCount); err != nil {
 			return report, fmt.Errorf("统计目标分析表 %s 失败：%w", table, err)
 		}
-		if sourceCount != targetCount {
-			return report, fmt.Errorf("%w：分析表 %s 行数不一致（源=%d 目标=%d），上次复制未完成",
-				ErrAnalyticsIncomplete, table, sourceCount, targetCount)
+		// ⚠ 只判"目标比源少"。迁移成功后用户会继续刷新评分/生成信号，分析库
+		// 里有**更新**的数据（行数比旧库多）—— 用相等判断会把这份新数据判成
+		// 不一致并归档重做，等于把用户后来跑出来的评分全丢掉。
+		if targetCount < sourceCount {
+			return report, fmt.Errorf("%w：分析表 %s 目标=%d 少于源=%d，上次复制未完成",
+				ErrAnalyticsIncomplete, table, targetCount, sourceCount)
+		}
+		if targetCount > sourceCount {
+			slog.Info("分析表目标行数多于旧库，保留现有数据", "table", table,
+				"target", targetCount, "source", sourceCount)
 		}
 		report.Tables[table] = targetCount
 	}
