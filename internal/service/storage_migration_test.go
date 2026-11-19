@@ -29,14 +29,35 @@ func touchFile(t *testing.T, path string) {
 	}
 }
 
+// makeRealStores 建出**结构完整**的核心库/分析库。
+//
+// 只 touch 一个空文件不够：打开前有"是不是这类库"的只读探测（缺 portfolio /
+// stock_strength 表就回退旧库），空文件会被判成坏了。
+func makeRealStores(t *testing.T, corePath, analyticsPath string) {
+	t.Helper()
+	core, err := portfolio.OpenCore(corePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := core.Close(); err != nil {
+		t.Fatal(err)
+	}
+	analytics, err := portfolio.OpenAnalytics(analyticsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := analytics.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestMigrationStateAutomaticallyActivatesNewStores(t *testing.T) {
 	dir := t.TempDir()
 	legacy := filepath.Join(dir, "portfolio.db")
 	core := filepath.Join(dir, "portfolio-core.db")
 	analytics := filepath.Join(dir, "analytics.db")
 	writeMigrationFixture(t, dir, StorageMigrationState{Status: "succeeded", CoreQuick: "ok", CorePath: core, AnalyticsPath: analytics})
-	touchFile(t, core)
-	touchFile(t, analytics)
+	makeRealStores(t, core, analytics)
 
 	t.Setenv("FREESTOCK_PORTFOLIO_DB_PATH", legacy)
 	t.Setenv("FREESTOCK_PORTFOLIO_CORE_DB_PATH", "")
@@ -61,8 +82,9 @@ func TestCoreActivatesBeforeAnalyticsMigrationFinishes(t *testing.T) {
 	core := filepath.Join(dir, "portfolio-core.db")
 	analytics := filepath.Join(dir, "analytics.db")
 	writeMigrationFixture(t, dir, StorageMigrationState{Status: "running", Phase: "analytics", CoreQuick: "ok", SourcePath: legacy, CorePath: core, AnalyticsPath: analytics})
-	touchFile(t, core)
-	touchFile(t, legacy)
+	// 核心库要"真的是核心库"（缺 portfolio 表会触发回退）；旧库要有完整的分析表
+	// —— 迁移未完成时分析读写必须回退到它。
+	makeRealStores(t, core, legacy)
 	t.Setenv("FREESTOCK_PORTFOLIO_DB_PATH", legacy)
 	t.Setenv("FREESTOCK_PORTFOLIO_CORE_DB_PATH", "")
 	t.Setenv("FREESTOCK_ANALYTICS_DB_PATH", "")

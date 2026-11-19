@@ -32,7 +32,7 @@ func TestProviderPriceParity(t *testing.T) {
 	}
 	lakeProvider := NewLakeProvider(lake)
 
-	codes, _, err := svc.scoringUniverse(mustStore(t, svc), 6)
+	codes, _, err := svc.scoringUniverse(6)
 	if err != nil || len(codes) == 0 {
 		t.Skipf("拿不到代码：%v", err)
 	}

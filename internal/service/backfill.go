@@ -123,9 +123,10 @@ func (s *PortfolioService) RefreshBackfill(
 		return nil, fmt.Errorf("区间内没有交易日（%d ~ %d）", startDate, endDate)
 	}
 
-	// 代码集合每天相同：一次算好，避免逐日重复取列表
+	// 评分范围（股票列表 + 所有组合持仓）由 scoringUniverse 自己读核心库；
+	// 这里不再传 store，避免误把分析库当组合库用。
 	universeBegan := time.Now()
-	codes, heldCount, err := s.scoringUniverse(store, limit)
+	codes, heldCount, err := s.scoringUniverse(limit)
 	if err != nil {
 		return nil, err
 	}

@@ -59,7 +59,7 @@ func TestRangeCacheScoresIdentical(t *testing.T) {
 
 	// 取少量代码与几个交易日，够验证等价性又不至于太慢
 	const codes = 8
-	codesList, _, err := svc.scoringUniverse(mustStore(t, svc), codes)
+	codesList, _, err := svc.scoringUniverse(codes)
 	if err != nil || len(codesList) == 0 {
 		t.Skipf("拿不到代码列表：%v", err)
 	}
@@ -161,7 +161,7 @@ func TestScoringIsDeterministic(t *testing.T) {
 	if provider == nil {
 		t.Skip("数据源未就绪")
 	}
-	codesList, _, err := svc.scoringUniverse(mustStore(t, svc), 60)
+	codesList, _, err := svc.scoringUniverse(60)
 	if err != nil || len(codesList) == 0 {
 		t.Skipf("拿不到代码：%v", err)
 	}
@@ -251,7 +251,7 @@ func TestRangeCacheMatchesDirectFetch(t *testing.T) {
 	if provider == nil {
 		t.Skip("数据源未就绪")
 	}
-	codesList, _, err := svc.scoringUniverse(mustStore(t, svc), 3)
+	codesList, _, err := svc.scoringUniverse(3)
 	if err != nil || len(codesList) == 0 {
 		t.Skipf("拿不到代码：%v", err)
 	}

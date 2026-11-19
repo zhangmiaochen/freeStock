@@ -1346,14 +1346,19 @@ func TestMissingMigratedFilesFallBackToLegacy(t *testing.T) {
 	t.Setenv("FREESTOCK_ANALYTICS_DB_PATH", "")
 
 	svc := &PortfolioService{}
-	defer svc.Close()
 	if _, err := svc.MigrateStorage(); err != nil {
+		svc.Close()
 		t.Fatalf("迁移失败：%v", err)
 	}
 	if got := svc.dbPath(); got != core {
+		svc.Close()
 		t.Fatalf("迁移成功后应使用核心库，得到 %q", got)
 	}
 	// 删掉两个迁移产出的文件（模拟误删/磁盘回滚）。
+	// 先关掉句柄：Windows 上文件被占用就删不掉。
+	svc.Close()
+	svc = &PortfolioService{}
+	defer svc.Close()
 	if err := os.Remove(core); err != nil && !os.IsNotExist(err) {
 		t.Fatal(err)
 	}

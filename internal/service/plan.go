@@ -66,7 +66,7 @@ func (s *PortfolioService) RefreshStrength(strategyID string, limit int, force b
 		strategyID = score.StrategyTrendGrowth
 	}
 
-	codes, heldCount, err := s.scoringUniverse(store, limit)
+	codes, heldCount, err := s.scoringUniverse(limit)
 	if err != nil {
 		return nil, err
 	}
@@ -291,7 +291,15 @@ func (s *PortfolioService) saveScoringResult(
 //
 // 生产路径应当传 **0（全市场）**；传非 0 时也要是**跨板块的代表性样本**，
 // 所以这里改成等距抽样。
-func (s *PortfolioService) scoringUniverse(store *portfolio.Store, limit int) ([]string, int, error) {
+// ⚠ 这里**不接受外部传入的 store**：它要读的是"所有组合的持仓"，属于核心库；
+// 之前由调用方传 store，评分刷新/回填顺手把**分析库**传了进来，于是
+// List() 直接报 no such table: portfolio（用户看到"读取组合列表失败"）。
+// 改成从 s.db() 自己取，调用方就不可能再传错。
+func (s *PortfolioService) scoringUniverse(limit int) ([]string, int, error) {
+	store, err := s.db()
+	if err != nil {
+		return nil, 0, err
+	}
 	seen := map[string]bool{}
 	codes := make([]string, 0, 1024)
 	add := func(code string) {

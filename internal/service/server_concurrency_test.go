@@ -28,7 +28,7 @@ func TestServerConcurrencyProfile(t *testing.T) {
 	if provider == nil {
 		t.Skip("数据源未就绪")
 	}
-	codes, _, err := svc.scoringUniverse(mustStore(t, svc), 40)
+	codes, _, err := svc.scoringUniverse(40)
 	if err != nil || len(codes) == 0 {
 		t.Skipf("拿不到代码：%v", err)
 	}

@@ -50,7 +50,7 @@ func TestBackfillAB(t *testing.T) {
 		t.Skip("数据源未就绪")
 	}
 	store := mustStore(t, svc)
-	codes, _, err := svc.scoringUniverse(store, codeCount)
+	codes, _, err := svc.scoringUniverse(codeCount)
 	if err != nil || len(codes) == 0 {
 		t.Skipf("拿不到评分范围：%v", err)
 	}

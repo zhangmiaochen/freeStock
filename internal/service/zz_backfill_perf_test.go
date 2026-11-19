@@ -46,7 +46,7 @@ func TestBackfillFullMarketProbe(t *testing.T) {
 	store := mustStore(t, svc)
 
 	// 全市场：limit=0
-	all, _, err := svc.scoringUniverse(store, 0)
+	all, _, err := svc.scoringUniverse(0)
 	if err != nil || len(all) == 0 {
 		t.Skipf("拿不到全市场代码：%v", err)
 	}
