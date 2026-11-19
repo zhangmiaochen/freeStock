@@ -1453,16 +1453,16 @@ func (l *Lake) latestDateFromPartitions() (int64, error) {
 			break
 		}
 		// 统计缺失（少数写入器不写 stats）才退化为读内容。
-		rows, err := readTyped[BarRow](files, nil)
-		if err != nil {
-			// 分区正在被 cne 写入 → 试下一个（更早的）分区。
-			continue
-		}
+		// ⚠ 必须**流式**逐文件读：当期分区可能是几百万行的按年分区，
+		// readTyped 会把全部行堆进内存（几百 MB），在 NAS 上直接把进程顶到
+		// GOMEMLIMIT/mem_limit，容器被 OOM kill → 前端只看到 "Failed to fetch"。
 		partitionBest := int64(0)
-		for _, row := range rows {
-			if date := row.Date(); date > partitionBest {
-				partitionBest = date
-			}
+		for _, file := range files {
+			_ = readFileEachGuarded(file, nil, func(row *BarRow) {
+				if date := row.Date(); date > partitionBest {
+					partitionBest = date
+				}
+			})
 		}
 		if partitionBest > best {
 			best = partitionBest
@@ -1510,9 +1510,17 @@ func coarsePartitionMayExceed(name string, best int64) bool {
 // 评分请求是 50ms 还是几分钟。
 //
 // 返回 ok=false 表示这些文件没写统计（或找不到 trade_date 列），调用方应退化为读内容。
-func maxDateFromFooters(files []string) (int64, bool) {
-	best := int64(0)
-	found := false
+func maxDateFromFooters(files []string) (best int64, found bool) {
+	// cne 正在写文件时，parquet footer 可能读到半截；解析器若因此 panic，
+	// 必须兜住 —— 这个函数是在 HTTP 请求的 goroutine 里跑的，
+	// panic 会直接把连接断掉，前端只看到 "Failed to fetch"。
+	defer func() {
+		if r := recover(); r != nil {
+			best, found = 0, false
+		}
+	}()
+	best = 0
+	found = false
 	for _, path := range files {
 		handle, err := openParquet(path)
 		if err != nil {
