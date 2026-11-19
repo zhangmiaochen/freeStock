@@ -190,6 +190,19 @@ func (s *PortfolioService) db() (*portfolio.Store, error) {
 	}
 
 	path := s.dbPath()
+	// 打开前先**只读探测**：配置/环境变量指错文件时（例如 CORE 变量填成了
+	// analytics.db），直接 OpenCore 会把核心表建进那个文件，错配就被掩盖成
+	// "空库"，界面显示"读取组合列表失败/列表为空"。
+	if s.coreIsDedicated(path) {
+		if ok, probeErr := portfolio.TableExistsAt(path, "portfolio"); probeErr == nil && !ok {
+			legacyPath := s.legacyDBPath()
+			if legacyPath != "" && filepath.Clean(legacyPath) != filepath.Clean(path) {
+				slog.Error("配置的核心库没有 portfolio 表，回退旧库",
+					"configured", path, "legacy", legacyPath)
+				path = legacyPath
+			}
+		}
+	}
 	// ⚠ 迁移后打开的是 core-only 核心库，必须用 OpenCore。
 	// 用 Open(path)（完整兼容 schema）会**把空的分析/回测表重新建进核心库**，
 	// 于是"表不存在"这种本该立刻暴露的错误，变成"表存在但永远为空"的静默错误
@@ -213,6 +226,25 @@ func (s *PortfolioService) db() (*portfolio.Store, error) {
 			"path", path, "err", err,
 			"openHandles", openHandleCount(),
 			"goroutines", runtime.NumGoroutine())
+		return nil, s.openErr
+	}
+	// 打开后确认这真是组合库：配置/环境变量指错文件时（例如 CORE 变量填成了
+	// analytics.db），业务 SQL 才会报 no such table: portfolio，最终以
+	// "读取组合列表失败" 冒到界面上，用户完全看不出是库指错了。
+	if !store.HasTable("portfolio") {
+		_ = store.Close()
+		legacyPath := s.legacyDBPath()
+		if legacyPath != "" && filepath.Clean(legacyPath) != filepath.Clean(path) {
+			slog.Error("配置的组合库不是组合库（缺 portfolio 表），回退旧库",
+				"configured", path, "legacy", legacyPath)
+			path = legacyPath
+			if store, err = portfolio.Open(path); err == nil && store.HasTable("portfolio") {
+				s.store = store
+				slog.Info("组合库就绪（回退旧库）", "path", path)
+				return store, nil
+			}
+		}
+		s.openErr = fmt.Errorf("组合库缺少 portfolio 表（%s）：请检查 FREESTOCK_PORTFOLIO_CORE_DB_PATH 是否指向 analytics.db/backtest.db", path)
 		return nil, s.openErr
 	}
 	s.store = store
@@ -290,6 +322,15 @@ func (s *PortfolioService) coreIsDedicated(path string) bool {
 // 新建的组合，写在旧库会直接撞外键 787；回测页也不该再去碰 4.9GB 的旧库。
 func (s *PortfolioService) backtestDB() (*portfolio.Store, error) {
 	if path := strings.TrimSpace(os.Getenv("FREESTOCK_BACKTEST_DB_PATH")); path != "" {
+		// 指错文件时回退旧库：OpenBacktest 会建表，直接开会把回测表建进错文件。
+		if ok, probeErr := portfolio.TableExistsAt(path, "portfolio_backtest_run"); probeErr == nil && !ok {
+			legacy := s.legacyDBPath()
+			if legacy != "" && filepath.Clean(legacy) != filepath.Clean(path) {
+				slog.Error("配置的回测库没有 portfolio_backtest_run 表，回退旧库",
+					"configured", path, "legacy", legacy)
+				return s.legacyDB()
+			}
+		}
 		return s.openCachedBacktest(path, true)
 	}
 	state := s.migrationState()
@@ -319,6 +360,25 @@ func (s *PortfolioService) openCachedBacktest(path string, standalone bool) (*po
 	}
 	if err != nil {
 		return nil, fmt.Errorf("打开回测库失败（%s）：%w", path, err)
+	}
+	// 指错文件（例如把 analytics.db 填进回测库变量）时立刻回退，
+	// 否则回测页会以 no such table: portfolio_backtest_run 的形式报错。
+	if !store.HasTable("portfolio_backtest_run") {
+		_ = store.Close()
+		legacy := s.legacyDBPath()
+		if legacy != "" && filepath.Clean(legacy) != filepath.Clean(path) {
+			slog.Error("配置的回测库不是回测库（缺 portfolio_backtest_run 表），回退旧库",
+				"configured", path, "legacy", legacy)
+			if fallback, fbErr := portfolio.Open(legacy); fbErr == nil && fallback.HasTable("portfolio_backtest_run") {
+				if s.backtestStore != nil {
+					_ = s.backtestStore.Close()
+				}
+				s.backtestStore = fallback
+				slog.Info("回测库就绪（回退旧库）", "path", legacy)
+				return fallback, nil
+			}
+		}
+		return nil, fmt.Errorf("回测库缺少 portfolio_backtest_run 表（%s）：请检查 FREESTOCK_BACKTEST_DB_PATH", path)
 	}
 	if s.backtestStore != nil {
 		_ = s.backtestStore.Close()
@@ -402,6 +462,16 @@ func (s *PortfolioService) analyticsDB() (*portfolio.Store, error) {
 			}
 		}
 	}
+	// 打开前只读探测：OpenAnalytics 会建 schema，指错文件时会把分析表建进去，
+	// 于是"空结果"取代了"报错"。
+	if ok, probeErr := portfolio.TableExistsAt(path, "stock_strength"); probeErr == nil && !ok {
+		legacy := s.legacyDBPath()
+		if legacy != "" && filepath.Clean(legacy) != filepath.Clean(path) {
+			slog.Error("配置的分析库没有 stock_strength 表，回退旧库",
+				"configured", path, "legacy", legacy)
+			path = legacy
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.analyticsStore != nil {
@@ -413,6 +483,22 @@ func (s *PortfolioService) analyticsDB() (*portfolio.Store, error) {
 	store, err := portfolio.OpenAnalytics(path)
 	if err != nil {
 		s.analyticsOpenErr = fmt.Errorf("打开分析库失败（%s）：%w", path, err)
+		return nil, s.analyticsOpenErr
+	}
+	// 指错文件时立刻回退：否则所有评分查询都会变成"空结果"或 no such table。
+	if !store.HasTable("stock_strength") {
+		_ = store.Close()
+		legacy := s.legacyDBPath()
+		if legacy != "" && filepath.Clean(legacy) != filepath.Clean(path) {
+			slog.Error("配置的分析库不是分析库（缺 stock_strength 表），回退旧库",
+				"configured", path, "legacy", legacy)
+			if fallback, fbErr := portfolio.OpenAnalytics(legacy); fbErr == nil && fallback.HasTable("stock_strength") {
+				s.analyticsStore = fallback
+				slog.Info("分析库就绪（回退旧库）", "path", legacy)
+				return fallback.Store, nil
+			}
+		}
+		s.analyticsOpenErr = fmt.Errorf("分析库缺少 stock_strength 表（%s）：请检查 FREESTOCK_ANALYTICS_DB_PATH", path)
 		return nil, s.analyticsOpenErr
 	}
 	s.analyticsStore = store

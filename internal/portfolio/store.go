@@ -794,6 +794,45 @@ func (s *Store) DB() *sql.DB {
 	return s.db
 }
 
+// TableExistsAt 只读地判断某个库文件里是否存在表，**不会建库也不会建表**。
+//
+// 为什么不能直接 Open* 再看：OpenCore/OpenAnalytics 会先把 schema 建出来，
+// 于是"打开错文件"会顺手把核心表写进 analytics.db，之后 HasTable 反而是 true，
+// 错配被掩盖成"空库"。必须在建 schema 之前探测。
+func TableExistsAt(path, table string) (bool, error) {
+	if path == "" {
+		return false, fmt.Errorf("路径为空")
+	}
+	if _, err := os.Stat(path); err != nil {
+		return false, err
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return false, err
+	}
+	defer db.Close()
+	_, _ = db.Exec("PRAGMA busy_timeout = 5000")
+	var found int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&found); err != nil {
+		return false, err
+	}
+	return found > 0, nil
+}
+
+// HasTable 判断库里是否存在某张表。
+//
+// 用来在"打开后发现打开的不是预期的库"时立刻回退，而不是等业务 SQL 报
+// `no such table: portfolio` —— 那种错误会以"读取组合列表失败"的形式冒到界面上，
+// 用户完全看不出是库指错了。
+func (s *Store) HasTable(name string) bool {
+	if s == nil || s.db == nil {
+		return false
+	}
+	var found int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, name).Scan(&found)
+	return err == nil && found > 0
+}
+
 // Close 关闭组合库。
 func (s *Store) Close() error {
 	if s == nil || s.db == nil {
