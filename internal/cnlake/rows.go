@@ -1605,6 +1605,15 @@ func (l *Lake) TradeDateAt(before int64) (int64, error) {
 			best = date
 		}
 	}
+	// `dates` 只按"分区目录"更新（新增一天 = 新增一个目录）。混合布局下，
+	// 当期粗分区里可能已经有比最后一个天分区更新的数据，而目录还没变 ——
+	// 用 LatestTradeDate（读 footer 统计，毫秒级且有缓存）补上这个缺口，
+	// 否则条件选股会莫名其妙停在昨天。
+	if latest, latestErr := l.LatestTradeDate(); latestErr == nil && latest > best {
+		if before <= 0 || latest <= before {
+			best = latest
+		}
+	}
 	return best, nil
 }
 
