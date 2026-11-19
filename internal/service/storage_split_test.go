@@ -797,6 +797,39 @@ func TestWrongCorePathFallsBackToLegacy(t *testing.T) {
 	}
 }
 
+// 用户报的现象：核心库指错了文件时，"全量重算/历史回填"报
+// "读取组合列表失败：no such table: portfolio"。
+// 修复后这类调用应回退旧库并正常返回，而不是让整个功能失败。
+func TestRefreshBackfillAllSurvivesWrongCorePath(t *testing.T) {
+	dir := t.TempDir()
+	legacy := filepath.Join(dir, "portfolio.db")
+	analytics := filepath.Join(dir, "analytics.db")
+	buildLegacyFixture(t, legacy, 50)
+
+	t.Setenv("FREESTOCK_PORTFOLIO_DB_PATH", legacy)
+	t.Setenv("FREESTOCK_PORTFOLIO_CORE_DB_PATH", "")
+	t.Setenv("FREESTOCK_ANALYTICS_DB_PATH", "")
+	t.Setenv("FREESTOCK_BACKTEST_DB_PATH", "")
+
+	svc := &PortfolioService{}
+	if _, err := svc.MigrateStorage(); err != nil {
+		t.Fatalf("迁移失败：%v", err)
+	}
+	svc.Close()
+
+	// 把"核心库"指向分析库（compose 里复制粘贴最容易出这种错）。
+	t.Setenv("FREESTOCK_PORTFOLIO_CORE_DB_PATH", analytics)
+	svc2 := &PortfolioService{}
+	defer svc2.Close()
+	res, err := svc2.RefreshBackfillAll(20261001, 20261009, 10, false)
+	if err != nil {
+		t.Fatalf("全量回填不应因库指错而崩：%v", err)
+	}
+	if res == nil || len(res.Strategies) == 0 {
+		t.Fatalf("应至少返回一个策略的尝试记录：%+v", res)
+	}
+}
+
 // 状态文件停在 running、但进程已经不在了：必须报 interrupted，
 // 否则界面会一直显示“迁移中”、按钮永久禁用（用户只能手删状态文件）。
 func TestStorageMigrationStateMarksInterrupted(t *testing.T) {

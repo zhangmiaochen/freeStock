@@ -504,6 +504,24 @@ func readStateFile(path string) (StorageMigrationState, bool) {
 	return state, true
 }
 
+// LogStoragePaths 启动时把"程序认为自己在用哪几个文件"打出来。
+//
+// 报错信息（例如 no such table: portfolio）只说结果，不说路径；这一行让
+// 用户一眼看到是不是 compose 里的环境变量填错了。
+func (s *PortfolioService) LogStoragePaths() {
+	state := s.migrationState()
+	slog.Info("存储路径",
+		"core", s.dbPath(),
+		"legacy", s.legacyDBPath(),
+		"coreEnv", strings.TrimSpace(os.Getenv("FREESTOCK_PORTFOLIO_CORE_DB_PATH")),
+		"analyticsEnv", strings.TrimSpace(os.Getenv("FREESTOCK_ANALYTICS_DB_PATH")),
+		"backtestEnv", strings.TrimSpace(os.Getenv("FREESTOCK_BACKTEST_DB_PATH")),
+		"stateStatus", state.Status,
+		"stateCore", state.CorePath,
+		"stateAnalytics", state.AnalyticsPath,
+		"stateBacktest", state.BacktestPath)
+}
+
 // CheckStorageConsistency 启动时核对"核心库确实是组合数据的来源"。
 //
 // 迁移显示成功、但核心库里 0 个组合、旧库里有 —— 组合页面就会是空白。
