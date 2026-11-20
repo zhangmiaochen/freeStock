@@ -69,6 +69,25 @@ function clearAll() {
 
 // ---- 行业筛选（本地关键字 + 分页展示） ----
 const industryKeyword = ref("");
+
+// 移动端筛选区默认收起。
+//
+// 手机上"市场/行业分类/行业/搜索"四块加起来接近 400px，
+// 而整页是 `h-full` 固定高度 —— 筛选区把列表挤成 0 高度，
+// 页面又没有外层滚动，结果就是"看不到下面的列表、也划不动"。
+const filtersOpen = ref(false);
+const filterSummary = computed(() => {
+  const parts: string[] = [];
+  const market = store.markets.find((m) => m.key === store.marketKey);
+  parts.push(market?.name ?? "全部");
+  const category = store.categories.find((c) => c.key === store.categoryKey);
+  if (category) parts.push(category.name);
+  const board = store.boards.find((b) => b.code === store.boardCode);
+  if (board) parts.push(board.name);
+  const kw = store.keyword.trim();
+  if (kw) parts.push(`“${kw}”`);
+  return parts.join(" · ");
+});
 const industryLimit = ref(120);
 const visibleBoards = computed(() => {
   const kw = industryKeyword.value.trim().toLowerCase();
@@ -224,14 +243,14 @@ function chipClass(active: boolean) {
     <!-- ============ 主体 ============ -->
     <template v-else>
       <!-- 筛选区 -->
-      <div class="shrink-0 space-y-3 border-b px-5 py-4">
+      <div class="shrink-0 space-y-3 border-b px-4 py-3 sm:px-5 sm:py-4">
         <!-- 状态行 -->
         <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
-          <div class="flex items-center gap-2">
+          <div class="flex min-w-0 flex-1 flex-wrap items-center gap-2">
             <Badge variant="secondary" class="font-mono text-[11px]">
               {{ store.sourceName || "未知数据源" }}
             </Badge>
-            <span class="text-muted-foreground text-xs">
+            <span class="text-muted-foreground text-[11px] sm:text-xs">
               最新交易日 {{ formatDate(store.tradeDate) }} · 共
               {{ store.universe?.total ?? 0 }} 只 · 有效行情
               {{ store.universe?.withQuote ?? 0 }} 只 · 耗时
@@ -251,6 +270,27 @@ function chipClass(active: boolean) {
           </div>
         </div>
 
+        <!-- 移动端：筛选折叠开关（桌面端隐藏，始终展开） -->
+        <div class="flex items-center gap-2 sm:hidden">
+          <Button
+            size="xs"
+            variant="outline"
+            class="shrink-0"
+            @click="filtersOpen = !filtersOpen"
+          >
+            {{ filtersOpen ? "收起筛选" : "筛选" }}
+          </Button>
+          <span class="text-muted-foreground truncate text-xs">{{ filterSummary }}</span>
+        </div>
+
+        <div
+          :class="[
+            'space-y-3',
+            filtersOpen
+              ? 'max-h-[45vh] overflow-y-auto pr-1 sm:max-h-none sm:overflow-visible sm:pr-0'
+              : 'hidden sm:block',
+          ]"
+        >
         <!-- 市场分类 -->
         <div class="flex flex-wrap items-center gap-2">
           <span class="text-muted-foreground w-14 shrink-0 text-xs">市场</span>
@@ -334,6 +374,7 @@ function chipClass(active: boolean) {
         </div>
 
         <Separator />
+        </div>
 
         <!-- 搜索与视图选项 -->
         <div class="flex flex-wrap items-center gap-3">
@@ -341,7 +382,7 @@ function chipClass(active: boolean) {
             :key="searchBoxKey"
             mode="filter"
             :allow-index="false"
-            width-class="w-72"
+            width-class="w-full sm:w-72"
             :autofocus="false"
             placeholder="搜索代码 / 名称 / 拼音首字母"
             @keyword-change="store.setKeyword"
