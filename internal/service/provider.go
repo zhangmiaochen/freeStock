@@ -2485,32 +2485,77 @@ func envFlagDefaultTrue(name string) bool {
 // 口径与原版一致：close>0、ma60>0、close>ma60、ma20>ma60（都用原始收盘算），
 // 只算 A 股主体代码（原版 `_load_market_frame` 的前缀白名单）。
 //
-// ⚠ 只读**批量缓存里已有的原始 bars**（`cachedBars`），绝不在评分途中触发
-// 新的批量灌入：那会为了 60 日均线把几百天 × 全市场重新读一遍，回填时
-// 每天重来一次 → 内存直接打爆（实测回填跑到一半进程被杀）。
-// 评分/回填本来就会把 [date-320 交易日, date] 灌进缓存，这里全是内存命中。
+// 取数顺序：
+//  1. 先用批量缓存（`cachedBars`）——评分/回填本来就把窗口灌进来了，纯内存；
+//  2. 缓存覆盖不足（回填早期、缓存被裁剪、或窗口比缓存的 320 交易日更长）时，
+//     退回**一次性读该日窗口**再算。
+//
+// ⚠ 第 2 步不能省：只信缓存时，2015 那种老区间会因为缓存窗口对不上而
+// 少算一两成股票（实测平均就绪数 1118 vs 真实的 ~1300），闸门被悄悄收紧，
+// 回测成交数从 43 掉到 28 —— 这不是口径变了，是**数漏了**。
 func (p *lakeProvider) RawBreadthReadyCount(codes []string, date int) int {
 	if p.lake == nil || date <= 0 || len(codes) == 0 {
 		return 0
 	}
-	start := shiftBack(date, 480) // ≈320 个交易日，与评分窗口一致
-	count := 0
-	missed := 0
+	want := make(map[string]struct{}, len(codes))
 	for _, code := range codes {
 		bare := cnlake.BareSymbol(code)
-		if bare == "" || !portfolio.IsAShareBareCode(bare) {
-			continue
+		if bare != "" && portfolio.IsAShareBareCode(bare) {
+			want[bare] = struct{}{}
 		}
+	}
+	if len(want) == 0 {
+		return 0
+	}
+	start := shiftBack(date, 480)
+
+	byCode := make(map[string][]cnlake.BarRow, len(want))
+	missing := make([]string, 0)
+	for bare := range want {
 		bars, ok := p.cachedBars(bare, start, date)
 		if !ok || len(bars) < 60 {
-			missed++
+			missing = append(missing, bare)
 			continue
 		}
-		end := -1
-		for i := len(bars) - 1; i >= 0; i-- {
-			if bars[i].Date() <= int64(date) {
-				end = i
-				break
+		if bars[len(bars)-1].Date() < int64(date) {
+			// 缓存里没有当天这根（窗口末端没灌进来）→ 也算缺，补读
+			missing = append(missing, bare)
+			continue
+		}
+		byCode[bare] = bars
+	}
+	// 缓存没覆盖到的代码 → **只补读这些代码**（不是整窗全市场）。
+	//
+	// 之前干脆不补，结果 2015 那种老区间平均少算 2~3% 的股票；
+	// 全市场补读又太贵（每天 0.5s+，2600 天回填多十几分钟）。
+	// 只要缓存缺代码（含"缓存里最后一天早于 date"的）就补读：数量与缺口成正比，
+	// 缓存基本都命中时开销可忽略。
+	if len(missing) > 0 {
+		rows, err := p.lake.DailyBarsInRange(missing, int64(start), int64(date))
+		if err == nil {
+			for _, row := range rows {
+				if row.Date() > int64(date) {
+					continue
+				}
+				bare := cnlake.BareSymbol(row.Symbol)
+				byCode[bare] = append(byCode[bare], row)
+			}
+		}
+	}
+
+	count := 0
+	for _, bars := range byCode {
+		// ⚠ 去重：湖里"日分区 + 月分区"会重叠，同一交易日可能有两行；
+		// 不去重时最后 60 根只覆盖五十几天，MA60 与整窗读取的结果不同。
+		bars = dedupeBarsByDate(bars)
+		if len(bars) < 60 {
+			continue
+		}
+		sort.Slice(bars, func(i, j int) bool { return bars[i].TradeDate < bars[j].TradeDate })
+		end := len(bars) - 1
+		if bars[end].Date() > int64(date) {
+			for end >= 0 && bars[end].Date() > int64(date) {
+				end--
 			}
 		}
 		if end < 59 || bars[end].Date() != int64(date) {
@@ -2519,9 +2564,6 @@ func (p *lakeProvider) RawBreadthReadyCount(codes []string, date int) int {
 		if rawBreadthReady(bars[end-59 : end+1]) {
 			count++
 		}
-	}
-	if missed > 0 {
-		slog.Debug("原始口径广度：部分代码不在批量缓存里", "date", date, "missed", missed)
 	}
 	return count
 }
@@ -2545,4 +2587,22 @@ func rawBreadthReady(bars []cnlake.BarRow) bool {
 	ma20 := sum20 / 20
 	ma60 := sum60 / 60
 	return ma60 > 0 && last > ma60 && ma20 > ma60
+}
+
+// dedupeBarsByDate 按交易日去重（同一交易日保留最后出现的一行）。
+func dedupeBarsByDate(bars []cnlake.BarRow) []cnlake.BarRow {
+	if len(bars) < 2 {
+		return bars
+	}
+	seen := make(map[int32]int, len(bars))
+	out := bars[:0]
+	for _, bar := range bars {
+		if idx, ok := seen[bar.TradeDate]; ok {
+			out[idx] = bar
+			continue
+		}
+		seen[bar.TradeDate] = len(out)
+		out = append(out, bar)
+	}
+	return out
 }
