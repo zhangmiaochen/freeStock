@@ -76,6 +76,9 @@ type Lake struct {
 	// 会被反复调用（按持仓、按股票），必须缓存。
 	partsCache []barPartitionDir
 	partsAt    time.Time
+	// partsDirMod 是缓存分区列表时 daily_bars 目录的 mtime：目录变了（新增一天）
+	// 必须立刻重列，不能等 TTL。
+	partsDirMod time.Time
 
 	// 静态数据集缓存：内容几乎不变，读一次就留着
 	instruments []InstrumentRow
@@ -268,6 +271,14 @@ func (l *Lake) InvalidateDatasetFiles() {
 	l.barDates = nil
 	l.barDatesLoaded = false
 	l.barDatesDirMod = time.Time{}
+	// 「最新交易日」和分区目录列表也缓存过，必须一起清 ——
+	// 否则 cne 更新完成的回调之后，LatestTradeDate 还会在 TTL 内答旧日期。
+	l.recentBarDate = 0
+	l.recentBarFP = ""
+	l.recentBarAt = time.Time{}
+	l.partsCache = nil
+	l.partsAt = time.Time{}
+	l.partsDirMod = time.Time{}
 	l.barDatesMu.Unlock()
 }
 

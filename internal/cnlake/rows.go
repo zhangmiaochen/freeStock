@@ -1332,16 +1332,27 @@ type barPartitionDir struct {
 func (l *Lake) barPartitionDirs() []barPartitionDir {
 	// 结果缓存：NAS 上 os.ReadDir 6000+ 个目录要几十毫秒到几秒，
 	// 而这个函数会被 LatestTradeDate / BarPartitionDates 反复调用。
+	root := l.DatasetDir("daily_bars")
+	dirMod := time.Time{}
+	if info, statErr := os.Stat(root); statErr == nil {
+		dirMod = info.ModTime()
+	}
 	l.barDatesMu.Lock()
-	if l.partsCache != nil && time.Since(l.partsAt) <= datasetFilesTTL {
+	// 目录 mtime 没变 + 未过 TTL → 直接用缓存（一次 stat，不列目录）。
+	// 目录变了（cne 落下了新的一天）→ 立刻重列，并把「最新交易日」标记为过期。
+	if l.partsCache != nil && l.partsDirMod.Equal(dirMod) && time.Since(l.partsAt) <= datasetFilesTTL {
 		out := make([]barPartitionDir, len(l.partsCache))
 		copy(out, l.partsCache)
 		l.barDatesMu.Unlock()
 		return out
 	}
+	if l.partsCache != nil && !l.partsDirMod.Equal(dirMod) {
+		l.recentBarDate = 0
+		l.recentBarFP = ""
+		l.recentBarAt = time.Time{}
+	}
 	l.barDatesMu.Unlock()
 
-	root := l.DatasetDir("daily_bars")
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		return nil
@@ -1357,6 +1368,7 @@ func (l *Lake) barPartitionDirs() []barPartitionDir {
 	l.barDatesMu.Lock()
 	l.partsCache = out
 	l.partsAt = time.Now()
+	l.partsDirMod = dirMod
 	l.barDatesMu.Unlock()
 	copied := make([]barPartitionDir, len(out))
 	copy(copied, out)
@@ -1383,8 +1395,14 @@ func (l *Lake) latestDateFromPartitions() (int64, error) {
 	// 之前把缓存检查放在"列分区 + 读 footer"之后，每次调用都要在 NAS 上
 	// 列 6000+ 个目录、再打开当期 parquet 读 footer —— 请求就这样卡到超时。
 	// 现在 30 秒内的重复调用零 IO。
+	// 结果缓存：30 秒内、且 daily_bars 目录没变 → 零 IO。
+	// 目录变了（新增一天的分区）必须立刻重算，不能等 TTL。
+	dirMod := time.Time{}
+	if info, statErr := os.Stat(l.DatasetDir("daily_bars")); statErr == nil {
+		dirMod = info.ModTime()
+	}
 	l.barDatesMu.Lock()
-	if l.recentBarDate > 0 && time.Since(l.recentBarAt) <= datasetFilesTTL {
+	if l.recentBarDate > 0 && time.Since(l.recentBarAt) <= datasetFilesTTL && l.partsDirMod.Equal(dirMod) {
 		date := l.recentBarDate
 		l.barDatesMu.Unlock()
 		return date, nil
