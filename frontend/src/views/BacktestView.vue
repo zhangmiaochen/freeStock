@@ -595,7 +595,7 @@ async function removeSelectedRuns() {
         </div>
       </CardHeader>
       <CardContent class="overflow-auto">
-        <table class="w-full text-sm">
+        <table class="bt-cards w-full text-sm">
           <thead class="text-muted-foreground">
             <tr class="text-left">
               <th class="py-1 w-8">
@@ -608,18 +608,18 @@ async function removeSelectedRuns() {
           </thead>
           <tbody>
             <tr v-for="run in runs" :key="run.runId" class="border-t">
-              <td class="py-1">
+              <td class="py-1" data-label="选中">
                 <input type="checkbox" :value="run.runId" v-model="selectedRuns" />
               </td>
-              <td class="py-1 font-mono text-xs">{{ run.runId }}</td>
-              <td>{{ run.portfolioName }}</td>
-              <td>{{ run.strategyLabel }}</td>
-              <td class="font-mono text-xs">{{ run.startDate }}~{{ run.endDate }}</td>
-              <td class="text-right">{{ run.totalReturn?.toFixed?.(2) ?? run.totalReturn }}%</td>
-              <td class="text-right">{{ run.maxDrawdown?.toFixed?.(2) ?? run.maxDrawdown }}%</td>
-              <td class="text-right">{{ run.sharpeRatio?.toFixed?.(2) ?? run.sharpeRatio }}</td>
-              <td class="text-right">{{ run.totalTrades }}</td>
-              <td class="text-right whitespace-nowrap">
+              <td class="py-1 font-mono text-xs" data-label="运行" data-span="2">{{ run.runId }}</td>
+              <td data-label="组合" data-span="2">{{ run.portfolioName }}</td>
+              <td data-label="策略" data-span="2">{{ run.strategyLabel }}</td>
+              <td class="font-mono text-xs" data-label="区间" data-span="2">{{ run.startDate }}~{{ run.endDate }}</td>
+              <td class="text-right" data-label="总收益">{{ run.totalReturn?.toFixed?.(2) ?? run.totalReturn }}%</td>
+              <td class="text-right" data-label="回撤">{{ run.maxDrawdown?.toFixed?.(2) ?? run.maxDrawdown }}%</td>
+              <td class="text-right" data-label="夏普">{{ run.sharpeRatio?.toFixed?.(2) ?? run.sharpeRatio }}</td>
+              <td class="text-right" data-label="笔数">{{ run.totalTrades }}</td>
+              <td class="text-right whitespace-nowrap" data-label="操作" data-span="2">
                 <Button size="sm" variant="ghost" @click="openRun(run.runId)">查看</Button>
                 <AlertDialogRoot>
                   <AlertDialogTrigger as-child>
@@ -656,7 +656,7 @@ async function removeSelectedRuns() {
         <CardTitle class="text-base">成交明细（{{ trades.length }} 笔）<span class="text-muted-foreground ml-2 text-xs">{{ activeRunId }}</span></CardTitle>
       </CardHeader>
       <CardContent class="max-h-96 overflow-auto">
-        <table class="w-full text-sm">
+        <table class="bt-cards w-full text-sm">
           <thead class="text-muted-foreground sticky top-0 bg-background">
             <tr class="text-left">
               <th class="py-1">日期</th><th>代码</th><th>名称</th><th>方向</th>
@@ -667,20 +667,20 @@ async function removeSelectedRuns() {
           </thead>
           <tbody>
             <tr v-for="(t, i) in trades" :key="i" class="border-t">
-              <td class="py-1 font-mono text-xs">{{ t.tradeDate }}</td>
-              <td class="font-mono text-xs">{{ t.tsCode }}</td>
-              <td>{{ t.name }}</td>
-              <td :class="t.action === 'buy' ? 'text-rose-600' : 'text-emerald-600'">
+              <td class="py-1 font-mono text-xs" data-label="日期">{{ t.tradeDate }}</td>
+              <td class="font-mono text-xs" data-label="代码" data-span="2">{{ t.tsCode }}</td>
+              <td data-label="名称" data-span="2">{{ t.name }}</td>
+              <td :class="t.action === 'buy' ? 'text-rose-600' : 'text-emerald-600'" data-label="方向">
                 {{ t.action === "buy" ? "买入" : "卖出" }}
               </td>
-              <td class="text-right">{{ t.price?.toFixed?.(2) }}</td>
-              <td class="text-right">{{ t.shares }}</td>
-              <td class="text-right">{{ t.commission?.toFixed?.(2) }}</td>
-              <td class="text-right">{{ t.tax?.toFixed?.(2) }}</td>
-              <td class="text-right" :class="(t.profitLoss ?? 0) >= 0 ? 'text-emerald-600' : 'text-rose-600'">
+              <td class="text-right" data-label="价格">{{ t.price?.toFixed?.(2) }}</td>
+              <td class="text-right" data-label="股数">{{ t.shares }}</td>
+              <td class="text-right" data-label="手续费">{{ t.commission?.toFixed?.(2) }}</td>
+              <td class="text-right" data-label="印花税">{{ t.tax?.toFixed?.(2) }}</td>
+              <td class="text-right" data-label="已实现盈亏" data-span="2" :class="(t.profitLoss ?? 0) >= 0 ? 'text-emerald-600' : 'text-rose-600'">
                 {{ t.action === "sell" ? `${(t.profitLoss ?? 0).toFixed(2)} (${(t.profitLossPct ?? 0).toFixed(2)}%)` : "—" }}
               </td>
-              <td class="text-muted-foreground max-w-xs truncate text-xs" :title="t.reason">{{ t.reason }}</td>
+              <td class="text-muted-foreground max-w-xs truncate text-xs" data-label="原因" data-span="2" :title="t.reason">{{ t.reason }}</td>
             </tr>
           </tbody>
         </table>
@@ -688,3 +688,85 @@ async function removeSelectedRuns() {
     </Card>
   </div>
 </template>
+
+<style scoped>
+/*
+ * 移动端把两张宽表变成"卡片"。
+ *
+ * 问题：回测记录有 10 列、成交明细有 10 列，窄屏上表格被压到每列几十像素，
+ * 组合名/策略名/股票名就变成"一个字一行"（实测：质量成长+趋势回调、上海能源），
+ * 数字列也挤在一起看不出对应关系。
+ *
+ * 做法：<=768px 时隐藏表头，每个 <tr> 变成一个卡片，每个 <td> 用
+ * data-label 显示字段名、数值右对齐。纯展示改动，不动任何数据/逻辑。
+ */
+@media (max-width: 768px) {
+  .bt-cards thead {
+    display: none;
+  }
+  .bt-cards,
+  .bt-cards tbody {
+    display: block;
+    width: 100%;
+  }
+  .bt-cards tr {
+    display: grid;
+    /* minmax(0,…) 是关键：纯 1fr 的最小宽度是 min-content，
+       长 runId / 区间串会把整张卡片撑出屏幕（实测右侧被裁掉） */
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 0.2rem 0.9rem;
+    border: 1px solid var(--border);
+    border-radius: 0.6rem;
+    padding: 0.6rem 0.7rem;
+    margin-bottom: 0.6rem;
+    background: color-mix(in oklab, var(--muted-foreground) 6%, transparent);
+  }
+  .bt-cards tr.border-t {
+    border-top-width: 1px;
+  }
+  .bt-cards td {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.5rem;
+    padding: 0 !important;
+    min-width: 0;
+    text-align: left !important;
+    white-space: normal !important;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+  .bt-cards td::before {
+    content: attr(data-label);
+    color: var(--muted-foreground);
+    font-size: 0.72rem;
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
+  .bt-cards td[data-span="2"] {
+    grid-column: span 2;
+  }
+  /* 选中/操作这类没有字段名的单元格不显示前缀 */
+  .bt-cards td[data-label="选中"]::before {
+    content: none;
+  }
+  .bt-cards td[data-label="操作"] {
+    justify-content: flex-end;
+    gap: 0.25rem;
+    margin-top: 0.15rem;
+  }
+  /* 原因可能很长：卡片里换行显示，不再 truncate 成省略号 */
+  .bt-cards td[data-label="原因"] {
+    max-width: none !important;
+    white-space: normal !important;
+    overflow: visible !important;
+    text-overflow: clip !important;
+    display: block;
+    line-height: 1.35;
+  }
+  .bt-cards td[data-label="原因"]::before {
+    display: block;
+    margin-bottom: 0.1rem;
+  }
+}
+</style>
