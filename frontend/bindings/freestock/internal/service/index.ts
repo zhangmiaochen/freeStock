@@ -18,6 +18,7 @@ export {
     AutoSnapshot,
     AutoUpdateStatus,
     BackfillAllResult,
+    BackfillJobState,
     BackfillResult,
     BackfillStrategy,
     BacktestPayload,

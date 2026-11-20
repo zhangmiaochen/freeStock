@@ -3,7 +3,9 @@ package portfolio
 import (
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"strings"
+	"time"
 )
 
 // 评分物化表。
@@ -127,6 +129,33 @@ func (s *Store) DropStrengthLookupIndex() error {
 	if _, err := s.db.Exec(`DROP INDEX IF EXISTS idx_strength_lookup`); err != nil {
 		return fmt.Errorf("删除评分查询索引失败：%w", err)
 	}
+	return nil
+}
+
+// EnsureStrengthLookupIndexOnSeparateConn 用**独立连接**重建评分查询索引。
+//
+// 为什么不在主连接上做：`Store` 只有 1 个连接（SetMaxOpenConns(1)），
+// 而 6.9GB 的表建索引要好几分钟。在那几分钟里，主连接被独占，
+// 页面上任何查询都排队 —— 用户看到"回填完成了，页面又卡十几分钟"。
+// WAL 下换到独立连接写，主连接的读照常返回（读旧快照）。
+func (s *Store) EnsureStrengthLookupIndexOnSeparateConn() error {
+	if s.path == "" {
+		return s.EnsureStrengthLookupIndex()
+	}
+	db, err := sql.Open("sqlite", s.path)
+	if err != nil {
+		return fmt.Errorf("单独连接打开评分库失败：%w", err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	if _, err := db.Exec("PRAGMA busy_timeout = 60000"); err != nil {
+		return fmt.Errorf("设置 busy_timeout 失败：%w", err)
+	}
+	began := time.Now()
+	if _, err := db.Exec(strengthLookupIndexDDL); err != nil {
+		return fmt.Errorf("重建评分查询索引失败：%w", err)
+	}
+	slog.Info("评分查询索引已重建（独立连接）", "elapsed", time.Since(began).Round(time.Millisecond))
 	return nil
 }
 

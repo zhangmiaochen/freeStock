@@ -524,6 +524,110 @@ export class BackfillAllResult {
 }
 
 /**
+ * BackfillJobState 是"历史回填"后台任务的可见状态。
+ * 
+ * 为什么要有它：回填一整年（2600+ 交易日）实测要 **10 分钟**，而前端是一个
+ * 同步 HTTP 请求 —— 只要中间任何一层（代理 / 浏览器 / 长连接）掐断，
+ * 页面就会永远停在"回填中…"（服务器其实已经跑完并记了"历史回填完成"）。
+ * 改成"起任务 + 轮询状态"之后，请求是毫秒级的，页面刷新/关掉也不影响任务。
+ */
+export class BackfillJobState {
+    /**
+     * running / succeeded / failed / interrupted / idle
+     */
+    "status": string;
+    "strategyId": string;
+    "strategyLabel": string;
+    "startDate": number;
+    "endDate": number;
+    "limit": number;
+    "force": boolean;
+
+    /**
+     * 进度：按交易日
+     */
+    "daysDone": number;
+    "daysTotal": number;
+    "currentDay": number;
+
+    /**
+     * 结果摘要
+     */
+    "days": number;
+    "scored": number;
+    "reused": number;
+    "scoredFromCache": number;
+    "skippedDays": number;
+    "elapsed": string;
+    "error"?: string;
+    "startedAt"?: string;
+    "updatedAt"?: string;
+    "finishedAt"?: string;
+
+    /** Creates a new BackfillJobState instance. */
+    constructor($$source: Partial<BackfillJobState> = {}) {
+        if (!("status" in $$source)) {
+            this["status"] = "";
+        }
+        if (!("strategyId" in $$source)) {
+            this["strategyId"] = "";
+        }
+        if (!("strategyLabel" in $$source)) {
+            this["strategyLabel"] = "";
+        }
+        if (!("startDate" in $$source)) {
+            this["startDate"] = 0;
+        }
+        if (!("endDate" in $$source)) {
+            this["endDate"] = 0;
+        }
+        if (!("limit" in $$source)) {
+            this["limit"] = 0;
+        }
+        if (!("force" in $$source)) {
+            this["force"] = false;
+        }
+        if (!("daysDone" in $$source)) {
+            this["daysDone"] = 0;
+        }
+        if (!("daysTotal" in $$source)) {
+            this["daysTotal"] = 0;
+        }
+        if (!("currentDay" in $$source)) {
+            this["currentDay"] = 0;
+        }
+        if (!("days" in $$source)) {
+            this["days"] = 0;
+        }
+        if (!("scored" in $$source)) {
+            this["scored"] = 0;
+        }
+        if (!("reused" in $$source)) {
+            this["reused"] = 0;
+        }
+        if (!("scoredFromCache" in $$source)) {
+            this["scoredFromCache"] = 0;
+        }
+        if (!("skippedDays" in $$source)) {
+            this["skippedDays"] = 0;
+        }
+        if (!("elapsed" in $$source)) {
+            this["elapsed"] = "";
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new BackfillJobState instance from a string or object.
+     */
+    static createFrom($$source: any = {}): BackfillJobState {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new BackfillJobState($$parsedSource as Partial<BackfillJobState>);
+    }
+}
+
+/**
  * BackfillResult 是一次历史回填的结果。
  */
 export class BackfillResult {

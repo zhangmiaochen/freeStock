@@ -167,7 +167,7 @@ func (s *PortfolioService) MaintainDatabase() {
 		strengthStore = analytics
 	}
 	beganIdx := time.Now()
-	if err := strengthStore.EnsureStrengthLookupIndex(); err != nil {
+	if err := strengthStore.EnsureStrengthLookupIndexOnSeparateConn(); err != nil {
 		slog.Warn("确保评分查询索引失败（查询可能变慢）", "err", err)
 	} else {
 		slog.Info("评分查询索引已确认存在",

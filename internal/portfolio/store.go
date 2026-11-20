@@ -638,6 +638,24 @@ func open(path string, mode schemaMode) (*Store, error) {
 		slog.Warn("设置 busy_timeout 失败", "err", err)
 	}
 
+	// **WAL：写事务不再挡住读**。
+	//
+	// rollback journal（默认）下，只要有一个连接在写，**所有读都会被阻塞**
+	// ——而回填结束时"重建评分索引"在 6.9GB 的表上要跑好几分钟，
+	// 这段时间页面上的所有接口都会卡住（用户看到的正是"回填完成后又卡十几分钟"）。
+	// WAL 下写不挡读：索引重建期间查询照常返回旧快照。
+	//
+	// 失败只告警：放在网络文件系统上时 WAL 可能不可用，退回 rollback journal 仍能工作。
+	// 注意 WAL 会在库旁边多出 `-wal` / `-shm` 两个文件（迁移代码已按 sidecar 一起搬）。
+	if _, err := db.Exec("PRAGMA journal_mode = WAL"); err != nil {
+		slog.Warn("切换 WAL 失败（继续用 rollback journal，长写事务会阻塞读）", "err", err)
+	} else {
+		// WAL 下 NORMAL 仍能保证崩溃一致性（丢的最多是最后一个事务）
+		if _, err := db.Exec("PRAGMA synchronous = NORMAL"); err != nil {
+			slog.Warn("设置 synchronous 失败", "err", err)
+		}
+	}
+
 	// **限制 journal 大小**。
 	//
 	// SQLite 默认用 rollback journal，大小与"本次事务改动过的页数"相当。

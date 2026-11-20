@@ -64,6 +64,7 @@ import type {
   AutoPortfolioRequest,
   AutoPortfolioResult,
   BackfillAllResult,
+  BackfillJobState,
   BackfillResult,
   BacktestPayload,
   BacktestRequest,
@@ -683,6 +684,24 @@ export const api = {
       force = false,
     ) =>
       PortfolioService.RefreshBackfill(strategyId, startDate, endDate, limit, force) as Promise<BackfillResult>,
+
+    /**
+     * **后台**启动一次历史回填，立刻返回；进度用 `getBackfillJob` 轮询。
+     *
+     * 为什么不再用同步的 `refreshBackfill`：一年（2600+ 交易日）实测要 10 分钟，
+     * 而且收尾还要在 6.9GB 的评分表上重建索引 —— 这么长的 HTTP 请求只要中间
+     * 任何一层掐断，页面就永远停在"回填中…"（服务器其实早就跑完了）。
+     */
+    startBackfill: (
+      strategyId: string,
+      startDate: number,
+      endDate: number,
+      limit: number,
+      force = false,
+    ) =>
+      PortfolioService.StartBackfill(strategyId, startDate, endDate, limit, force) as Promise<BackfillJobState>,
+    /** 读取后台回填任务状态（running / succeeded / failed / interrupted / idle） */
+    getBackfillJob: () => PortfolioService.GetBackfillJob() as Promise<BackfillJobState>,
 
     /**
      * 区间回填**所有活跃策略**（原版 `refresh_backfill` 的语义 —— 它也是全局的，

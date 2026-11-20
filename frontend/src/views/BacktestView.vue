@@ -7,7 +7,7 @@
  *   ② **跑回测**：引擎逐日重放决策，信号在 T 日收盘生成、T+1 开盘执行
  *   ③ **看结果**：净值曲线 + 成交明细 + 绩效指标
  */
-import { computed, onActivated, onMounted, ref } from "vue";
+import { computed, onActivated, onMounted, onUnmounted, ref } from "vue";
 import { api } from "@/lib/backend";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -126,7 +126,60 @@ function defaultRange() {
   endDate.value = end;
 }
 
-/** ① 历史回填（增量：已算过的交易日会直接跳过） */
+/** ① 历史回填（后台任务 + 轮询；页面刷新/离开都不会丢进度） */
+const backfillJob = ref<{ status: string; daysDone: number; daysTotal: number; currentDay: number } | null>(null);
+let backfillTimer: number | undefined;
+
+function stopBackfillPoll() {
+  if (backfillTimer !== undefined) {
+    window.clearInterval(backfillTimer);
+    backfillTimer = undefined;
+  }
+}
+
+function describeBackfill(job: any) {
+  const scope = backfillLimit.value > 0 ? `前 ${backfillLimit.value} 只` : "全市场";
+  const bad = job.skippedDays ?? 0;
+  let text =
+    `历史回填完成（${scope}）：区间 ${job.days} 个交易日 — ` +
+    `新算 ${job.scored} 天` +
+    ((job.scoredFromCache ?? 0) > 0 ? `，整天跳过 ${job.scoredFromCache} 天（该日已算全）` : "") +
+    ((job.reused ?? 0) > 0 ? `，逐只复用 ${job.reused} 条` : "") +
+    (bad > 0 ? `，${bad} 天无数据或失败` : "") +
+    `，耗时 ${job.elapsed}`;
+  if ((job.scoredFromCache ?? 0) === 0 && job.scored > 0) {
+    text +=
+      (job.reused ?? 0) > 0
+        ? "。说明：切换了「回填股票数」口径，每天都有一部分股票是新补的，所以无法整天跳过。"
+        : "。说明：区间内每一天都有未算过的股票（多为刚改过「回填股票数」口径），本次把它们补齐。";
+  }
+  return text;
+}
+
+function handleBackfillJob(job: any) {
+  backfillJob.value = job;
+  if (!job || job.status === "idle") return;
+  if (job.status === "running") {
+    busy.value = "backfill";
+    const total = job.daysTotal || 0;
+    message.value = total > 0
+      ? job.daysDone >= total
+        ? `数据已全部落库（${total}/${total} 天），正在收尾：重建评分索引 / 回收空闲页 —— 大表可能要几分钟，可以离开本页`
+        : `回填中：${job.daysDone}/${total} 天（当前 ${job.currentDay || "—"}）— 可以离开本页，任务在后台继续`
+      : "回填中：正在准备交易日列表…";
+    return;
+  }
+  stopBackfillPoll();
+  busy.value = "";
+  if (job.status === "succeeded") {
+    message.value = describeBackfill(job);
+  } else if (job.status === "failed") {
+    error.value = job.error || "回填失败";
+  } else if (job.status === "interrupted") {
+    error.value = "上次回填未正常结束（进程重启或被中断）。再点一次会把缺的部分补齐。";
+  }
+}
+
 async function doBackfill(force = false) {
   const item = selected.value;
   if (!item) return;
@@ -134,54 +187,50 @@ async function doBackfill(force = false) {
   message.value = "";
   error.value = "";
   try {
-    const result = (await api.portfolio.refreshBackfill(
+    const started = (await api.portfolio.startBackfill(
       item.strategyId,
       Number(startDate.value),
       Number(endDate.value),
       backfillLimit.value,
       force,
-    )) as unknown as {
-      days: number; scored: number; skipped: string[];
-      elapsed: string; reused: number; scoredFromCache: number;
-    };
-    const scope = backfillLimit.value > 0 ? `前 ${backfillLimit.value} 只` : "全市场";
-    // ⚠ 这里有两种"跳过"，含义完全相反，**必须用不同措辞**：
-    //   - 整天已算全 → 好事（一次行情都没拉）
-    //   - 无行情/落库失败 → 需要关注
-    // 之前写成"跳过已完成 N 天"和"跳过 M 天"，字面几乎一样，极易误读成同一个东西。
-    const alreadyDone = result.scoredFromCache ?? 0; // 整天跳过
-    const partial = result.reused ?? 0; // 该日部分股票已算过、逐只复用
-    const bad = result.skipped?.length ?? 0; // 无数据 / 失败
-
-    message.value =
-      `历史回填完成（${scope}）：区间 ${result.days} 个交易日 — ` +
-      `新算 ${result.scored} 天` +
-      (alreadyDone > 0 ? `，整天跳过 ${alreadyDone} 天（该日已算全）` : "") +
-      (partial > 0 ? `，逐只复用 ${partial} 条（该日部分股票已算过）` : "") +
-      (bad > 0 ? `，${bad} 天无数据或失败` : "") +
-      `，耗时 ${result.elapsed}`;
-
-    // **解释"为什么没有跳过"** —— 这是最容易让人以为出问题的情况：
-    // 上次用「前 N 只」回填、这次改成全市场，则每天都缺上千只股票，
-    // 于是每天都要补算。行为正确，但看上去像完全没跳过。
-    if (alreadyDone === 0 && result.scored > 0) {
-      if (partial > 0) {
-        message.value +=
-          `。说明：切换了「回填股票数」口径，每天都有一部分股票是新补的，` +
-          `所以无法整天跳过。补齐后再次回填就会整天跳过了。`;
-      } else {
-        message.value +=
-          `。说明：区间内每一天都有未算过的股票（多为刚改过「回填股票数」口径），` +
-          `本次把它们补齐；补齐后再次回填同一区间就会整天跳过。`;
+    )) as unknown as { status: string };
+    handleBackfillJob(started);
+    stopBackfillPoll();
+    backfillTimer = window.setInterval(async () => {
+      try {
+        handleBackfillJob(await api.portfolio.getBackfillJob());
+      } catch {
+        // 单次轮询失败不打断（进程重启时状态会被判 interrupted）
       }
-    }
+    }, 2000);
   } catch (e) {
-    error.value = String(e);
-  } finally {
     busy.value = "";
+    error.value = String(e);
   }
 }
 
+// 进页面时若已有任务在跑（刷新/重开页面），继续显示进度
+async function resumeBackfillJob() {
+  try {
+    const job = await api.portfolio.getBackfillJob();
+    if (job && job.status === "running") {
+      handleBackfillJob(job);
+      stopBackfillPoll();
+      backfillTimer = window.setInterval(async () => {
+        try {
+          handleBackfillJob(await api.portfolio.getBackfillJob());
+        } catch {
+          /* 同上 */
+        }
+      }, 2000);
+    }
+  } catch {
+    /* 忽略 */
+  }
+}
+
+onMounted(resumeBackfillJob);
+onUnmounted(stopBackfillPoll);
 /** ② 跑回测 */
 async function doRun() {
   const item = selected.value;

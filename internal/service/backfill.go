@@ -100,6 +100,16 @@ const strengthIndexDropMinDays = 40
 func (s *PortfolioService) RefreshBackfill(
 	strategyID string, startDate, endDate, limit int, force bool,
 ) (*BackfillResult, error) {
+	return s.refreshBackfill(strategyID, startDate, endDate, limit, force, nil)
+}
+
+// refreshBackfill 是带进度回调的实现（后台任务用它更新状态文件）。
+//
+// onDay(done, total, date) 在每个交易日处理完后调用；为 nil 时行为与原来完全一致。
+func (s *PortfolioService) refreshBackfill(
+	strategyID string, startDate, endDate, limit int, force bool,
+	onDay func(done, total, date int),
+) (*BackfillResult, error) {
 	// 评分属于分析数据：配置独立分析库后，回填只写 analytics.db，
 	// 不再把几十年评分写进组合热库。未配置时继续走旧库兼容路径。
 	store, err := s.analyticsDB()
@@ -196,8 +206,16 @@ func (s *PortfolioService) RefreshBackfill(
 		} else {
 			slog.Info("批量导入前已移除评分查询索引", "tradingDays", len(dates))
 			defer func() {
+				// ⚠ **必须先把"开始重建"打出来**。
+				//
+				// 这个 defer 在 `历史回填完成` 之后才执行，而大表（实测 6.9GB、
+				// 数百万行）重建索引要**好几分钟**。以前只有成功后才打一条
+				// "索引已重建"，中间这段时间日志是静的、界面请求也一直不返回 ——
+				// 用户看到的就是"回填完成了，但页面又卡了十几分钟"。
+				slog.Info("开始重建评分查询索引（大表可能几分钟，期间查询会变慢或等待）",
+					"tradingDays", len(dates))
 				began := time.Now()
-				if err := store.EnsureStrengthLookupIndex(); err != nil {
+				if err := store.EnsureStrengthLookupIndexOnSeparateConn(); err != nil {
 					slog.Warn("重建评分查询索引失败（下次启动会自动重建）", "err", err)
 					return
 				}
@@ -270,6 +288,9 @@ func (s *PortfolioService) RefreshBackfill(
 		}
 		out.Scored++
 		out.PerDay[fmt.Sprintf("%d", date)] = len(result.Rows)
+		if onDay != nil {
+			onDay(index+1, len(dates), date)
+		}
 
 		// **按滑动窗口裁剪数据湖的批量缓存。**
 		//
@@ -312,6 +333,8 @@ func (s *PortfolioService) RefreshBackfill(
 	//
 	// 失败只告警：库仍然可用，回收是维护动作。
 	if free, total, err := store.FreePages(); err == nil && free > 0 {
+		slog.Info("开始回收空闲页（大表可能需要一段时间，期间查询会变慢）",
+			"freePages", free, "totalPages", total)
 		began := time.Now()
 		if err := store.IncrementalVacuum(); err != nil {
 			slog.Warn("回收空闲页失败（不影响使用）", "err", err)
