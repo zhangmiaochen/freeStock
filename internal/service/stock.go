@@ -793,6 +793,12 @@ func (s *StockService) ClearCache() {
 // 60s 是可接受的折中 —— 关键是**不要无限期挂着**。
 const universeQuoteBudget = 60 * time.Second
 
+// universeFallbackBudget 是"逐只回溯补抓停牌股票"的总预算。
+//
+// 实测过：缺 2526 只时逐只补抓跑了 10 分钟以上，把首屏彻底拖死。
+// 这些票只是没有当日行情（退市/长期停牌），显示「—」即可，刷新会再试。
+const universeFallbackBudget = 20 * time.Second
+
 // GetStockUniverse 返回全量股票列表（含最新行情），refresh=true 时强制刷新。
 //
 // ⚠ 这里的锁**必须老老实实等**，不能"等不到就返回错误"。
@@ -944,27 +950,32 @@ func (s *StockService) buildUniverse(
 			misses = append(misses, i)
 		}
 	}
-	// ⚠ 只有"少数票没拿到"才值得逐只回溯补抓（那是停牌/新股）。
-	// 如果大面积为空，说明是**批量取行情超预算 / 源慢**，不是停牌 ——
-	// 这时再对几千只票逐只发 `QuoteRangeDesc`，就是几千次文件打开：
-	// NAS 上等于把请求拖死（前端表现为"卡住 + 内存飙升"）。宁可先返回
-	// 部分数据（缺的显示「—」），下一次刷新再补。
-	fallbackCap := len(targets) / 3
-	if fallbackCap < 50 {
-		fallbackCap = 50
+	// ⚠ 只有"极少数票没拿到"才值得逐只回溯补抓（那是停牌/新股）。
+	// 实测：缺 2526 只时逐只补抓跑了 **10 分钟以上**（每只都要打开当期分区），
+	// 而它们只是"退市/长期停牌的历史标的"，界面上显示「—」就够。
+	// 所以阈值定得很小，并且整轮再套一个时间预算 —— 绝不允许它主导首屏。
+	fallbackCap := len(targets) / 50
+	if fallbackCap > 200 {
+		fallbackCap = 200
+	}
+	if fallbackCap < 20 {
+		fallbackCap = 20
 	}
 	if len(misses) > fallbackCap {
-		slog.Warn("跳过逐只回溯补抓：缺失比例过高，更像数据源慢而不是停牌",
+		slog.Info("跳过逐只回溯补抓：缺失代码过多（多是退市/停牌老标的）",
 			"missing", len(misses), "total", len(targets), "cap", fallbackCap)
 		misses = nil
 	}
 	if len(misses) > 0 {
 		s.emit("stock:progress", Progress{Phase: "fallback", Total: len(misses)})
 		windowStart := shiftDate(tradeDate, -fallbackWindowDays)
+		// 整轮补抓再套一个时间预算：宁可少几只显示「—」，也不能让首屏等几分钟。
+		fallbackCtx, cancelFallback := context.WithTimeout(ctx, universeFallbackBudget)
+		defer cancelFallback()
 		var fallbackDone atomic.Int64
-		runWorkers(ctx, fallbackWorkers, len(misses), func(k int) {
+		runWorkers(fallbackCtx, fallbackWorkers, len(misses), func(k int) {
 			idx := misses[k]
-			list, err := provider.QuoteRangeDesc(ctx, targets[idx].code, windowStart, tradeDate)
+			list, err := provider.QuoteRangeDesc(fallbackCtx, targets[idx].code, windowStart, tradeDate)
 			if err == nil && len(list) > 0 {
 				quotes[idx] = list[0]
 			}
