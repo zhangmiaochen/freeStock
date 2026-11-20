@@ -172,10 +172,15 @@ func TestBacktestPlanBuilderProducesLowBuyAdds(t *testing.T) {
 
 	// 当日评分行：**市场字段是 `market.KeyOf` 的 key**（sh-main / chinext），
 	// 与组合范围的 main/gem 不是同一套词表 —— 这正是词汇表那个坑。
-	rows := make([]score.Row, 0, 1100)
-	// 1000 只"烘托广度"的票：close>ma60 且 ma20>ma60，但结构不满足低吸条件
+	rows := make([]score.Row, 0, 1200)
+	// 1100 只"烘托广度"的票：close>ma60 且 ma20>ma60，但结构不满足低吸条件
 	//（close 高于 ma20*1.04），所以不会成为候选。
-	for i := 0; i < 1000; i++ {
+	//
+	// ⚠ 数量必须高于**修正后**的第一档阈值：数据湖行情是不复权的，指标默认按
+	// 后复权计算，广度就绪数整体上移约 4.5%，因此低吸档位阈值会乘 1.04
+	// （见 score.LowBuyBreadthAdjScale）→ 第一档是 1040，不再是 1000。
+	// 这里仍造 1000 只的话，闸门会判"广度不足、动态目标持仓 0"，与测试意图不符。
+	for i := 0; i < 1100; i++ {
 		rows = append(rows, score.Row{
 			Code: codeAt(i), Name: "广度票", Market: "sh-main",
 			TotalScore: 50, Amount: 1e7,
