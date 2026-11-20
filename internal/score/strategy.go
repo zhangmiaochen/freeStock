@@ -622,3 +622,13 @@ func LowBuyBreadthEntryAllowed(readyCount int, positionMode string) bool {
 	thresholds := lowBuyPositionThresholds(positionMode)
 	return readyCount >= thresholds[0][0]
 }
+
+// LowBuyPositionThreshold 返回第 tier 档（1..4）当前的广度就绪阈值
+// （已按 LowBuyBreadthAdjScale 折算）。给日志/界面展示用。
+func LowBuyPositionThreshold(tier int) int {
+	steps := lowBuyPositionThresholds("")
+	if tier < 1 || tier > len(steps) {
+		return 0
+	}
+	return steps[tier-1][0]
+}

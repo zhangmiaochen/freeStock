@@ -1048,3 +1048,81 @@ type PortfolioOptions struct {
 	DefaultBenchmark string `json:"defaultBenchmark"`
 	DefaultLayers    int    `json:"defaultLayers"`
 }
+
+// rawClosesAt 批量取某个交易日的**原始**收盘价（一次分区读，不按代码逐个查）。
+//
+// 用途：评分表/计划行里的价格是**复权价**（指标口径），而界面展示、成本价、
+// 资金折算都必须用原始价（和券商一致）。这里一次把需要的代码都取出来。
+func (s *PortfolioService) rawClosesAt(codes []string, date int) map[string]float64 {
+	out := map[string]float64{}
+	if len(codes) == 0 || date <= 0 || s.stock == nil {
+		return out
+	}
+	lake := s.stock.lakeHandle()
+	if lake == nil || !lake.HasDataset("daily_bars") {
+		return out
+	}
+	rows, err := lake.DailyBarsInRange(codes, int64(date), int64(date))
+	if err != nil {
+		slog.Warn("取原始收盘价失败（本次沿用复权价展示）", "date", date, "err", err)
+		return out
+	}
+	for _, row := range rows {
+		if row.Date() != int64(date) || row.Close <= 0 {
+			continue
+		}
+		out[portfolio.BareCode(row.Symbol)] = row.Close
+	}
+	return out
+}
+
+// CheckPriceBasisConsistency 启动自检：持仓成本价与"建仓日原始收盘"差距过大时告警。
+//
+// 只告警**不改数据**：修正仍由 `fixAdjustedEntryPrices`（打开组合详情时的一次性
+// 启发式）负责。先把问题摆到日志里，避免用户只看到"盈亏 −60%"却不知道为什么。
+func (s *PortfolioService) CheckPriceBasisConsistency() {
+	if s.stock == nil {
+		return
+	}
+	store, err := s.db()
+	if err != nil {
+		return
+	}
+	portfolios, err := store.List()
+	if err != nil {
+		return
+	}
+	warned := 0
+	for _, p := range portfolios {
+		positions, err := store.ListPositions(p.ID)
+		if err != nil {
+			continue
+		}
+		for _, pos := range positions {
+			if pos.EntryPrice <= 0 || pos.EntryDate == "" {
+				continue
+			}
+			d, convErr := strconv.Atoi(pos.EntryDate)
+			if convErr != nil || d <= 0 {
+				continue
+			}
+			raw, ok := s.rawCloseFor(pos.Code, d)
+			if !ok || raw <= 0 {
+				continue
+			}
+			ratio := pos.EntryPrice / raw
+			if ratio <= 1.25 && ratio >= 0.8 {
+				continue
+			}
+			warned++
+			slog.Warn("持仓成本价与建仓日原始收盘差距过大（可能把复权价当成了成本价）",
+				"portfolio", p.ID, "portfolioName", p.Name, "code", pos.Code,
+				"entryDate", pos.EntryDate, "entryPrice", pos.EntryPrice,
+				"rawClose", round4(raw), "ratio", fmt.Sprintf("%.2f", ratio),
+				"hint", "打开组合详情页会按原始价自动修正一次；若仍不对请手动核对成本价")
+		}
+	}
+	if warned > 0 {
+		slog.Warn("价格口径自检完成：发现可疑成本价", "count", warned)
+	}
+}

@@ -287,10 +287,20 @@ func (s *PortfolioService) CreateBacktest(req BacktestRequest) (runResult *Backt
 	}
 
 	engine := backtest.New(cfg, days, bars, benchmark)
-	// 公司行为（送转/现金分红）：只复权价格、不复权股数会让跨除权日的**名义金额**算错。
-	// 未注入（或数据湖没有 corporate_actions）时账本行为与既有实现完全一致。
-	if lk := s.stock.lakeHandle(); lk != nil && lk.HasCorporateActions() {
+	// ⚠ 公司行为**只在原始价口径下注入**。
+	//
+	// 原因（实测）：回测价格来自 `DailyHistory`，复权模式下已经是**连续复权序列**
+	//（除权日不跳空，本身即总收益序列）。此时再按送转扩股/分红入账，等于把同一笔
+	// 收益算两遍 —— 引擎实验：1 送 1 让总资产从 99,876 变成 198,876；10 元股票每股
+	// 分红 1 元凭空多出 10% 收益。
+	//
+	// 原始价口径（FREESTOCK_ADJUST=none）下价格会跳空，必须靠公司行为把股数/现金
+	// 调整回来，这条路径保持原样。
+	if lk := s.stock.lakeHandle(); shouldInjectCorporateActions(adjustMode, lk != nil && lk.HasCorporateActions()) {
 		engine.SetCorporateActions(buildBacktestActions(lk, req.StartDate, req.EndDate))
+	} else if lk != nil && lk.HasCorporateActions() {
+		slog.Info("回测不注入公司行为：价格已是复权序列（再注入会重复计算分红/送转）",
+			"adjustMode", string(adjustMode))
 	}
 	// ★ 低吸的两道闸门必须**逐日**喂进去（广度就绪数 + 指数闸门）。
 	//

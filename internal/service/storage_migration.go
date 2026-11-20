@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"freestock/internal/portfolio"
+	"freestock/internal/score"
 )
 
 // StorageMigrationState 是 UI 可见的迁移状态。
@@ -520,6 +521,20 @@ func (s *PortfolioService) LogStoragePaths() {
 		"stateCore", state.CorePath,
 		"stateAnalytics", state.AnalyticsPath,
 		"stateBacktest", state.BacktestPath)
+}
+
+// LogBreadthAdjustment 启动时打印"低吸档位阈值按什么口径折算"。
+//
+// 这个系数决定"广度到多少才开一层"。写死且不可见时，用户按原版的
+// 1000/1500/2000/2600 对照会以为参数被改了；打印出来 + 可覆盖，才说得清。
+func (s *PortfolioService) LogBreadthAdjustment() {
+	scale := score.LowBuyBreadthAdjScale
+	slog.Info("低吸广度阈值口径",
+		"adjScale", scale,
+		"tiers", fmt.Sprintf("%d/%d/%d/%d",
+			score.LowBuyPositionThreshold(1), score.LowBuyPositionThreshold(2),
+			score.LowBuyPositionThreshold(3), score.LowBuyPositionThreshold(4)),
+		"hint", "复权口径默认 ×1.04；FREESTOCK_BREADTH_ADJ_SCALE=1 表示不修正")
 }
 
 // CheckStorageConsistency 启动时核对"核心库确实是组合数据的来源"。

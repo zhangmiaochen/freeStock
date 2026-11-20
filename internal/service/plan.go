@@ -5,10 +5,13 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
+	"freestock/internal/cnlake"
 	"freestock/internal/portfolio"
 	"freestock/internal/score"
 )
@@ -135,6 +138,9 @@ func (s *PortfolioService) RefreshStrength(strategyID string, limit int, force b
 	slog.Info("评分完成",
 		"tradeDate", result.TradeDate, "新增", len(result.Rows),
 		"复用已有", reused, "含持仓", heldCount, "增量落库", incremental)
+	// 可选：用原始价再数一遍广度，用来校准 ×1.04 这个修正系数。
+	// 默认关闭（要扫全市场 ~140 天原始日线），需要时 FREESTOCK_BREADTH_DIAG=1。
+	s.logBreadthBasisDiagnostic(result.TradeDate, result.Rows)
 	return &RefreshResult{
 		TradeDate: result.TradeDate, Saved: len(result.Rows), Skipped: result.Skipped,
 		Reused: reused, Total: total,
@@ -638,6 +644,10 @@ func (s *PortfolioService) BuildPlan(portfolioID string) (*PlanResult, error) {
 		Candidates: fullPool,
 		Notes:      notes,
 	}
+	// ⚠ 计划里的价格是**复权价**（指标口径），但界面展示、成本价、资金折算要用
+	// **原始价**（与券商一致）。这里在落档/折算之前统一换算，避免用户把
+	// 复权价当成本价 → 盈亏算成 −60%（历史上真实发生过）。
+	s.convertPlanPricesToRaw(result)
 	// 落档失败**不影响建议本身** —— 记日志即可，
 	// 不要因为存档问题让用户看不到建议。
 	if snapshotStore, err := s.analyticsDB(); err == nil {
@@ -1594,4 +1604,137 @@ func (s *PortfolioService) GetStrengthSummary(strategyID string) (*StrengthSumma
 	}
 	sort.Slice(dates, func(i, j int) bool { return dates[i] > dates[j] })
 	return out, nil
+}
+
+// logBreadthBasisDiagnostic 用**原始价**再数一遍"广度就绪数"，与复权口径对比。
+//
+// 目的：低吸档位阈值乘的 1.04 是当年按分位匹配估出来的常数。这个函数把
+// 「同一天、同一批股票，在原始价与复权价下分别有多少只广度就绪」打出来，
+// 让这个系数可以被真实数据检验，而不是只能相信注释。
+//
+// 默认关闭：它要扫全市场约 140 天原始日线（~10 万行），NAS 上不便宜。
+// 需要时设 FREESTOCK_BREADTH_DIAG=1。
+func (s *PortfolioService) logBreadthBasisDiagnostic(tradeDate int, adjustedRows []score.Row) {
+	if tradeDate <= 0 || s.stock == nil {
+		return
+	}
+	if v := strings.TrimSpace(os.Getenv("FREESTOCK_BREADTH_DIAG")); v != "1" {
+		return
+	}
+	lake := s.stock.lakeHandle()
+	if lake == nil || !lake.HasDataset("daily_bars") {
+		return
+	}
+	start := shiftBack(tradeDate, 140)
+	began := time.Now()
+	rows, err := lake.DailyBarsInRange(nil, int64(start), int64(tradeDate))
+	if err != nil {
+		slog.Warn("广度口径诊断失败：读取原始日线出错", "err", err)
+		return
+	}
+	byCode := map[string][]cnlake.BarRow{}
+	for _, row := range rows {
+		if row.Date() > int64(tradeDate) {
+			continue
+		}
+		code := cnlake.BareSymbol(row.Symbol)
+		byCode[code] = append(byCode[code], row)
+	}
+	rawReady := 0
+	for _, bars := range byCode {
+		if len(bars) < 60 {
+			continue
+		}
+		sort.Slice(bars, func(i, j int) bool { return bars[i].TradeDate < bars[j].TradeDate })
+		last := bars[len(bars)-1]
+		if last.Date() != int64(tradeDate) {
+			continue // 当天没有行情（停牌）不参与
+		}
+		ma20 := averageClose(bars[len(bars)-20:])
+		ma60 := averageClose(bars[len(bars)-60:])
+		if last.Close > ma60 && ma20 > ma60 {
+			rawReady++
+		}
+	}
+	adjustedReady := lowBuyBreadthReadyCountOf(adjustedRows)
+	ratio := 1.0
+	if rawReady > 0 {
+		ratio = float64(adjustedReady) / float64(rawReady)
+	}
+	slog.Info("广度口径诊断（原始价 vs 复权价）",
+		"tradeDate", tradeDate, "rawReady", rawReady, "adjustedReady", adjustedReady,
+		"ratio", fmt.Sprintf("%.3f", ratio),
+		"adjScale", score.LowBuyBreadthAdjScale,
+		"elapsed", time.Since(began).Round(time.Millisecond).String())
+}
+
+// averageClose 求一段 bar 的收盘均值（原始价，用于广度口径诊断）。
+func averageClose(bars []cnlake.BarRow) float64 {
+	if len(bars) == 0 {
+		return 0
+	}
+	sum := 0.0
+	for _, bar := range bars {
+		sum += bar.Close
+	}
+	return sum / float64(len(bars))
+}
+
+// convertPlanPricesToRaw 把计划/候选行里的**价格字段**从复权口径换算成原始口径。
+//
+// 为什么只换价格：均线、涨跌幅、分位这些是指标，必须留在复权口径（复权序列
+// 才是总收益序列）；而 `closePrice/open/high/low` 是给人看、给成本价与资金折算用的，
+// 必须和券商行情一致。
+func (s *PortfolioService) convertPlanPricesToRaw(result *PlanResult) {
+	if result == nil || result.StrengthDate <= 0 || s.stock == nil {
+		return
+	}
+	seen := map[string]struct{}{}
+	add := func(code string) {
+		code = portfolio.BareCode(code)
+		if code != "" {
+			seen[code] = struct{}{}
+		}
+	}
+	for _, row := range result.Candidates {
+		add(row.Code)
+	}
+	for _, row := range result.Holdings {
+		add(row.Code)
+	}
+	if len(seen) == 0 {
+		return
+	}
+	codes := make([]string, 0, len(seen))
+	for code := range seen {
+		codes = append(codes, code)
+	}
+	raw := s.rawClosesAt(codes, result.StrengthDate)
+	if len(raw) == 0 {
+		return
+	}
+	scaleRow := func(row *score.Row) {
+		adjusted := row.Close
+		raww, ok := raw[portfolio.BareCode(row.Code)]
+		if !ok || raww <= 0 || adjusted <= 0 {
+			return
+		}
+		factor := raww / adjusted
+		row.Close = round4(raww)
+		if row.Open > 0 {
+			row.Open = round4(row.Open * factor)
+		}
+		if row.High > 0 {
+			row.High = round4(row.High * factor)
+		}
+		if row.Low > 0 {
+			row.Low = round4(row.Low * factor)
+		}
+	}
+	for i := range result.Candidates {
+		scaleRow(&result.Candidates[i])
+	}
+	for i := range result.Holdings {
+		scaleRow(&result.Holdings[i])
+	}
 }

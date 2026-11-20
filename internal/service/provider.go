@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -2418,10 +2419,32 @@ func (p *lakeProvider) adjustBars(bare string, bars []cnlake.BarRow) []cnlake.Ba
 //
 // 1.04 是按分位匹配实测的修正系数（见 docs/复权改造实施记录.md）。
 // 关闭复权（FREESTOCK_ADJUST=none）时保持 1.0，行为与既有 golden/parity 测试一致。
+// 可以用 `FREESTOCK_BREADTH_ADJ_SCALE` 覆盖：
+//   - 设为 1  → 不修正（等于按原始口径的 1000/1500/2000/2600 判档）；
+//   - 设为其它正数 → 按该系数折算（便于用真实数据校准，而不是写死）。
 func init() {
+	score.LowBuyBreadthAdjScale = breadthAdjScaleFromEnv()
+}
+
+// breadthAdjScaleFromEnv 解析广度修正系数。
+//
+// 优先级：显式环境变量 > 复权默认 1.04 > 原始价 1.0。
+// 非法值（负数/0/非数字）回退默认，把解析结果留给启动日志打印。
+func breadthAdjScaleFromEnv() float64 {
+	const adjustedDefault = 1.04
+	fallback := 1.0
 	if adjustMode != cnlake.AdjNone {
-		score.LowBuyBreadthAdjScale = 1.04
+		fallback = adjustedDefault
 	}
+	raw := strings.TrimSpace(os.Getenv("FREESTOCK_BREADTH_ADJ_SCALE"))
+	if raw == "" {
+		return fallback
+	}
+	value, err := strconv.ParseFloat(raw, 64)
+	if err != nil || value <= 0 {
+		return fallback
+	}
+	return value
 }
 
 // DailyBars 对 free-stockdb 走原路径再剥字段。

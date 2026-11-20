@@ -823,12 +823,17 @@ type BreadthDetail struct {
 	MinReadyCount int     `json:"minReadyCount"`
 	UniverseCount int     `json:"universeCount"`
 	ReadyScore    float64 `json:"readyScore"`
+	// AdjScale 是当前生效的"复权口径修正系数"（原始价口径为 1.0）。
+	// 低吸档位阈值 = 名义阈值 × AdjScale。界面上要能看到，否则用户按 1000
+	// 对照原版时会以为参数被悄悄改了。
+	AdjScale float64 `json:"adjScale"`
 }
 
 // BreadthOf 算出广度明细。`universe < 100` 时闸门不启用（直接放行），与原实现一致。
 func BreadthOf(universeScores []float64, strategyID string) BreadthDetail {
 	detail := BreadthDetail{
 		UniverseCount: len(universeScores),
+		AdjScale:      LowBuyBreadthAdjScale,
 	}
 	readyScore, minReadyCount := breadthThresholds(strategyID)
 	detail.ReadyScore = readyScore

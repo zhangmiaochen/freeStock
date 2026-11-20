@@ -206,11 +206,15 @@ func (s *PortfolioService) ServiceStartup(context.Context, application.ServiceOp
 	logBuildInfo()
 	// 程序认为自己在用哪几个库文件 —— 环境变量填错时这一行最直接。
 	s.LogStoragePaths()
+	// 低吸档位阈值按什么口径折算（复权 ×1.04）—— 参数可解释性。
+	s.LogBreadthAdjustment()
 	// 启动时做一次数据库维护（体检、必要时压缩、可选的评分清理）。
 	// 后台执行：它可能跑几十秒（4.9GB 库的 VACUUM），绝不能挡启动。
 	goSafe("dbMaintain", s.MaintainDatabase)
 	// 上次删除组合时若跨库清理没做完（进程被杀/文件被占用），这里补上。
 	goSafe("orphanCleanup", s.RetryPendingCleanup)
+	// 价格口径自检：持仓成本价看起来是复权价时留下 WARN（不改数据）。
+	goSafe("priceBasisCheck", s.CheckPriceBasisConsistency)
 	// 更新容器/重启进程时迁移可能被打断：后台接着跑，不用用户再点一次。
 	goSafe("resumeMigration", s.ResumeInterruptedMigration)
 	// 迁移"成功"但核心库没有组合时，必须留下可诊断的 ERROR，避免页面空白却查不出原因。

@@ -40,3 +40,12 @@ func buildBacktestActions(lake *cnlake.Lake, start, end int) map[string][]backte
 	}
 	return out
 }
+
+// shouldInjectCorporateActions 判断这次回测是否应该把公司行为注入引擎账本。
+//
+// 只有**原始价**口径需要：那时价格在除权日会跳空，必须靠送转扩股 / 现金分红
+// 把股数与现金调整回来。复权口径（hfq/qfq）下价格序列已经连续、本身就是总收益
+// 序列，再注入一次就会把同一笔分红/送转算两遍（实测 1 送 1 让总资产翻倍）。
+func shouldInjectCorporateActions(mode cnlake.AdjMode, hasActions bool) bool {
+	return hasActions && mode == cnlake.AdjNone
+}
