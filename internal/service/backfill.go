@@ -264,6 +264,10 @@ func (s *PortfolioService) RefreshBackfill(
 			continue
 		}
 		saveTotal += time.Since(saveBegan)
+		// 方案 C：把当天"原始价口径"的广度就绪数物化下来（闸门用它，不需要系数）。
+		if breadthUseRaw {
+			s.persistRawBreadth(store, date, strategyID)
+		}
 		out.Scored++
 		out.PerDay[fmt.Sprintf("%d", date)] = len(result.Rows)
 

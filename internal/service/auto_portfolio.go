@@ -272,6 +272,10 @@ func (s *PortfolioService) buildAutoCompose(req AutoPortfolioRequest) (*autoComp
 	if err != nil {
 		return nil, err
 	}
+	// 方案 C：优先用"原始口径"就绪数（原版定义，无需折算系数）
+	if raw, ok := s.rawBreadthReadyAt(analytics, strengthDate); ok {
+		breadthReady = raw
+	}
 	cfg := score.BuildStrategyConfig(
 		strategyID, state, item.TargetPositionCount, item.TotalLayers,
 		maxLayersForBacktest(strategyID, item.TotalLayers), marketScopeKey(item),

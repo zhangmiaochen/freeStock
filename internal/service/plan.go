@@ -134,6 +134,10 @@ func (s *PortfolioService) RefreshStrength(strategyID string, limit int, force b
 	if err := s.saveScoringResult(store, result, strategyID, incremental); err != nil {
 		return nil, err
 	}
+	// 方案 C：原始口径广度（闸门用它，无需折算系数）
+	if breadthUseRaw {
+		s.persistRawBreadth(store, result.TradeDate, strategyID)
+	}
 	total, _ := store.StrengthCount(int64(result.TradeDate), strategyID)
 	slog.Info("评分完成",
 		"tradeDate", result.TradeDate, "新增", len(result.Rows),
@@ -548,6 +552,11 @@ func (s *PortfolioService) BuildPlan(portfolioID string) (*PlanResult, error) {
 	breadthReady, err := analytics.LowBuyBreadthReadyCount(strengthDate, strategyID)
 	if err != nil {
 		return nil, err
+	}
+	// 优先用"原始口径"的就绪数（原版定义，物化在 market_state 里）。
+	// 它不需要任何折算系数；旧数据没有这一列（-1）时回退到上面的复权计数 × 系数。
+	if raw, ok := s.rawBreadthReadyAt(analytics, strengthDate); ok {
+		breadthReady = raw
 	}
 	cfg.LowBuyBreadthReadyCount = breadthReady
 
@@ -1737,4 +1746,54 @@ func (s *PortfolioService) convertPlanPricesToRaw(result *PlanResult) {
 	for i := range result.Holdings {
 		scaleRow(&result.Holdings[i])
 	}
+}
+
+// rawBreadthReadyAt 取某天物化的"原始口径广度就绪数"。
+//
+// 返回 ok=false 表示旧数据没有这个值（-1），调用方应回退到"复权计数 × 系数"。
+// 只有开启了 C（FREESTOCK_BREADTH_USE_RAW，默认开）时才采用它 —— 这样同一份代码
+// 可以做 A/B 对比（关掉即恢复旧行为）。
+func (s *PortfolioService) rawBreadthReadyAt(store *portfolio.Store, tradeDate int64) (int, bool) {
+	if !breadthUseRaw || store == nil || tradeDate <= 0 {
+		return 0, false
+	}
+	state, err := store.LoadMarketState(tradeDate)
+	if err != nil || state.RawBreadthReady < 0 {
+		return 0, false
+	}
+	return state.RawBreadthReady, true
+}
+
+// rawBreadthCounter 由数据湖 provider 实现；stockdb provider 没有这个方法时跳过。
+type rawBreadthCounter interface {
+	RawBreadthReadyCount(codes []string, date int) int
+}
+
+// persistRawBreadth 计算并写入某天"原始价口径"的低吸广度就绪数。
+func (s *PortfolioService) persistRawBreadth(store *portfolio.Store, tradeDate int, strategyID string) {
+	if s.stock == nil || tradeDate <= 0 {
+		return
+	}
+	provider, _ := s.stock.snapshot()
+	counter, ok := provider.(rawBreadthCounter)
+	if !ok {
+		return
+	}
+	codesSet, err := store.StrengthCodes(int64(tradeDate), strategyID)
+	if err != nil || len(codesSet) == 0 {
+		return
+	}
+	codes := make([]string, 0, len(codesSet))
+	for code := range codesSet {
+		codes = append(codes, code)
+	}
+	raw := counter.RawBreadthReadyCount(codes, tradeDate)
+	if raw <= 0 {
+		return
+	}
+	if err := store.SaveRawBreadthReady(int64(tradeDate), raw); err != nil {
+		slog.Warn("物化原始口径广度失败（闸门将回退到复权口径×系数）", "date", tradeDate, "err", err)
+		return
+	}
+	slog.Info("原始口径广度已物化", "date", tradeDate, "rawReady", raw)
 }

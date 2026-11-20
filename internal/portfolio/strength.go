@@ -615,6 +615,11 @@ func (s *Store) migrateStrength() error {
 			return fmt.Errorf("补评分列失败（%s）：%w", col, err)
 		}
 	}
+	// 老库的 market_state 没有原始口径广度列 → 补上（默认 -1 = 未知）
+	if _, err := s.db.Exec("ALTER TABLE market_state ADD COLUMN raw_breadth_ready INTEGER NOT NULL DEFAULT -1"); err != nil &&
+		!strings.Contains(err.Error(), "duplicate column") {
+		return fmt.Errorf("补市场状态列失败：%w", err)
+	}
 	return nil
 }
 
@@ -635,35 +640,74 @@ type MarketStateRow struct {
 	ProxyRet20 float64 `json:"proxyRet20"`
 	Days       int     `json:"days"`
 	CreatedAt  string  `json:"createdAt"`
+	// RawBreadthReady 是当天用**原始价**算出的"低吸广度就绪数"（原版口径）。
+	//
+	// 为什么要单独存：评分表里的 close/ma 是**复权价**，用它们数出来的就绪数
+	// 与原始口径不同（分红季差 12%~19%），以前靠一个统一系数 1.04 折算，
+	// 但那个系数随月份/年份变化。这里把"原版定义下的真实值"直接物化下来，
+	// 闸门就不需要任何系数了。
+	//
+	// -1 = 未知（旧数据/未计算），闸门会退回到"复权计数 × 系数"。
+	RawBreadthReady int `json:"rawBreadthReady"`
 }
 
 const marketStateSchema = `
 CREATE TABLE IF NOT EXISTS market_state (
-  trade_date   INTEGER PRIMARY KEY,
-  state        TEXT NOT NULL DEFAULT 'range',
-  label        TEXT NOT NULL DEFAULT '',
-  bull_score   REAL NOT NULL DEFAULT 0,
-  bear_score   REAL NOT NULL DEFAULT 0,
-  proxy_ret_20 REAL NOT NULL DEFAULT 0,
-  days         INTEGER NOT NULL DEFAULT 0,
-  created_at   TEXT NOT NULL DEFAULT ''
+  trade_date        INTEGER PRIMARY KEY,
+  state             TEXT NOT NULL DEFAULT 'range',
+  label             TEXT NOT NULL DEFAULT '',
+  bull_score        REAL NOT NULL DEFAULT 0,
+  bear_score        REAL NOT NULL DEFAULT 0,
+  proxy_ret_20      REAL NOT NULL DEFAULT 0,
+  days              INTEGER NOT NULL DEFAULT 0,
+  created_at        TEXT NOT NULL DEFAULT '',
+  raw_breadth_ready INTEGER NOT NULL DEFAULT -1
 );`
 
 // SaveMarketState 写入市场状态（同一天覆盖）。
+//
+// RawBreadthReady 只有 >0 时才覆盖旧值；传 0 表示"本次不知道"，保留库里已有的
+// 计数，避免只算市场状态的路径把已经物化好的原始口径就绪数抹成 0。
 func (s *Store) SaveMarketState(row MarketStateRow) error {
+	raw := row.RawBreadthReady
+	if raw <= 0 {
+		raw = -1
+	}
 	_, err := s.db.Exec(`
-		INSERT INTO market_state (trade_date, state, label, bull_score, bear_score, proxy_ret_20, days, created_at)
-		VALUES (?,?,?,?,?,?,?,?)
+		INSERT INTO market_state (trade_date, state, label, bull_score, bear_score, proxy_ret_20, days, created_at, raw_breadth_ready)
+		VALUES (?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(trade_date) DO UPDATE SET
 			state=excluded.state, label=excluded.label,
 			bull_score=excluded.bull_score, bear_score=excluded.bear_score,
 			proxy_ret_20=excluded.proxy_ret_20, days=excluded.days,
-			created_at=excluded.created_at`,
+			created_at=excluded.created_at,
+			raw_breadth_ready=CASE
+				WHEN excluded.raw_breadth_ready > 0 THEN excluded.raw_breadth_ready
+				ELSE market_state.raw_breadth_ready END`,
 		row.TradeDate, row.State, row.Label, row.BullScore, row.BearScore,
-		row.ProxyRet20, row.Days, nowText(),
+		row.ProxyRet20, row.Days, nowText(), raw,
 	)
 	if err != nil {
 		return fmt.Errorf("写入市场状态失败：%w", err)
+	}
+	return nil
+}
+
+// SaveRawBreadthReady 只更新某一天的"原始口径广度就绪数"（其余字段不动）。
+//
+// 评分落库与市场状态是两条路径：评分完成后才知道原始口径的就绪数，
+// 这里单独补写一列，避免重算/覆盖市场状态本身。
+func (s *Store) SaveRawBreadthReady(tradeDate int64, count int) error {
+	if tradeDate <= 0 || count < 0 {
+		return nil
+	}
+	res, err := s.db.Exec(`UPDATE market_state SET raw_breadth_ready=? WHERE trade_date=?`, count, tradeDate)
+	if err != nil {
+		return fmt.Errorf("写入原始口径广度失败：%w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		// 该日还没有市场状态 → 补一行，状态留空由后续评分覆盖
+		return s.SaveMarketState(MarketStateRow{TradeDate: tradeDate, State: "range", RawBreadthReady: count})
 	}
 	return nil
 }
@@ -673,13 +717,16 @@ func (s *Store) SaveMarketState(row MarketStateRow) error {
 func (s *Store) LoadMarketState(tradeDate int64) (MarketStateRow, error) {
 	var out MarketStateRow
 	err := s.db.QueryRow(`
-		SELECT trade_date, state, label, bull_score, bear_score, proxy_ret_20, days, created_at
+		SELECT trade_date, state, label, bull_score, bear_score, proxy_ret_20, days, created_at,
+		       COALESCE(raw_breadth_ready, -1)
 		FROM market_state WHERE trade_date=?`, tradeDate,
 	).Scan(&out.TradeDate, &out.State, &out.Label, &out.BullScore,
-		&out.BearScore, &out.ProxyRet20, &out.Days, &out.CreatedAt)
+		&out.BearScore, &out.ProxyRet20, &out.Days, &out.CreatedAt, &out.RawBreadthReady)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return MarketStateRow{TradeDate: tradeDate, State: "range", Label: "震荡/轮动"}, nil
+			// RawBreadthReady 必须显式 -1：零值 0 会被上层当成"已物化的 0 只就绪"，
+			// 从而把真实计数覆盖成 0（实测导致回测广度归零）。
+			return MarketStateRow{TradeDate: tradeDate, State: "range", Label: "震荡/轮动", RawBreadthReady: -1}, nil
 		}
 		return out, fmt.Errorf("读取市场状态失败：%w", err)
 	}

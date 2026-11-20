@@ -99,6 +99,27 @@ export function BuildPlan(portfolioID: string): $CancellablePromise<$models.Plan
 }
 
 /**
+ * CheckPriceBasisConsistency 启动自检：持仓成本价与"建仓日原始收盘"差距过大时告警。
+ * 
+ * 只告警**不改数据**：修正仍由 `fixAdjustedEntryPrices`（打开组合详情时的一次性
+ * 启发式）负责。先把问题摆到日志里，避免用户只看到"盈亏 −60%"却不知道为什么。
+ */
+export function CheckPriceBasisConsistency(): $CancellablePromise<void> {
+    return $Call.ByID(3461329975);
+}
+
+/**
+ * CheckStorageConsistency 启动时核对"核心库确实是组合数据的来源"。
+ * 
+ * 迁移显示成功、但核心库里 0 个组合、旧库里有 —— 组合页面就会是空白。
+ * 这正是用户反复遇到的"迁移完成后列表为空"。这里不自动回退（否则用户真的
+ * 删光了组合，重启后又会"复活"），但会把事实写进 ERROR 日志并给出下一步。
+ */
+export function CheckStorageConsistency(): $CancellablePromise<void> {
+    return $Call.ByID(2602161539);
+}
+
+/**
  * ClearEmailPassword 清掉已保存的授权码。
  * 
  * 单独一个方法而不是"传空串即清空"：空串已经被用来表示"不改"了，
@@ -335,6 +356,26 @@ export function ListPortfolios(): $CancellablePromise<portfolio$0.Portfolio[]> {
     return $Call.ByID(4287571721).then(($result: any) => {
         return $$createType37($result);
     });
+}
+
+/**
+ * LogBreadthAdjustment 启动时打印"低吸档位阈值按什么口径折算"。
+ * 
+ * 这个系数决定"广度到多少才开一层"。写死且不可见时，用户按原版的
+ * 1000/1500/2000/2600 对照会以为参数被改了；打印出来 + 可覆盖，才说得清。
+ */
+export function LogBreadthAdjustment(): $CancellablePromise<void> {
+    return $Call.ByID(393861939);
+}
+
+/**
+ * LogStoragePaths 启动时把"程序认为自己在用哪几个文件"打出来。
+ * 
+ * 报错信息（例如 no such table: portfolio）只说结果，不说路径；这一行让
+ * 用户一眼看到是不是 compose 里的环境变量填错了。
+ */
+export function LogStoragePaths(): $CancellablePromise<void> {
+    return $Call.ByID(1821358945);
 }
 
 /**

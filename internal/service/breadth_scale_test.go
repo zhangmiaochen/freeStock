@@ -12,11 +12,15 @@ import (
 func TestBreadthAdjScaleFromEnv(t *testing.T) {
 	origMode := adjustMode
 	origScale := score.LowBuyBreadthAdjScale
+	origRaw := breadthUseRaw
 	t.Cleanup(func() {
 		adjustMode = origMode
 		score.LowBuyBreadthAdjScale = origScale
+		breadthUseRaw = origRaw
 		os.Unsetenv("FREESTOCK_BREADTH_ADJ_SCALE")
 	})
+	// 先测"旧行为"（复权计数 × 1.04）：需要关掉方案 C
+	breadthUseRaw = false
 
 	adjustMode = cnlake.AdjHFQ
 	os.Unsetenv("FREESTOCK_BREADTH_ADJ_SCALE")
@@ -34,6 +38,13 @@ func TestBreadthAdjScaleFromEnv(t *testing.T) {
 	os.Setenv("FREESTOCK_BREADTH_ADJ_SCALE", "abc")
 	if got := breadthAdjScaleFromEnv(); got != 1.04 {
 		t.Fatalf("非法值应回退 1.04，得到 %v", got)
+	}
+
+	// 方案 C 开启时：阈值不折算（原始口径直接可用）
+	breadthUseRaw = true
+	adjustMode = cnlake.AdjHFQ
+	if got := breadthAdjScaleFromEnv(); got != 1 {
+		t.Fatalf("方案 C 默认应为 1.0，得到 %v", got)
 	}
 
 	// 原始价口径默认 1.0

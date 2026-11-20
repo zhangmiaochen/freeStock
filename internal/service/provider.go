@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"freestock/internal/cnlake"
+	"freestock/internal/portfolio"
 	"freestock/internal/score"
 	"freestock/internal/stockdb"
 )
@@ -2433,7 +2434,9 @@ func init() {
 func breadthAdjScaleFromEnv() float64 {
 	const adjustedDefault = 1.04
 	fallback := 1.0
-	if adjustMode != cnlake.AdjNone {
+	// 方案 C：闸门直接用**原始口径**就绪数 → 阈值不需要任何折算（保持 1000/1500/2000/2600）。
+	// 只有退回旧行为（FREESTOCK_BREADTH_USE_RAW=0）时才用复权口径的 1.04。
+	if !breadthUseRaw && adjustMode != cnlake.AdjNone {
 		fallback = adjustedDefault
 	}
 	raw := strings.TrimSpace(os.Getenv("FREESTOCK_BREADTH_ADJ_SCALE"))
@@ -2457,4 +2460,89 @@ func (p *stockdbProvider) DailyBars(ctx context.Context, code string, start, end
 		return nil, err
 	}
 	return barsFromQuotes(quotes), nil
+}
+
+// breadthUseRaw 决定低吸广度闸门是否使用"原始口径"就绪数（方案 C）。
+//
+// 默认开启：用原版定义（原始价算 close>ma60 且 ma20>ma60），不需要任何折算系数。
+// 设 FREESTOCK_BREADTH_USE_RAW=0 可以退回旧行为（复权计数 × 1.04），
+// 便于做 A/B 回测对比。
+var breadthUseRaw = envFlagDefaultTrue("FREESTOCK_BREADTH_USE_RAW")
+
+// envFlagDefaultTrue 解析"默认开、显式 0/false 关闭"的开关。
+func envFlagDefaultTrue(name string) bool {
+	raw := strings.ToLower(strings.TrimSpace(os.Getenv(name)))
+	switch raw {
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return true
+	}
+}
+
+// RawBreadthReadyCount 返回 codes 在 date 当天、**原始价口径**下"广度就绪"的只数。
+//
+// 口径与原版一致：close>0、ma60>0、close>ma60、ma20>ma60（都用原始收盘算），
+// 只算 A 股主体代码（原版 `_load_market_frame` 的前缀白名单）。
+//
+// ⚠ 只读**批量缓存里已有的原始 bars**（`cachedBars`），绝不在评分途中触发
+// 新的批量灌入：那会为了 60 日均线把几百天 × 全市场重新读一遍，回填时
+// 每天重来一次 → 内存直接打爆（实测回填跑到一半进程被杀）。
+// 评分/回填本来就会把 [date-320 交易日, date] 灌进缓存，这里全是内存命中。
+func (p *lakeProvider) RawBreadthReadyCount(codes []string, date int) int {
+	if p.lake == nil || date <= 0 || len(codes) == 0 {
+		return 0
+	}
+	start := shiftBack(date, 480) // ≈320 个交易日，与评分窗口一致
+	count := 0
+	missed := 0
+	for _, code := range codes {
+		bare := cnlake.BareSymbol(code)
+		if bare == "" || !portfolio.IsAShareBareCode(bare) {
+			continue
+		}
+		bars, ok := p.cachedBars(bare, start, date)
+		if !ok || len(bars) < 60 {
+			missed++
+			continue
+		}
+		end := -1
+		for i := len(bars) - 1; i >= 0; i-- {
+			if bars[i].Date() <= int64(date) {
+				end = i
+				break
+			}
+		}
+		if end < 59 || bars[end].Date() != int64(date) {
+			continue // 当天没有行情（停牌）不参与
+		}
+		if rawBreadthReady(bars[end-59 : end+1]) {
+			count++
+		}
+	}
+	if missed > 0 {
+		slog.Debug("原始口径广度：部分代码不在批量缓存里", "date", date, "missed", missed)
+	}
+	return count
+}
+
+// rawBreadthReady 用原始收盘序列判断"广度就绪"（与原版 SQL 条件逐字一致）。
+func rawBreadthReady(bars []cnlake.BarRow) bool {
+	if len(bars) < 60 {
+		return false
+	}
+	last := bars[len(bars)-1].Close
+	if last <= 0 {
+		return false
+	}
+	sum20, sum60 := 0.0, 0.0
+	for _, bar := range bars[len(bars)-20:] {
+		sum20 += bar.Close
+	}
+	for _, bar := range bars {
+		sum60 += bar.Close
+	}
+	ma20 := sum20 / 20
+	ma60 := sum60 / 60
+	return ma60 > 0 && last > ma60 && ma20 > ma60
 }

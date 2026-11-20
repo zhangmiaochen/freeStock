@@ -30,6 +30,13 @@ export class BreadthDetail {
     "universeCount": number;
     "readyScore": number;
 
+    /**
+     * AdjScale 是当前生效的"复权口径修正系数"（原始价口径为 1.0）。
+     * 低吸档位阈值 = 名义阈值 × AdjScale。界面上要能看到，否则用户按 1000
+     * 对照原版时会以为参数被悄悄改了。
+     */
+    "adjScale": number;
+
     /** Creates a new BreadthDetail instance. */
     constructor($$source: Partial<BreadthDetail> = {}) {
         if (!("enabled" in $$source)) {
@@ -46,6 +53,9 @@ export class BreadthDetail {
         }
         if (!("readyScore" in $$source)) {
             this["readyScore"] = 0;
+        }
+        if (!("adjScale" in $$source)) {
+            this["adjScale"] = 0;
         }
 
         Object.assign(this, $$source);

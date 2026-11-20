@@ -10,7 +10,8 @@ import "fmt"
 // **不再走个股上下文状态**。少了它，信号会被大幅压掉。
 func (s *Store) LoadMarketStateRange(startDate, endDate int64) ([]MarketStateRow, error) {
 	rows, err := s.db.Query(`
-		SELECT trade_date, state, label, bull_score, bear_score, proxy_ret_20, days, created_at
+		SELECT trade_date, state, label, bull_score, bear_score, proxy_ret_20, days, created_at,
+		       COALESCE(raw_breadth_ready, -1)
 		FROM market_state
 		WHERE trade_date >= ? AND trade_date <= ?
 		ORDER BY trade_date ASC`, startDate, endDate)
@@ -24,7 +25,7 @@ func (s *Store) LoadMarketStateRange(startDate, endDate int64) ([]MarketStateRow
 		var row MarketStateRow
 		if err := rows.Scan(
 			&row.TradeDate, &row.State, &row.Label, &row.BullScore,
-			&row.BearScore, &row.ProxyRet20, &row.Days, &row.CreatedAt,
+			&row.BearScore, &row.ProxyRet20, &row.Days, &row.CreatedAt, &row.RawBreadthReady,
 		); err != nil {
 			return nil, fmt.Errorf("扫描市场状态失败：%w", err)
 		}

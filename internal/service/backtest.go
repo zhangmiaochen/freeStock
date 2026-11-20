@@ -640,6 +640,10 @@ func (s *PortfolioService) buildStrengthDays(
 			order = append(order, date)
 			if state, err := store.LoadMarketState(row.TradeDate); err == nil {
 				marketByDate[date] = state.State
+				// 方案 C：优先用评分时物化的"原始口径就绪数"（-1 = 旧数据，回退）。
+				if breadthUseRaw && state.RawBreadthReady >= 0 {
+					readyByDate[date] = state.RawBreadthReady
+				}
 			}
 		}
 		byDate[date] = append(byDate[date], strengthToRow(row))
