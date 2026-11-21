@@ -136,7 +136,9 @@ function timeline(signal: {
 </script>
 
 <template>
-  <aside class="bg-card flex min-h-0 w-[350px] shrink-0 flex-col rounded-lg border">
+  <aside
+    class="bg-card flex max-h-[45vh] w-full min-h-0 shrink-0 flex-col rounded-lg border sm:max-h-none sm:w-[350px]"
+  >
     <!-- 头部 -->
     <div class="flex shrink-0 flex-wrap items-center gap-2 border-b px-3 py-2">
       <span class="text-sm font-medium">缠论</span>

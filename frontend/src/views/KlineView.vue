@@ -559,7 +559,7 @@ watch(bundle, (value) => {
 </script>
 
 <template>
-  <div class="flex h-full min-h-0 flex-col">
+  <div class="flex h-full min-h-0 flex-col overflow-y-auto sm:overflow-hidden">
     <!-- ============ 顶部工具栏 ============ -->
     <div class="shrink-0 space-y-3 border-b px-5 py-3">
       <!-- 搜索 + 周期 + 复权 -->
@@ -891,9 +891,14 @@ watch(bundle, (value) => {
         </p>
       </div>
 
-      <div class="flex min-h-0 flex-1 gap-3 px-5 py-3">
+      <div class="flex flex-none flex-col gap-3 px-3 py-3 sm:min-h-0 sm:flex-1 sm:flex-row sm:px-5">
         <div
-          :class="cn('bg-card min-h-0 flex-1 rounded-lg border p-2', loading && 'opacity-60')"
+          :class="
+            cn(
+              // 手机上竖向滑动交给页面滚动（图表只在横向拖动时自己处理），\n              // 否则手指按在图上就完全划不动页面。\n              'bg-card touch-pan-y h-[45vh] min-h-[260px] rounded-lg border p-2 sm:touch-auto sm:h-auto sm:min-h-0 sm:flex-1',
+              loading && 'opacity-60',
+            )
+          "
         >
           <KlineChart
             :candles="displayCandles"
