@@ -892,10 +892,16 @@ watch(bundle, (value) => {
       </div>
 
       <div class="flex flex-none flex-col gap-3 px-3 py-3 sm:min-h-0 sm:flex-1 sm:flex-row sm:px-5">
+        <!--
+          手机上：图表固定 45vh（有确定高度，ECharts 才有画布），竖向滑动交给页面滚动，
+          横向拖动仍归图表；桌面端恢复 h-auto 与 touch-auto。
+          ⚠ 这些解释只能写在这里 —— 写进 :class 的 JS 表达式里会被 `//` 注释掉后半行，
+          整串类名失效 → 图表高度变 0、直接不显示（踩过一次）。
+        -->
         <div
           :class="
             cn(
-              // 手机上竖向滑动交给页面滚动（图表只在横向拖动时自己处理），\n              // 否则手指按在图上就完全划不动页面。\n              'bg-card touch-pan-y h-[45vh] min-h-[260px] rounded-lg border p-2 sm:touch-auto sm:h-auto sm:min-h-0 sm:flex-1',
+              'bg-card touch-pan-y h-[45vh] min-h-[260px] rounded-lg border p-2 sm:touch-auto sm:h-auto sm:min-h-0 sm:flex-1',
               loading && 'opacity-60',
             )
           "
