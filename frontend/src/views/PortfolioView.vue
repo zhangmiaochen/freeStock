@@ -568,7 +568,8 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="flex h-full min-h-0 flex-col">
+  <!-- 手机上整页滚动：左右分栏在窄屏会改成上下堆叠，内容比一屏高 -->
+  <div class="flex h-full min-h-0 flex-col overflow-y-auto sm:overflow-hidden">
     <!-- 工具栏 -->
     <div class="flex shrink-0 flex-wrap items-center gap-3 border-b px-5 py-3">
       <Briefcase class="text-muted-foreground size-4" />
@@ -592,10 +593,11 @@ onMounted(async () => {
 
     <p v-if="error" class="text-destructive shrink-0 border-b px-5 py-2 text-xs">{{ error }}</p>
 
-    <div class="flex min-h-0 flex-1">
+    <!-- 窄屏上下堆叠：300px 的列表栏会把右侧内容挤成一条竖线 -->
+    <div class="flex min-h-0 flex-col sm:flex-1 sm:flex-row">
       <!-- ============ 左侧：组合列表 ============ -->
-      <aside class="flex w-[300px] shrink-0 flex-col border-r">
-        <div class="min-h-0 flex-1 space-y-2 overflow-auto p-3">
+      <aside class="flex w-full shrink-0 flex-col border-b sm:w-[300px] sm:border-r sm:border-b-0">
+        <div class="space-y-2 p-3 sm:min-h-0 sm:flex-1 sm:overflow-auto">
           <PortfolioForm
             v-if="formMode !== 'idle'"
             :options="options"
@@ -645,7 +647,7 @@ onMounted(async () => {
       </aside>
 
       <!-- ============ 右侧：详情 ============ -->
-      <div class="min-h-0 flex-1 overflow-auto p-4">
+      <div class="min-h-0 flex-1 overflow-visible p-4 sm:overflow-auto">
         <!-- 邮件订阅是**全局**设置（一套 SMTP、一套收件人、一个发送时间），
              所以放在"还没选组合"也能看到的位置，而不是塞进某个组合的详情里 -->
         <EmailScheduleCard
