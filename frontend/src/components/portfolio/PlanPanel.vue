@@ -44,6 +44,102 @@ const counts = computed(() => {
 /** 可执行的动作数 */
 const executableCount = computed(() => rows.value.filter((row) => row.isExecutable).length);
 
+/**
+ * 仓位变化（用户要的是"加几层 / 减几层 / 不动"，不是让他自己对照上一次）。
+ *
+ * 口径：`targetLayers - currentLayers`。
+ *   - current=0, target>0 → 新建
+ *   - target=0, current>0 → 清仓
+ *   - 其余按正负分成 加仓 / 减仓 / 不动
+ */
+type LayerKind = "new" | "add" | "reduce" | "clear" | "hold";
+
+const layerKindLabel: Record<LayerKind, string> = {
+  new: "新建",
+  add: "加仓",
+  reduce: "减仓",
+  clear: "清仓",
+  hold: "不动",
+};
+
+function layerChangeOf(row: RotationRow) {
+  const current = row.currentLayers ?? 0;
+  const target = row.targetLayers ?? current;
+  const delta = target - current;
+  let kind: LayerKind = "hold";
+  if (current === 0 && target > 0) kind = "new";
+  else if (target === 0 && current > 0) kind = "clear";
+  else if (delta > 0) kind = "add";
+  else if (delta < 0) kind = "reduce";
+  return { current, target, delta, kind };
+}
+
+/** 一句话说清这一行要做什么（层数） */
+function layerChangeText(row: RotationRow): string {
+  const change = layerChangeOf(row);
+  switch (change.kind) {
+    case "hold":
+      return "不动";
+    case "new":
+      return `新建 ${change.delta} 层`;
+    case "clear":
+      return `清仓 ${change.current} 层`;
+    case "reduce":
+      return `减仓 ${Math.abs(change.delta)} 层`;
+    default:
+      return `加仓 ${change.delta} 层`;
+  }
+}
+
+function layerBadgeVariant(kind: LayerKind): "default" | "secondary" | "outline" | "destructive" {
+  switch (kind) {
+    case "new":
+    case "add":
+      return "default";
+    case "reduce":
+      return "secondary";
+    case "clear":
+      return "destructive";
+    default:
+      return "outline";
+  }
+}
+
+/**
+ * 组合层面的汇总：总层数变化 + 各类动作几只。
+ *
+ * 计划表通常只列**要动的**行；持仓里没有对应行的就是"不动"，
+ * 这里把它们补进统计，避免用户以为"没列出来的持仓被忽略了"。
+ */
+const layerSummary = computed(() => {
+  const counts: Record<LayerKind, number> = { new: 0, add: 0, reduce: 0, clear: 0, hold: 0 };
+  let currentLayers = 0;
+  let targetLayers = 0;
+  const planned = new Set<string>();
+  for (const row of rows.value) {
+    const change = layerChangeOf(row);
+    counts[change.kind] += 1;
+    currentLayers += change.current;
+    targetLayers += change.target;
+    planned.add(row.tsCode);
+  }
+  for (const holding of props.plan.holdings ?? []) {
+    if (planned.has(holding.tsCode)) continue;
+    counts.hold += 1;
+    const layers = holding.positionLayers ?? 0;
+    currentLayers += layers;
+    targetLayers += layers;
+  }
+  const kinds = (Object.keys(counts) as LayerKind[]).filter((kind) => counts[kind] > 0);
+  return {
+    counts,
+    kinds,
+    currentLayers,
+    targetLayers,
+    delta: targetLayers - currentLayers,
+  };
+});
+
 function actionVariant(action: string): "default" | "secondary" | "outline" | "destructive" {
   switch (action) {
     case "clear":
@@ -117,6 +213,32 @@ function fmtSigned(value: number | undefined, digits = 2): string {
 
     <!-- ============ 调仓动作 ============ -->
     <div v-if="active === 'rotation'" class="overflow-auto">
+      <!-- 仓位变化汇总：不用自己对照上一次的持仓 -->
+      <div
+        v-if="rows.length > 0"
+        class="bg-muted/30 flex flex-wrap items-center gap-x-3 gap-y-1 border-b px-3 py-2 text-[11px]"
+      >
+        <span class="text-muted-foreground">今日仓位</span>
+        <span class="tabular font-medium">
+          {{ layerSummary.currentLayers }} → {{ layerSummary.targetLayers }} 层
+        </span>
+        <Badge
+          :variant="
+            layerSummary.delta > 0 ? 'default' : layerSummary.delta < 0 ? 'secondary' : 'outline'
+          "
+          class="px-1 py-0 text-[10px]"
+        >
+          {{ layerSummary.delta > 0 ? `+${layerSummary.delta}` : layerSummary.delta }} 层
+        </Badge>
+        <span class="text-muted-foreground">·</span>
+        <span
+          v-for="kind in layerSummary.kinds"
+          :key="kind"
+          class="text-muted-foreground"
+        >
+          {{ layerKindLabel[kind] }} {{ layerSummary.counts[kind] }} 只
+        </span>
+      </div>
       <p v-if="rows.length === 0" class="text-muted-foreground px-4 py-8 text-center text-xs">
         没有调仓动作
       </p>
@@ -130,7 +252,7 @@ function fmtSigned(value: number | undefined, digits = 2): string {
             <th class="px-3 py-2 text-right font-medium">分差</th>
             <th class="px-3 py-2 text-left font-medium">候选</th>
             <th class="px-3 py-2 text-right font-medium">预估提升</th>
-            <th class="px-3 py-2 text-right font-medium">层数</th>
+            <th class="px-3 py-2 text-left font-medium">仓位变化</th>
             <th class="px-3 py-2 text-left font-medium">执行</th>
             <th class="px-3 py-2 text-left font-medium">原因</th>
           </tr>
@@ -161,11 +283,20 @@ function fmtSigned(value: number | undefined, digits = 2): string {
             <td class="tabular px-3 py-1.5 text-right">
               {{ row.expectedImprovement ? fmtSigned(row.expectedImprovement) : "—" }}
             </td>
-            <td class="tabular px-3 py-1.5 text-right">
-              <span v-if="row.currentLayers !== row.targetLayers">
+            <td class="px-3 py-1.5">
+              <Badge
+                :variant="layerBadgeVariant(layerChangeOf(row).kind)"
+                class="px-1 py-0 text-[10px]"
+                :title="`当前 ${row.currentLayers} 层 → 目标 ${row.targetLayers} 层`"
+              >
+                {{ layerChangeText(row) }}
+              </Badge>
+              <span
+                v-if="row.currentLayers !== row.targetLayers"
+                class="text-muted-foreground tabular ml-1"
+              >
                 {{ row.currentLayers }} → {{ row.targetLayers }}
               </span>
-              <span v-else class="text-muted-foreground">{{ row.currentLayers }}</span>
             </td>
             <td class="px-3 py-1.5">
               <Badge v-if="row.isExecutable" variant="outline" class="px-1 py-0 text-[10px]">
