@@ -145,12 +145,19 @@ COPY --from=builder /out/freestock-server /usr/local/bin/freestock-server
 # 而不是产出一个"看起来有 cne、其实一跑就报错"的镜像 ——
 # 那种镜像到点会静默失败，最难排查。
 ARG CNE_PIP_SPEC
+# pip 装出来的命令名是 `cnequity`（console script），不一定有 `cne`。
+# 两个名字都建软链，最后只要有一个能用就算装好 —— 仍然**不做 `|| true`** 兜底：
+# 装了却装坏，镜像应该直接构建失败。
 RUN if [ -n "$CNE_PIP_SPEC" ]; then \
       python3 -m venv /opt/cne-venv \
       && /opt/cne-venv/bin/pip install --no-cache-dir --upgrade pip \
       && /opt/cne-venv/bin/pip install --no-cache-dir "$CNE_PIP_SPEC" \
-      && ln -sf /opt/cne-venv/bin/cne /usr/local/bin/cne \
-      && test -x /usr/local/bin/cne; \
+      && for name in cne cnequity; do \
+           if [ -x "/opt/cne-venv/bin/$name" ]; then \
+             ln -sf "/opt/cne-venv/bin/$name" "/usr/local/bin/$name"; \
+           fi; \
+         done \
+      && { test -x /usr/local/bin/cne || test -x /usr/local/bin/cnequity; }; \
     fi
 
 # 入口脚本负责：把 /data 属主修正成运行用户，然后降权执行。
