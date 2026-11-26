@@ -137,3 +137,125 @@ func TestFindCNECandidatesIncludeFnOSMount(t *testing.T) {
 	}
 	t.Fatalf("默认候选路径未包含 compose 中的 fnOS mount 目标 %q", want)
 }
+
+// ⚠ 这条是用户实报：Windows 桌面版上更新数据报
+// "当前运行环境是容器/NAS；宿主机安装路径对容器不可见" —— 在 Windows 上这句话
+// 完全误导，会让人以为程序把系统认错了。找不到 cne 的提示必须按平台说人话。
+func TestCNENotFoundMessageMatchesPlatform(t *testing.T) {
+	msg := cneNotFoundError([]string{`C:\somewhere\cne.exe`}).Error()
+	if inContainer() {
+		if !strings.Contains(msg, "容器") {
+			t.Errorf("容器里应提示挂载：%v", msg)
+		}
+		return
+	}
+	if strings.Contains(msg, "容器") || strings.Contains(msg, "宿主机") {
+		t.Errorf("非容器环境不应再提容器/宿主机：%v", msg)
+	}
+	if runtime.GOOS == "windows" {
+		if !strings.Contains(msg, "pip install cne") {
+			t.Errorf("Windows 上应提示 pip install cne：%v", msg)
+		}
+		if !strings.Contains(msg, "Scripts") {
+			t.Errorf("Windows 上应提示 cne.exe 在 Python 的 Scripts 目录：%v", msg)
+		}
+	}
+	if !strings.Contains(msg, `C:\somewhere\cne.exe`) {
+		t.Errorf("错误信息应列出找过的路径：%v", msg)
+	}
+}
+
+// Windows 上未配置时要扫 PATH 里的 cne.exe（pip 的 Scripts 目录常常不在 PATH，
+// 但一旦在，就不该让用户再手填）。
+func TestWindowsCNECandidatesUsePATH(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("只在 Windows 上验证 PATH 扫描")
+	}
+	dir := t.TempDir()
+	t.Setenv("PATH", dir)
+	found := false
+	for _, cand := range windowsCNECandidates() {
+		if cand == filepath.Join(dir, "cne.exe") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("候选里应包含 %q，实际 %v", filepath.Join(dir, "cne.exe"), windowsCNECandidates())
+	}
+}
+
+// 容器判定在 Windows 上必须是 false（否则又会给出挂载提示）。
+func TestInContainerFalseOnWindows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("只在 Windows 上验证")
+	}
+	if inContainer() {
+		t.Fatal("Windows 不该被判成容器")
+	}
+}
+
+// ⚠ 用户实报的另一半：pip 装 CNEquity 后可执行文件叫 **cnequity**，
+// 不是 cne。以前只找 cne/cne.exe，于是"明明装了却报找不到"。
+// 这里钉住两种名字都能解析到。
+func TestResolveCNEFindsCnequityName(t *testing.T) {
+	name := "cnequity"
+	if runtime.GOOS == "windows" {
+		name = "cnequity.exe"
+	}
+	t.Run("目录", func(t *testing.T) {
+		dir := t.TempDir()
+		exe := filepath.Join(dir, name)
+		writeFakeCNE(t, exe)
+		got, err := ResolveCNE(dir)
+		if err != nil {
+			t.Fatalf("目录里只有 %s 时也应解析成功：%v", name, err)
+		}
+		if got != exe {
+			t.Errorf("应解析到 %q，实际 %q", exe, got)
+		}
+	})
+	t.Run("venv布局", func(t *testing.T) {
+		root := t.TempDir()
+		exe := filepath.Join(root, "bin", name)
+		writeFakeCNE(t, exe)
+		got, err := ResolveCNE(root)
+		if err != nil {
+			t.Fatalf("venv 根目录下 bin/%s 也应解析成功：%v", name, err)
+		}
+		if got != exe {
+			t.Errorf("应解析到 %q，实际 %q", exe, got)
+		}
+	})
+	t.Run("PATH", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFakeCNE(t, filepath.Join(dir, name))
+		t.Setenv("PATH", dir)
+		got, err := ResolveCNE("cne")
+		if err != nil {
+			t.Fatalf("填 cne 但 PATH 里只有 %s 时也应回退找到：%v", name, err)
+		}
+		if filepath.Base(got) != name {
+			t.Errorf("应解析到 %s，实际 %q", name, got)
+		}
+	})
+}
+
+// 未配置时按 PATH 找：只要 PATH 里有 cnequity 就该找到（这是 Windows 默认情况）。
+func TestFindCNEOnPathFindsCnequity(t *testing.T) {
+	name := "cnequity"
+	if runtime.GOOS == "windows" {
+		name = "cnequity.exe"
+	}
+	dir := t.TempDir()
+	exe := filepath.Join(dir, name)
+	writeFakeCNE(t, exe)
+	t.Setenv("PATH", dir)
+	got, err := findCNEOnPath()
+	if err != nil {
+		t.Fatalf("PATH 里有 %s 时不应报找不到：%v", name, err)
+	}
+	if got != exe {
+		t.Errorf("应解析到 %q，实际 %q", exe, got)
+	}
+}
